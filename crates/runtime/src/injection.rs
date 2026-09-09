@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 
-use appport_auth_mesh_authz::{evaluate, Condition, Policy, Rule};
+use appport_auth_mesh_authz::{evaluate, Condition, DenialReason, Policy, Rule};
 use appport_auth_mesh_contract::{
-    ClaimValue, Claims, ContractVersion, Identity, IdentityId, OfflineSemantics, Principal,
-    PrincipalId, PrincipalKind, ProviderName, ProviderSubject, TenantContext,
+    Claims, ContractVersion, Identity, IdentityId, OfflineSemantics, Principal, PrincipalId,
+    PrincipalKind, ProviderName, ProviderSubject, TenantContext,
 };
-use appport_auth_mesh_dsl::{AuthConfig, ClaimKind};
+use appport_auth_mesh_dsl::AuthConfig;
+use appport_auth_mesh_providers::catalog;
 
+use crate::claims::resolve_claims as resolve_declared_claims;
+use crate::error::{AuthError, AuthLifecycleStage};
 use crate::{capability_envelope::CapabilityEnvelope, context::RuntimeContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,31 +18,6 @@ pub struct IncomingRequest {
     pub headers: HashMap<String, String>,
     pub auth_subject: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthLifecycleStage {
-    TenantResolution,
-    ProviderAuthentication,
-    IdentityResolution,
-    SessionValidation,
-    ClaimsResolution,
-    PolicyEvaluation,
-    RuntimeContext,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthError {
-    pub stage: AuthLifecycleStage,
-    pub message: String,
-}
-
-impl std::fmt::Display for AuthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for AuthError {}
 
 pub fn inject_auth_context(
     auth_config: &AuthConfig,
@@ -64,9 +42,12 @@ pub fn inject_auth_context(
         }],
     };
     let capability_envelope: CapabilityEnvelope =
-        evaluate(&policy, &principal, &tenant).map_err(|err| AuthError {
-            stage: AuthLifecycleStage::PolicyEvaluation,
-            message: err.message,
+        evaluate(&policy, &principal, &tenant).map_err(|err| {
+            AuthError::new(
+                AuthLifecycleStage::PolicyEvaluation,
+                err.message,
+                DenialReason::TenantMismatch,
+            )
         })?;
 
     build_runtime_context(tenant, principal, session_id, claims, capability_envelope)
@@ -121,10 +102,19 @@ fn authenticate_provider(
         )
     })?;
 
-    if !auth_config.providers.iter().any(|p| p == &provider) {
+    if !auth_config.declares_provider(&provider) {
         return Err(auth_error(
             AuthLifecycleStage::ProviderAuthentication,
             "auth provider is not configured for this tenant",
+        ));
+    }
+
+    // Declared is not implemented: a connector without a working flow can never
+    // authenticate a request.
+    if !catalog::describe(&provider).status.is_supported() {
+        return Err(auth_error(
+            AuthLifecycleStage::ConnectorResolution,
+            format!("connector `{}` is declared but not implemented", provider),
         ));
     }
 
@@ -209,54 +199,19 @@ fn resolve_claims(
     auth_config: &AuthConfig,
     request: &IncomingRequest,
 ) -> Result<Claims, AuthError> {
-    let mut values = HashMap::new();
-    for claim in &auth_config.claims {
-        let header = format!("x-auth-claim-{}", claim.name);
-        let raw = non_empty_header(&request.headers, &header).ok_or_else(|| {
-            auth_error(
-                AuthLifecycleStage::ClaimsResolution,
-                format!("missing required claim `{}`", claim.name),
-            )
-        })?;
-        values.insert(claim.name.clone(), parse_claim_value(&claim.kind, &raw)?);
-    }
-    Ok(Claims { values })
-}
-
-fn parse_claim_value(kind: &ClaimKind, raw: &str) -> Result<ClaimValue, AuthError> {
-    match kind {
-        ClaimKind::Enum(allowed) => {
-            if allowed.iter().any(|v| v == raw) {
-                Ok(ClaimValue::Enum(raw.to_string()))
-            } else {
-                Err(auth_error(
-                    AuthLifecycleStage::ClaimsResolution,
-                    "claim value is not allowed",
-                ))
-            }
+    let mut provided = std::collections::BTreeMap::new();
+    for (header, value) in &request.headers {
+        if let Some(name) = header.strip_prefix("x-auth-claim-") {
+            provided.insert(name.to_string(), value.clone());
         }
-        ClaimKind::String => Ok(ClaimValue::String(raw.to_string())),
-        ClaimKind::Integer => raw.parse::<i64>().map(ClaimValue::Integer).map_err(|_| {
-            auth_error(
-                AuthLifecycleStage::ClaimsResolution,
-                "claim value is not an integer",
-            )
-        }),
-        ClaimKind::Boolean => match raw {
-            "true" => Ok(ClaimValue::Boolean(true)),
-            "false" => Ok(ClaimValue::Boolean(false)),
-            _ => Err(auth_error(
-                AuthLifecycleStage::ClaimsResolution,
-                "claim value is not a boolean",
-            )),
-        },
     }
+    resolve_declared_claims(auth_config, &provided)
 }
 
 fn build_runtime_context(
     tenant: TenantContext,
     principal: Principal,
-    _session_id: String,
+    session_id: String,
     claims: Claims,
     capability_envelope: CapabilityEnvelope,
 ) -> Result<RuntimeContext, AuthError> {
@@ -270,6 +225,7 @@ fn build_runtime_context(
     Ok(RuntimeContext {
         principal,
         tenant,
+        session_id: Some(appport_auth_mesh_contract::SessionId(session_id)),
         delegation: None,
         claims,
         capabilities: capability_envelope,
@@ -286,16 +242,23 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 fn auth_error(stage: AuthLifecycleStage, message: impl Into<String>) -> AuthError {
-    AuthError {
-        stage,
-        message: message.into(),
-    }
+    let denial = match stage {
+        AuthLifecycleStage::TenantResolution => DenialReason::UnknownTenant,
+        AuthLifecycleStage::ConnectorResolution | AuthLifecycleStage::ProviderAuthentication => {
+            DenialReason::UnsupportedConnector
+        }
+        AuthLifecycleStage::SessionValidation => DenialReason::InvalidSession,
+        AuthLifecycleStage::ClaimsResolution => DenialReason::MissingClaim,
+        _ => DenialReason::UnknownPrincipal,
+    };
+    AuthError::new(stage, message, denial)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appport_auth_mesh_dsl::{ClaimDef, IsolationMode};
+    use appport_auth_mesh_contract::ClaimValue;
+    use appport_auth_mesh_dsl::{ClaimDef, ClaimKind, IsolationMode};
 
     fn auth_config() -> AuthConfig {
         AuthConfig {
@@ -306,6 +269,7 @@ mod tests {
                 kind: ClaimKind::Enum(vec!["admin".to_string(), "user".to_string()]),
             }],
             isolation: IsolationMode::Strict,
+            ..AuthConfig::default()
         }
     }
 

@@ -1,8 +1,21 @@
-use crate::model::{AuthConfig, ClaimDef, ClaimKind, IsolationMode};
+use std::collections::HashSet;
+
+use crate::model::{
+    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, UiScreen,
+    UiScreenOverride, UiTheme,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthDslError {
     pub message: String,
+}
+
+impl AuthDslError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for AuthDslError {
@@ -13,100 +26,87 @@ impl std::fmt::Display for AuthDslError {
 
 impl std::error::Error for AuthDslError {}
 
+/// A parsed value inside an auth block.
+///
+/// Both the `key: value` and the `key = value` spellings parse into the same
+/// shape, so the original MVP syntax and the capability syntax coexist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Value {
+    Scalar(String),
+    List(Vec<String>),
+    Enum(Vec<String>),
+    Block(Vec<(String, Value)>),
+}
+
+impl Value {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Scalar(_) => "scalar",
+            Self::List(_) => "list",
+            Self::Enum(_) => "enum",
+            Self::Block(_) => "block",
+        }
+    }
+}
+
 pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
     if src.matches("use auth").count() > 1 {
-        return Err(AuthDslError {
-            message: "multiple auth blocks are not allowed".to_string(),
-        });
+        return Err(AuthDslError::new("multiple auth blocks are not allowed"));
     }
 
-    let block = extract_auth_block(src)?;
+    let body = extract_auth_block(src)?;
+    let entries = Parser::new(&body).parse_entries(false)?;
 
-    let mut multi_tenant = None;
-    let mut providers = None;
-    let mut claims = Vec::new();
-    let mut isolation = None;
+    let mut config = AuthConfig::default();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut tenant_declaration: Option<bool> = None;
 
-    let mut lines = block.lines().peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    for (key, value) in entries {
+        if !seen.insert(key.clone()) {
+            return Err(AuthDslError::new(format!("duplicate auth field `{}`", key)));
         }
 
-        if trimmed == "}" || trimmed == "{" {
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("multi_tenant:") {
-            let v = value.trim();
-            multi_tenant = Some(match v {
-                "true" => true,
-                "false" => false,
-                _ => {
-                    return Err(AuthDslError {
-                        message: "multi_tenant must be true or false".to_string(),
-                    })
-                }
-            });
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("providers:") {
-            providers = Some(parse_providers(value.trim())?);
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("isolation:") {
-            isolation = Some(parse_isolation(value.trim())?);
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("claims:") {
-            let mut claims_block = value.trim().to_string();
-            if !claims_block.contains('}') {
-                while let Some(next_line) = lines.next() {
-                    claims_block.push('\n');
-                    claims_block.push_str(next_line.trim());
-                    if next_line.contains('}') {
-                        break;
+        match key.as_str() {
+            // `multi_tenant` is the original spelling, `tenant` the capability
+            // spelling. They declare the same thing.
+            "multi_tenant" | "tenant" => {
+                let declared = expect_bool(&key, &value)?;
+                if let Some(previous) = tenant_declaration {
+                    if previous != declared {
+                        return Err(AuthDslError::new("conflicting tenant declaration"));
                     }
                 }
+                tenant_declaration = Some(declared);
+                config.multi_tenant = declared;
             }
-            claims = parse_claims(&claims_block)?;
-            continue;
+            "providers" => config.providers = expect_providers(&value)?,
+            "isolation" => config.isolation = parse_isolation(expect_scalar(&key, &value)?)?,
+            "claims" => config.claims = parse_claims(&value)?,
+            "agents" => config.agents = expect_bool(&key, &value)?,
+            "ui" => config.ui = parse_ui(&value)?,
+            _ => return Err(AuthDslError::new(format!("unknown auth field `{}`", key))),
         }
-
-        return Err(AuthDslError {
-            message: format!("unknown auth field `{}`", trimmed),
-        });
     }
 
-    let config = AuthConfig {
-        multi_tenant: multi_tenant.ok_or_else(|| AuthDslError {
-            message: "missing multi_tenant".to_string(),
-        })?,
-        providers: providers.ok_or_else(|| AuthDslError {
-            message: "missing providers".to_string(),
-        })?,
-        claims,
-        isolation: isolation.ok_or_else(|| AuthDslError {
-            message: "missing isolation".to_string(),
-        })?,
-    };
-    config.validate().map_err(|err| AuthDslError {
-        message: err.message,
-    })?;
+    if config.providers.is_empty() {
+        return Err(AuthDslError::new("missing providers"));
+    }
+
+    config
+        .validate()
+        .map_err(|err| AuthDslError::new(err.message))?;
+
     Ok(config)
 }
 
 fn extract_auth_block(src: &str) -> Result<String, AuthDslError> {
-    let start = src.find("use auth").ok_or_else(|| AuthDslError {
-        message: "missing `use auth` block".to_string(),
-    })?;
-    let open = src[start..].find('{').ok_or_else(|| AuthDslError {
-        message: "missing `{` in auth block".to_string(),
-    })? + start;
+    let start = src
+        .find("use auth")
+        .ok_or_else(|| AuthDslError::new("missing `use auth` block"))?;
+    let open = src[start..]
+        .find('{')
+        .ok_or_else(|| AuthDslError::new("missing `{` in auth block"))?
+        + start;
 
     let mut depth = 0usize;
     let mut close = None;
@@ -124,107 +124,316 @@ fn extract_auth_block(src: &str) -> Result<String, AuthDslError> {
         }
     }
 
-    let close = close.ok_or_else(|| AuthDslError {
-        message: "missing closing `}` in auth block".to_string(),
-    })?;
+    let close = close.ok_or_else(|| AuthDslError::new("missing closing `}` in auth block"))?;
 
     Ok(src[open + 1..close].to_string())
 }
 
-fn parse_providers(input: &str) -> Result<Vec<String>, AuthDslError> {
-    if !(input.starts_with('[') && input.ends_with(']')) {
-        return Err(AuthDslError {
-            message: "providers must be in []".to_string(),
-        });
+struct Parser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl Parser {
+    fn new(src: &str) -> Self {
+        Self {
+            chars: src.chars().collect(),
+            pos: 0,
+        }
     }
 
-    let inner = &input[1..input.len() - 1];
-    let items = inner
-        .split(',')
-        .map(|s| s.trim().trim_matches('"').to_string())
-        .filter(|s| !s.is_empty())
+    fn parse_entries(&mut self, nested: bool) -> Result<Vec<(String, Value)>, AuthDslError> {
+        let mut entries = Vec::new();
+        loop {
+            self.skip_trivia();
+            match self.peek() {
+                None => {
+                    if nested {
+                        return Err(AuthDslError::new("missing closing `}`"));
+                    }
+                    return Ok(entries);
+                }
+                Some('}') => {
+                    if !nested {
+                        return Err(AuthDslError::new("unexpected `}`"));
+                    }
+                    self.pos += 1;
+                    return Ok(entries);
+                }
+                Some(_) => {}
+            }
+
+            let key = self.parse_ident()?;
+            self.skip_trivia();
+            match self.peek() {
+                Some(':') | Some('=') => self.pos += 1,
+                _ => {
+                    return Err(AuthDslError::new(format!(
+                        "expected `:` or `=` after `{}`",
+                        key
+                    )))
+                }
+            }
+            let value = self.parse_value()?;
+            entries.push((key, value));
+        }
+    }
+
+    fn parse_value(&mut self) -> Result<Value, AuthDslError> {
+        self.skip_trivia();
+        match self.peek() {
+            Some('{') => {
+                self.pos += 1;
+                Ok(Value::Block(self.parse_entries(true)?))
+            }
+            Some('[') => Ok(Value::List(self.parse_list()?)),
+            Some('"') => Ok(Value::Scalar(self.parse_quoted()?)),
+            Some(ch) if is_ident_char(ch) => {
+                let ident = self.parse_ident()?;
+                if ident == "enum" && self.peek() == Some('[') {
+                    return Ok(Value::Enum(self.parse_list()?));
+                }
+                Ok(Value::Scalar(ident))
+            }
+            Some(ch) => Err(AuthDslError::new(format!("unexpected character `{}`", ch))),
+            None => Err(AuthDslError::new("unexpected end of auth block")),
+        }
+    }
+
+    fn parse_list(&mut self) -> Result<Vec<String>, AuthDslError> {
+        if self.peek() != Some('[') {
+            return Err(AuthDslError::new("expected `[`"));
+        }
+        self.pos += 1;
+
+        let mut items = Vec::new();
+        loop {
+            self.skip_trivia();
+            match self.peek() {
+                Some(']') => {
+                    self.pos += 1;
+                    return Ok(items);
+                }
+                Some('"') => items.push(self.parse_quoted()?),
+                Some(ch) if is_ident_char(ch) => items.push(self.parse_ident()?),
+                Some(ch) => {
+                    return Err(AuthDslError::new(format!(
+                        "unexpected character `{}` in list",
+                        ch
+                    )))
+                }
+                None => return Err(AuthDslError::new("missing closing `]`")),
+            }
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String, AuthDslError> {
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if is_ident_char(ch) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if start == self.pos {
+            let ch = self.peek().unwrap_or(' ');
+            return Err(AuthDslError::new(format!(
+                "expected an identifier, found `{}`",
+                ch
+            )));
+        }
+        Ok(self.chars[start..self.pos].iter().collect())
+    }
+
+    fn parse_quoted(&mut self) -> Result<String, AuthDslError> {
+        self.pos += 1;
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch == '"' {
+                let value = self.chars[start..self.pos].iter().collect();
+                self.pos += 1;
+                return Ok(value);
+            }
+            self.pos += 1;
+        }
+        Err(AuthDslError::new("unterminated string"))
+    }
+
+    /// Whitespace, separators (`,`) and `#` / `//` comments carry no meaning.
+    fn skip_trivia(&mut self) {
+        loop {
+            match self.peek() {
+                Some(ch) if ch.is_whitespace() || ch == ',' => self.pos += 1,
+                Some('#') => self.skip_line(),
+                Some('/') if self.peek_at(1) == Some('/') => self.skip_line(),
+                _ => return,
+            }
+        }
+    }
+
+    fn skip_line(&mut self) {
+        while let Some(ch) = self.peek() {
+            self.pos += 1;
+            if ch == '\n' {
+                return;
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.peek_at(0)
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.pos + offset).copied()
+    }
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'
+}
+
+fn expect_scalar<'a>(key: &str, value: &'a Value) -> Result<&'a str, AuthDslError> {
+    match value {
+        Value::Scalar(scalar) => Ok(scalar),
+        other => Err(AuthDslError::new(format!(
+            "`{}` expects a value, found {}",
+            key,
+            other.kind()
+        ))),
+    }
+}
+
+fn expect_bool(key: &str, value: &Value) -> Result<bool, AuthDslError> {
+    match expect_scalar(key, value)? {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(AuthDslError::new(format!("{} must be true or false", key))),
+    }
+}
+
+fn expect_providers(value: &Value) -> Result<Vec<String>, AuthDslError> {
+    let items = match value {
+        Value::List(items) => items.clone(),
+        _ => return Err(AuthDslError::new("providers must be in []")),
+    };
+
+    let items = items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
         .collect::<Vec<_>>();
 
     if items.is_empty() {
-        return Err(AuthDslError {
-            message: "providers cannot be empty".to_string(),
-        });
+        return Err(AuthDslError::new("providers cannot be empty"));
     }
 
     Ok(items)
 }
 
 fn parse_isolation(input: &str) -> Result<IsolationMode, AuthDslError> {
-    let normalized = input.trim_matches('"').to_ascii_lowercase();
-    match normalized.as_str() {
+    match input.to_ascii_lowercase().as_str() {
         "strict" => Ok(IsolationMode::Strict),
         "shared_storage_with_policy" => Ok(IsolationMode::SharedStorageWithPolicy),
-        _ => Err(AuthDslError {
-            message: format!("unknown isolation mode `{}`", input),
-        }),
+        _ => Err(AuthDslError::new(format!(
+            "unknown isolation mode `{}`",
+            input
+        ))),
     }
 }
 
-fn parse_claims(input: &str) -> Result<Vec<ClaimDef>, AuthDslError> {
-    let open = input.find('{').ok_or_else(|| AuthDslError {
-        message: "claims must start with `{`".to_string(),
-    })?;
-    let close = input.rfind('}').ok_or_else(|| AuthDslError {
-        message: "claims must end with `}`".to_string(),
-    })?;
+fn parse_claims(value: &Value) -> Result<Vec<ClaimDef>, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("claims must be a `{ ... }` block")),
+    };
 
-    let body = &input[open + 1..close];
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim().trim_end_matches(',');
-        if trimmed.is_empty() {
-            continue;
-        }
-        let (name, raw_kind) = trimmed.split_once(':').ok_or_else(|| AuthDslError {
-            message: format!("invalid claim definition `{}`", trimmed),
-        })?;
-        out.push(ClaimDef {
-            name: name.trim().to_string(),
-            kind: parse_claim_kind(raw_kind.trim())?,
+    let mut claims = Vec::new();
+    for (name, kind) in entries {
+        claims.push(ClaimDef {
+            name: name.clone(),
+            kind: parse_claim_kind(name, kind)?,
         });
     }
-    Ok(out)
+    Ok(claims)
 }
 
-fn parse_claim_kind(input: &str) -> Result<ClaimKind, AuthDslError> {
-    if let Some(raw) = input
-        .strip_prefix("enum[")
-        .and_then(|s| s.strip_suffix(']'))
-    {
-        let variants = raw
-            .split(',')
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        if variants.is_empty() {
-            return Err(AuthDslError {
-                message: "enum claim must have values".to_string(),
-            });
-        }
-        let mut seen = std::collections::HashSet::new();
-        for variant in &variants {
-            if !seen.insert(variant) {
-                return Err(AuthDslError {
-                    message: format!("duplicate enum value `{}`", variant),
-                });
+fn parse_claim_kind(name: &str, value: &Value) -> Result<ClaimKind, AuthDslError> {
+    match value {
+        Value::Enum(variants) => {
+            let variants = variants
+                .iter()
+                .filter(|variant| !variant.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>();
+            if variants.is_empty() {
+                return Err(AuthDslError::new("enum claim must have values"));
             }
+            let mut seen = HashSet::new();
+            for variant in &variants {
+                if !seen.insert(variant) {
+                    return Err(AuthDslError::new(format!(
+                        "duplicate enum value `{}`",
+                        variant
+                    )));
+                }
+            }
+            Ok(ClaimKind::Enum(variants))
         }
-        return Ok(ClaimKind::Enum(variants));
+        Value::Scalar(scalar) => match scalar.as_str() {
+            "string" => Ok(ClaimKind::String),
+            "integer" => Ok(ClaimKind::Integer),
+            "boolean" => Ok(ClaimKind::Boolean),
+            _ => Err(AuthDslError::new(format!(
+                "unsupported claim kind `{}`",
+                scalar
+            ))),
+        },
+        other => Err(AuthDslError::new(format!(
+            "claim `{}` has an unsupported {} definition",
+            name,
+            other.kind()
+        ))),
+    }
+}
+
+fn parse_ui(value: &Value) -> Result<AuthUiConfig, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("ui must be a `{ ... }` block")),
+    };
+
+    let mut ui = AuthUiConfig::default();
+    let mut seen = HashSet::new();
+    for (key, entry) in entries {
+        if !seen.insert(key.clone()) {
+            return Err(AuthDslError::new(format!("duplicate ui field `{}`", key)));
+        }
+        if key == "theme" {
+            ui.theme = UiTheme {
+                name: expect_scalar(key, entry)?.to_string(),
+            };
+            continue;
+        }
+
+        let screen = UiScreen::parse(key)
+            .ok_or_else(|| AuthDslError::new(format!("unknown ui surface `{}`", key)))?;
+        let mode = match expect_scalar(key, entry)? {
+            "default" => AuthUiMode::Default,
+            "custom" => AuthUiMode::Custom,
+            other => {
+                return Err(AuthDslError::new(format!(
+                    "ui surface `{}` must be \"default\" or \"custom\", found `{}`",
+                    key, other
+                )))
+            }
+        };
+        ui.screens.push(UiScreenOverride { screen, mode });
     }
 
-    match input {
-        "string" => Ok(ClaimKind::String),
-        "integer" => Ok(ClaimKind::Integer),
-        "boolean" => Ok(ClaimKind::Boolean),
-        _ => Err(AuthDslError {
-            message: format!("unsupported claim kind `{}`", input),
-        }),
-    }
+    ui.validate()
+        .map_err(|err| AuthDslError::new(err.message))?;
+    Ok(ui.canonical())
 }
 
 #[cfg(test)]
@@ -250,6 +459,98 @@ use auth {
         assert_eq!(parsed.providers, vec!["local", "google", "microsoft"]);
         assert_eq!(parsed.claims.len(), 2);
         assert_eq!(parsed.isolation, IsolationMode::Strict);
+        assert!(!parsed.agents);
+        assert_eq!(parsed.ui, AuthUiConfig::default());
+    }
+
+    #[test]
+    fn parses_capability_declaration_syntax() {
+        let src = r#"
+use auth {
+  providers = [google, github, email]
+
+  tenant = true
+
+  claims = {
+    role = enum["owner", "admin", "member"]
+    plan = enum["free", "pro"]
+  }
+
+  agents = true
+}
+"#;
+
+        let parsed = parse_auth_block(src).expect("capability syntax should parse");
+        assert!(parsed.multi_tenant);
+        assert!(parsed.agents);
+        assert_eq!(parsed.providers, vec!["google", "github", "email"]);
+        assert_eq!(
+            parsed.claim("role").map(|claim| claim.kind.clone()),
+            Some(ClaimKind::Enum(vec![
+                "owner".to_string(),
+                "admin".to_string(),
+                "member".to_string()
+            ]))
+        );
+        // Isolation is an implementation detail the application need not declare.
+        assert_eq!(parsed.isolation, IsolationMode::Strict);
+    }
+
+    #[test]
+    fn both_syntaxes_produce_the_same_contract() {
+        let colon = parse_auth_block(
+            r#"
+use auth {
+  multi_tenant: true
+  providers: [local, google]
+  claims: {
+    role: enum["admin","user"]
+  }
+  isolation: "strict"
+  agents: true
+}
+"#,
+        )
+        .unwrap();
+        let equals = parse_auth_block(
+            r#"
+use auth {
+  tenant = true
+  providers = [google, local]
+  claims = {
+    role = enum["user", "admin"]
+  }
+  isolation = "strict"
+  agents = true
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(colon.fingerprint(), equals.fingerprint());
+        assert_eq!(colon.canonical(), equals.canonical());
+    }
+
+    #[test]
+    fn parses_ui_customization() {
+        let parsed = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  ui = {
+    login = "custom"
+    account = "custom"
+    theme = "midnight"
+  }
+}
+"#,
+        )
+        .expect("ui block should parse");
+
+        assert_eq!(parsed.ui.mode, AuthUiMode::Custom);
+        assert_eq!(parsed.ui.theme.name, "midnight");
+        assert_eq!(parsed.ui.mode_for(UiScreen::Login), AuthUiMode::Custom);
+        assert_eq!(parsed.ui.mode_for(UiScreen::Signup), AuthUiMode::Default);
     }
 
     #[test]
@@ -284,6 +585,40 @@ use auth {
         .unwrap();
 
         assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn agents_and_ui_participate_in_the_fingerprint() {
+        let base = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+}
+"#,
+        )
+        .unwrap();
+        let with_agents = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  agents = true
+}
+"#,
+        )
+        .unwrap();
+        let with_ui = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  ui = { login = "custom" }
+}
+"#,
+        )
+        .unwrap();
+
+        assert_ne!(base.fingerprint(), with_agents.fingerprint());
+        assert_ne!(base.fingerprint(), with_ui.fingerprint());
+        assert_ne!(with_agents.fingerprint(), with_ui.fingerprint());
     }
 
     #[test]
@@ -379,6 +714,54 @@ use auth {
             .unwrap_err()
             .message,
             "multiple auth blocks are not allowed"
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_and_repeated_declarations() {
+        assert_eq!(
+            parse_auth_block(
+                r#"
+use auth {
+  tenant = true
+  multi_tenant = false
+  providers = [local]
+}
+"#
+            )
+            .unwrap_err()
+            .message,
+            "conflicting tenant declaration"
+        );
+
+        assert_eq!(
+            parse_auth_block(
+                r#"
+use auth {
+  providers = [local]
+  providers = [google]
+}
+"#
+            )
+            .unwrap_err()
+            .message,
+            "duplicate auth field `providers`"
+        );
+
+        assert_eq!(
+            parse_auth_block("use auth {\n  tenant = true\n}\n")
+                .unwrap_err()
+                .message,
+            "missing providers"
+        );
+
+        assert_eq!(
+            parse_auth_block(
+                "use auth {\n  providers = [local]\n  ui = { login = \"fancy\" }\n}\n"
+            )
+            .unwrap_err()
+            .message,
+            "ui surface `login` must be \"default\" or \"custom\", found `fancy`"
         );
     }
 }

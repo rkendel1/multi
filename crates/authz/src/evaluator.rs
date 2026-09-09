@@ -3,7 +3,8 @@ use appport_auth_mesh_contract::{
 };
 
 use crate::policy::{
-    AuthorizationDecision, CapabilityEnvelope, Condition, DenialReason, GrantedCapability, Policy,
+    AuthorityBasis, AuthorizationDecision, CapabilityEnvelope, Condition, DenialReason,
+    GrantedCapability, Policy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,21 @@ pub fn evaluate(
     principal: &Principal,
     tenant: &TenantContext,
 ) -> Result<CapabilityEnvelope, PolicyEvaluationError> {
+    evaluate_with_delegations(policy, principal, tenant, &[], i64::MIN)
+}
+
+/// The single policy engine for every principal kind.
+///
+/// A human's authority comes from their claims; an agent's comes from its own
+/// claims *and* from live delegations. Both produce the same envelope shape,
+/// and both retain provenance.
+pub fn evaluate_with_delegations(
+    policy: &Policy,
+    principal: &Principal,
+    tenant: &TenantContext,
+    delegations: &[Delegation],
+    now: i64,
+) -> Result<CapabilityEnvelope, PolicyEvaluationError> {
     if principal.tenant_id != tenant.tenant_id {
         return Err(PolicyEvaluationError {
             message: "principal tenant does not match tenant context".to_string(),
@@ -36,6 +52,12 @@ pub fn evaluate(
         });
     }
 
+    // An agent that is not active carries no authority at all, whatever its
+    // delegator still holds.
+    if principal.kind == PrincipalKind::Agent && principal.agent_state != Some(AgentState::Active) {
+        return Ok(CapabilityEnvelope::empty());
+    }
+
     let mut granted_capabilities = Vec::new();
 
     for rule in &policy.rules {
@@ -45,15 +67,58 @@ pub fn evaluate(
                 policy_id: policy.id.clone(),
                 tenant_id: tenant.tenant_id.clone(),
                 principal_id: principal.id.clone(),
+                principal_kind: principal.kind.clone(),
+                authority: AuthorityBasis::Claim,
                 claim_basis: claim_basis(&rule.condition),
                 delegation_id: None,
+                delegated_by: None,
             });
+        }
+    }
+
+    for delegation in delegations {
+        if delegation.tenant_id != tenant.tenant_id
+            || delegation.delegate != principal.id
+            || !delegation.is_valid_at(now)
+        {
+            continue;
+        }
+        for capability in &delegation.capabilities {
+            if granted_capabilities
+                .iter()
+                .any(|grant| &grant.capability == capability)
+            {
+                continue;
+            }
+            granted_capabilities.push(delegated_grant(
+                policy, principal, tenant, delegation, capability,
+            ));
         }
     }
 
     Ok(CapabilityEnvelope {
         granted_capabilities,
     })
+}
+
+fn delegated_grant(
+    policy: &Policy,
+    principal: &Principal,
+    tenant: &TenantContext,
+    delegation: &Delegation,
+    capability: &Capability,
+) -> GrantedCapability {
+    GrantedCapability {
+        capability: capability.clone(),
+        policy_id: policy.id.clone(),
+        tenant_id: tenant.tenant_id.clone(),
+        principal_id: principal.id.clone(),
+        principal_kind: principal.kind.clone(),
+        authority: AuthorityBasis::Delegated,
+        claim_basis: vec![format!("delegation:{}", delegation.delegator)],
+        delegation_id: Some(delegation.id.clone()),
+        delegated_by: Some(delegation.delegator.clone()),
+    }
 }
 
 pub fn evaluate_capability(
@@ -100,8 +165,11 @@ pub fn evaluate_capability(
                     policy_id: policy.id.clone(),
                     tenant_id: tenant.tenant_id.clone(),
                     principal_id: principal.id.clone(),
+                    principal_kind: principal.kind.clone(),
+                    authority: AuthorityBasis::Claim,
                     claim_basis: claim_basis(&rule.condition),
                     delegation_id: None,
+                    delegated_by: None,
                 },
                 audit_event_id: None,
             };
@@ -126,14 +194,7 @@ pub fn evaluate_capability(
             return deny(DenialReason::CapabilityNotGranted);
         }
         return AuthorizationDecision::Allow {
-            grant: GrantedCapability {
-                capability: capability.clone(),
-                policy_id: policy.id.clone(),
-                tenant_id: tenant.tenant_id.clone(),
-                principal_id: principal.id.clone(),
-                claim_basis: vec![format!("delegation:{}", delegation.delegator)],
-                delegation_id: Some(delegation.id.clone()),
-            },
+            grant: delegated_grant(policy, principal, tenant, delegation, capability),
             audit_event_id: None,
         };
     }

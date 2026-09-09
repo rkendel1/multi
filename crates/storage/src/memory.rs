@@ -3,12 +3,14 @@ use std::sync::Mutex;
 
 use appport_auth_mesh_contract::{
     AgentState, AuditEventId, Claims, ContractVersion, Delegation, DelegationId, Identity,
-    IdentityId, OfflineSemantics, Principal, PrincipalId, ProviderName, ProviderSubject, SessionId,
-    StorageRootId, TenantContext, TenantId,
+    IdentityId, OfflineSemantics, Principal, PrincipalId, PrincipalKind, ProviderName,
+    ProviderSubject, SessionId, StorageRootId, TenantContext, TenantId,
 };
 
 use crate::audit_log::{AuditEvent, AuditLog};
+use crate::delegation_store::DelegationStore;
 use crate::identity_store::IdentityStore;
+use crate::principal_store::{ExternalBinding, PrincipalStore};
 use crate::session_store::{Session, SessionStore};
 use crate::tenant_root::TenantRootStore;
 use crate::StorageError;
@@ -299,14 +301,17 @@ impl TenantRootStore for MemoryTenantRoot {
 #[derive(Default)]
 pub struct MemoryPrincipalStore {
     principals: Mutex<HashMap<PrincipalId, Principal>>,
+    bindings: Mutex<HashMap<(TenantId, ProviderName, ProviderSubject), ExternalBinding>>,
 }
 
 impl MemoryPrincipalStore {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn put_principal(&self, principal: Principal) -> Result<(), StorageError> {
+impl PrincipalStore for MemoryPrincipalStore {
+    fn put_principal(&self, principal: Principal) -> Result<(), StorageError> {
         self.principals
             .lock()
             .map_err(lock_error)?
@@ -314,7 +319,7 @@ impl MemoryPrincipalStore {
         Ok(())
     }
 
-    pub fn get_principal(
+    fn get_principal(
         &self,
         tenant: &TenantContext,
         principal_id: &PrincipalId,
@@ -332,7 +337,20 @@ impl MemoryPrincipalStore {
         }
     }
 
-    pub fn set_agent_state(
+    fn list_principals(&self, tenant: &TenantContext) -> Result<Vec<Principal>, StorageError> {
+        let mut principals = self
+            .principals
+            .lock()
+            .map_err(lock_error)?
+            .values()
+            .filter(|principal| principal.tenant_id == tenant.tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        principals.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(principals)
+    }
+
+    fn set_agent_state(
         &self,
         tenant: &TenantContext,
         principal_id: &PrincipalId,
@@ -345,8 +363,107 @@ impl MemoryPrincipalStore {
         if principal.tenant_id != tenant.tenant_id {
             return Err(StorageError::new("tenant mismatch"));
         }
+        if principal.kind != PrincipalKind::Agent {
+            return Err(StorageError::new("principal is not an agent"));
+        }
         principal.agent_state = Some(state);
         Ok(())
+    }
+
+    fn update_claims(
+        &self,
+        tenant: &TenantContext,
+        principal_id: &PrincipalId,
+        claims: Claims,
+    ) -> Result<(), StorageError> {
+        let mut principals = self.principals.lock().map_err(lock_error)?;
+        let principal = principals
+            .get_mut(principal_id)
+            .ok_or_else(|| StorageError::new("unknown principal"))?;
+        if principal.tenant_id != tenant.tenant_id {
+            return Err(StorageError::new("tenant mismatch"));
+        }
+        principal.claims = claims;
+        Ok(())
+    }
+
+    fn bind_external_identity(
+        &self,
+        tenant: &TenantContext,
+        connector: &ProviderName,
+        external_subject: &ProviderSubject,
+        principal_id: &PrincipalId,
+        linked_at: i64,
+    ) -> Result<ExternalBinding, StorageError> {
+        if self.get_principal(tenant, principal_id)?.is_none() {
+            return Err(StorageError::new("unknown principal"));
+        }
+
+        let key = (
+            tenant.tenant_id.clone(),
+            connector.clone(),
+            external_subject.clone(),
+        );
+        let mut bindings = self.bindings.lock().map_err(lock_error)?;
+        if let Some(existing) = bindings.get(&key) {
+            if &existing.principal_id != principal_id {
+                // (tenant, connector, external_subject) -> exactly one principal.
+                return Err(StorageError::new(
+                    "external identity is already bound to another principal",
+                ));
+            }
+            return Ok(existing.clone());
+        }
+
+        let binding = ExternalBinding {
+            tenant_id: tenant.tenant_id.clone(),
+            connector: connector.clone(),
+            external_subject: external_subject.clone(),
+            principal_id: principal_id.clone(),
+            linked_at,
+        };
+        bindings.insert(key, binding.clone());
+        Ok(binding)
+    }
+
+    fn resolve_external_identity(
+        &self,
+        tenant: &TenantContext,
+        connector: &ProviderName,
+        external_subject: &ProviderSubject,
+    ) -> Result<Option<PrincipalId>, StorageError> {
+        let key = (
+            tenant.tenant_id.clone(),
+            connector.clone(),
+            external_subject.clone(),
+        );
+        Ok(self
+            .bindings
+            .lock()
+            .map_err(lock_error)?
+            .get(&key)
+            .map(|binding| binding.principal_id.clone()))
+    }
+
+    fn bindings_for(
+        &self,
+        tenant: &TenantContext,
+        principal_id: &PrincipalId,
+    ) -> Result<Vec<ExternalBinding>, StorageError> {
+        let mut bindings = self
+            .bindings
+            .lock()
+            .map_err(lock_error)?
+            .values()
+            .filter(|binding| {
+                binding.tenant_id == tenant.tenant_id && &binding.principal_id == principal_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        bindings.sort_by(|a, b| {
+            (&a.connector, &a.external_subject).cmp(&(&b.connector, &b.external_subject))
+        });
+        Ok(bindings)
     }
 }
 
@@ -359,19 +476,29 @@ impl MemoryDelegationStore {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn create_delegation(&self, delegation: Delegation) -> Result<Delegation, StorageError> {
+impl DelegationStore for MemoryDelegationStore {
+    fn create_delegation(&self, delegation: Delegation) -> Result<Delegation, StorageError> {
         if delegation.capabilities.is_empty() {
             return Err(StorageError::new("delegation requires capabilities"));
         }
-        self.delegations
-            .lock()
-            .map_err(lock_error)?
-            .insert(delegation.id.clone(), delegation.clone());
+        if delegation.expires_at <= delegation.issued_at {
+            return Err(StorageError::new("delegation must be time-bound"));
+        }
+        if delegation.delegator == delegation.delegate {
+            return Err(StorageError::new("delegation requires two principals"));
+        }
+
+        let mut delegations = self.delegations.lock().map_err(lock_error)?;
+        if delegations.contains_key(&delegation.id) {
+            return Err(StorageError::new("duplicate delegation"));
+        }
+        delegations.insert(delegation.id.clone(), delegation.clone());
         Ok(delegation)
     }
 
-    pub fn get_delegation(
+    fn get_delegation(
         &self,
         tenant: &TenantContext,
         delegation_id: &DelegationId,
@@ -389,7 +516,26 @@ impl MemoryDelegationStore {
         }
     }
 
-    pub fn revoke_delegation(
+    fn list_delegations_for_delegate(
+        &self,
+        tenant: &TenantContext,
+        delegate: &PrincipalId,
+    ) -> Result<Vec<Delegation>, StorageError> {
+        let mut delegations = self
+            .delegations
+            .lock()
+            .map_err(lock_error)?
+            .values()
+            .filter(|delegation| {
+                delegation.tenant_id == tenant.tenant_id && &delegation.delegate == delegate
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        delegations.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(delegations)
+    }
+
+    fn revoke_delegation(
         &self,
         tenant: &TenantContext,
         delegation_id: &DelegationId,
