@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 appport-auth-mesh-contract = { path = "../contract" }
+
+[dev-dependencies]
+appport-auth-mesh-dsl = { path = "../dsl" }
+appport-auth-mesh-storage = { path = "../storage" }

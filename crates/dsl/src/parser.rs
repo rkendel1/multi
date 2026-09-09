@@ -14,6 +14,12 @@ impl std::fmt::Display for AuthDslError {
 impl std::error::Error for AuthDslError {}
 
 pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
+    if src.matches("use auth").count() > 1 {
+        return Err(AuthDslError {
+            message: "multiple auth blocks are not allowed".to_string(),
+        });
+    }
+
     let block = extract_auth_block(src)?;
 
     let mut multi_tenant = None;
@@ -25,6 +31,10 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed == "}" || trimmed == "{" {
             continue;
         }
 
@@ -66,9 +76,13 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             claims = parse_claims(&claims_block)?;
             continue;
         }
+
+        return Err(AuthDslError {
+            message: format!("unknown auth field `{}`", trimmed),
+        });
     }
 
-    Ok(AuthConfig {
+    let config = AuthConfig {
         multi_tenant: multi_tenant.ok_or_else(|| AuthDslError {
             message: "missing multi_tenant".to_string(),
         })?,
@@ -79,7 +93,11 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
         isolation: isolation.ok_or_else(|| AuthDslError {
             message: "missing isolation".to_string(),
         })?,
-    })
+    };
+    config.validate().map_err(|err| AuthDslError {
+        message: err.message,
+    })?;
+    Ok(config)
 }
 
 fn extract_auth_block(src: &str) -> Result<String, AuthDslError> {
@@ -174,7 +192,10 @@ fn parse_claims(input: &str) -> Result<Vec<ClaimDef>, AuthDslError> {
 }
 
 fn parse_claim_kind(input: &str) -> Result<ClaimKind, AuthDslError> {
-    if let Some(raw) = input.strip_prefix("enum[").and_then(|s| s.strip_suffix(']')) {
+    if let Some(raw) = input
+        .strip_prefix("enum[")
+        .and_then(|s| s.strip_suffix(']'))
+    {
         let variants = raw
             .split(',')
             .map(|s| s.trim().trim_matches('"').to_string())
@@ -184,6 +205,14 @@ fn parse_claim_kind(input: &str) -> Result<ClaimKind, AuthDslError> {
             return Err(AuthDslError {
                 message: "enum claim must have values".to_string(),
             });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for variant in &variants {
+            if !seen.insert(variant) {
+                return Err(AuthDslError {
+                    message: format!("duplicate enum value `{}`", variant),
+                });
+            }
         }
         return Ok(ClaimKind::Enum(variants));
     }
@@ -221,5 +250,135 @@ use auth {
         assert_eq!(parsed.providers, vec!["local", "google", "microsoft"]);
         assert_eq!(parsed.claims.len(), 2);
         assert_eq!(parsed.isolation, IsolationMode::Strict);
+    }
+
+    #[test]
+    fn canonical_fingerprint_is_deterministic_for_equivalent_config() {
+        let a = parse_auth_block(
+            r#"
+use auth {
+  multi_tenant: true
+  providers: [local, agent]
+  claims: {
+    role: enum["admin","user"]
+    plan: enum["free","pro"]
+  }
+  isolation: "strict"
+}
+"#,
+        )
+        .unwrap();
+        let b = parse_auth_block(
+            r#"
+use auth {
+  multi_tenant: true
+  providers: [agent, local]
+  claims: {
+    plan: enum["pro","free"]
+    role: enum["user","admin"]
+  }
+  isolation: "strict"
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn rejects_duplicate_claims_and_unknown_fields() {
+        let duplicate_claim = r#"
+use auth {
+  multi_tenant: true
+  providers: [local]
+  claims: {
+    role: enum["admin","user"]
+    role: enum["admin","user"]
+  }
+  isolation: "strict"
+}
+"#;
+        assert_eq!(
+            parse_auth_block(duplicate_claim).unwrap_err().message,
+            "duplicate claim `role`"
+        );
+
+        let unknown_field = r#"
+use auth {
+  multi_tenant: true
+  providers: [local]
+  claims: {
+    role: enum["admin","user"]
+  }
+  isolation: "strict"
+  secret_backdoor: true
+}
+"#;
+        assert!(parse_auth_block(unknown_field)
+            .unwrap_err()
+            .message
+            .starts_with("unknown auth field"));
+    }
+
+    #[test]
+    fn rejects_duplicate_providers_duplicate_enum_values_and_multiple_blocks() {
+        assert_eq!(
+            parse_auth_block(
+                r#"
+use auth {
+  multi_tenant: true
+  providers: [local, local]
+  claims: {
+    role: enum["admin","user"]
+  }
+  isolation: "strict"
+}
+"#
+            )
+            .unwrap_err()
+            .message,
+            "duplicate provider `local`"
+        );
+
+        assert_eq!(
+            parse_auth_block(
+                r#"
+use auth {
+  multi_tenant: true
+  providers: [local]
+  claims: {
+    role: enum["admin","admin"]
+  }
+  isolation: "strict"
+}
+"#
+            )
+            .unwrap_err()
+            .message,
+            "duplicate enum value `admin`"
+        );
+
+        assert_eq!(
+            parse_auth_block(
+                r#"
+use auth {
+  multi_tenant: true
+  providers: [local]
+  claims: {}
+  isolation: "strict"
+}
+use auth {
+  multi_tenant: true
+  providers: [local]
+  claims: {}
+  isolation: "strict"
+}
+"#
+            )
+            .unwrap_err()
+            .message,
+            "multiple auth blocks are not allowed"
+        );
     }
 }
