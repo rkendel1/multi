@@ -10,7 +10,7 @@ use appport_auth_mesh_surface::BoundarySurface;
 /// stripped before the request is looked at.
 pub const RESERVED_HEADER_PREFIX: &str = "x-authport-";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Method {
     Get,
     Post,
