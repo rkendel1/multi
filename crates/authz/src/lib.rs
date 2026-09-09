@@ -1,5 +1,8 @@
 pub mod evaluator;
 pub mod policy;
 
-pub use evaluator::evaluate;
-pub use policy::{CapabilityEnvelope, Condition, Policy, Rule};
+pub use evaluator::{evaluate, evaluate_capability, PolicyEvaluationError};
+pub use policy::{
+    AuthorizationDecision, CapabilityEnvelope, Condition, DenialReason, GrantedCapability, Policy,
+    Rule,
+};

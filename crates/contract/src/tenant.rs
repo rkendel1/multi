@@ -1,17 +1,17 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant {
-    pub id: String,
+    pub id: crate::TenantId,
     pub namespace: String,
-    pub policy_id: String,
-    pub storage_root_id: String,
+    pub policy_id: crate::PolicyId,
+    pub storage_root_id: crate::StorageRootId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantContext {
-    pub tenant_id: String,
+    pub tenant_id: crate::TenantId,
     pub namespace: String,
-    pub policy_id: String,
-    pub storage_root_id: String,
+    pub policy_id: crate::PolicyId,
+    pub storage_root_id: crate::StorageRootId,
 }
 
 impl From<Tenant> for TenantContext {

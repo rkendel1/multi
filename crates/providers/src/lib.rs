@@ -10,13 +10,17 @@ pub struct ProviderIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderError {
-    pub message: String,
+pub enum ProviderError {
+    InvalidCredentials { message: String },
+    Unsupported { provider: String },
 }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        match self {
+            Self::InvalidCredentials { message } => write!(f, "{}", message),
+            Self::Unsupported { provider } => write!(f, "provider `{}` is contract only", provider),
+        }
     }
 }
 

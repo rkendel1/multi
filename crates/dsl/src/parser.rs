@@ -14,6 +14,12 @@ impl std::fmt::Display for AuthDslError {
 impl std::error::Error for AuthDslError {}
 
 pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
+    if src.matches("use auth").count() > 1 {
+        return Err(AuthDslError {
+            message: "multiple auth blocks are not allowed".to_string(),
+        });
+    }
+
     let block = extract_auth_block(src)?;
 
     let mut multi_tenant = None;
@@ -25,6 +31,10 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed == "}" || trimmed == "{" {
             continue;
         }
 
@@ -66,9 +76,13 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             claims = parse_claims(&claims_block)?;
             continue;
         }
+
+        return Err(AuthDslError {
+            message: format!("unknown auth field `{}`", trimmed),
+        });
     }
 
-    Ok(AuthConfig {
+    let config = AuthConfig {
         multi_tenant: multi_tenant.ok_or_else(|| AuthDslError {
             message: "missing multi_tenant".to_string(),
         })?,
@@ -79,7 +93,9 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
         isolation: isolation.ok_or_else(|| AuthDslError {
             message: "missing isolation".to_string(),
         })?,
-    })
+    };
+    config.validate().map_err(|err| AuthDslError { message: err.message })?;
+    Ok(config)
 }
 
 fn extract_auth_block(src: &str) -> Result<String, AuthDslError> {
@@ -184,6 +200,14 @@ fn parse_claim_kind(input: &str) -> Result<ClaimKind, AuthDslError> {
             return Err(AuthDslError {
                 message: "enum claim must have values".to_string(),
             });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for variant in &variants {
+            if !seen.insert(variant) {
+                return Err(AuthDslError {
+                    message: format!("duplicate enum value `{}`", variant),
+                });
+            }
         }
         return Ok(ClaimKind::Enum(variants));
     }

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use appport_auth_mesh_authz::{evaluate, Condition, Policy, Rule};
 use appport_auth_mesh_contract::{
-    ClaimValue, Claims, ContractVersion, Identity, OfflineSemantics, TenantContext,
+    ClaimValue, Claims, ContractVersion, Identity, IdentityId, OfflineSemantics, Principal,
+    PrincipalId, PrincipalKind, ProviderName, ProviderSubject, TenantContext,
 };
 use appport_auth_mesh_dsl::{AuthConfig, ClaimKind};
 
@@ -50,11 +51,12 @@ pub fn inject_auth_context(
     let session_id = validate_session(request, &identity)?;
     let claims = resolve_claims(auth_config, request)?;
     identity.claims = claims.clone();
+    let principal = resolve_principal(&identity, claims.clone())?;
 
     let policy = Policy {
         id: tenant.policy_id.clone(),
         rules: vec![Rule {
-            capability: "storage.read".to_string(),
+            capability: "storage.read".into(),
             condition: Condition::TimeBound {
                 start: 0,
                 end: i64::MAX,
@@ -62,12 +64,12 @@ pub fn inject_auth_context(
         }],
     };
     let capability_envelope: CapabilityEnvelope =
-        evaluate(&policy, &identity, &tenant).map_err(|err| AuthError {
+        evaluate(&policy, &principal, &tenant).map_err(|err| AuthError {
             stage: AuthLifecycleStage::PolicyEvaluation,
             message: err.message,
         })?;
 
-    build_runtime_context(tenant, identity, session_id, claims, capability_envelope)
+    build_runtime_context(tenant, principal, session_id, claims, capability_envelope)
 }
 
 fn resolve_tenant(request: &IncomingRequest) -> Result<TenantContext, AuthError> {
@@ -96,9 +98,9 @@ fn resolve_tenant(request: &IncomingRequest) -> Result<TenantContext, AuthError>
 
     Ok(TenantContext {
         namespace: tenant_id.clone(),
-        policy_id: format!("{}-default-policy", tenant_id),
-        storage_root_id: format!("{}-root", tenant_id),
-        tenant_id,
+        policy_id: format!("{}-default-policy", tenant_id).into(),
+        storage_root_id: format!("{}-root", tenant_id).into(),
+        tenant_id: tenant_id.into(),
     })
 }
 
@@ -153,11 +155,12 @@ fn resolve_identity(
     authenticated: &AuthenticatedProvider,
 ) -> Result<Identity, AuthError> {
     Ok(Identity {
-        id: format!(
+        id: IdentityId(format!(
             "{}:{}:{}",
             tenant.tenant_id, authenticated.provider, authenticated.subject
-        ),
-        provider: authenticated.provider.clone(),
+        )),
+        provider: ProviderName(authenticated.provider.clone()),
+        provider_subject: ProviderSubject(authenticated.subject.clone()),
         tenant_id: tenant.tenant_id.clone(),
         claims: Claims {
             values: HashMap::new(),
@@ -170,12 +173,28 @@ fn resolve_identity(
     })
 }
 
+fn resolve_principal(identity: &Identity, claims: Claims) -> Result<Principal, AuthError> {
+    let kind = match identity.provider.as_str() {
+        "agent" => PrincipalKind::Agent,
+        "service" => PrincipalKind::Service,
+        _ => PrincipalKind::Human,
+    };
+    Ok(Principal {
+        id: PrincipalId(identity.id.to_string()),
+        kind,
+        tenant_id: identity.tenant_id.clone(),
+        claims,
+        version: identity.version.clone(),
+        agent_state: None,
+    })
+}
+
 fn validate_session(request: &IncomingRequest, identity: &Identity) -> Result<String, AuthError> {
     let session_id = non_empty_header(&request.headers, "x-session-id")
         .ok_or_else(|| auth_error(AuthLifecycleStage::SessionValidation, "missing session id"))?;
 
     if let Some(session_identity_id) = non_empty_header(&request.headers, "x-session-identity-id") {
-        if session_identity_id != identity.id {
+        if session_identity_id != identity.id.to_string() {
             return Err(auth_error(
                 AuthLifecycleStage::SessionValidation,
                 "session identity does not match resolved identity",
@@ -236,12 +255,12 @@ fn parse_claim_value(kind: &ClaimKind, raw: &str) -> Result<ClaimValue, AuthErro
 
 fn build_runtime_context(
     tenant: TenantContext,
-    identity: Identity,
-    session_id: String,
+    principal: Principal,
+    _session_id: String,
     claims: Claims,
     capability_envelope: CapabilityEnvelope,
 ) -> Result<RuntimeContext, AuthError> {
-    if identity.tenant_id != tenant.tenant_id || identity.claims != claims {
+    if principal.tenant_id != tenant.tenant_id || principal.claims != claims {
         return Err(auth_error(
             AuthLifecycleStage::RuntimeContext,
             "runtime context inputs do not match",
@@ -249,11 +268,11 @@ fn build_runtime_context(
     }
 
     Ok(RuntimeContext {
-        identity,
+        principal,
         tenant,
-        session_id,
+        delegation: None,
         claims,
-        capability_envelope,
+        capabilities: capability_envelope,
     })
 }
 
@@ -314,18 +333,14 @@ mod tests {
         let context =
             inject_auth_context(&auth_config(), &request).expect("auth lifecycle should succeed");
 
-        assert_eq!(context.tenant.tenant_id, "tenant-a");
-        assert_eq!(context.identity.provider, "local");
-        assert_eq!(context.identity.tenant_id, "tenant-a");
-        assert_eq!(context.session_id, "session-1");
+        assert_eq!(context.tenant.tenant_id, "tenant-a".into());
+        assert_eq!(context.principal.kind, PrincipalKind::Human);
+        assert_eq!(context.principal.tenant_id, "tenant-a".into());
         assert_eq!(
             context.claims.values.get("role"),
             Some(&ClaimValue::Enum("admin".to_string()))
         );
-        assert_eq!(
-            context.capability_envelope.granted_capabilities,
-            vec!["storage.read"]
-        );
+        assert_eq!(context.capabilities.capabilities(), vec!["storage.read".into()]);
     }
 
     #[test]
