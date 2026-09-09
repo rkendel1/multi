@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use appport_auth_mesh_contract::TenantContext;
+
 use crate::StorageError;
 
 pub trait AuditLog {
-    fn record_event(&self, event: AuditEvent) -> Result<(), StorageError>;
+    fn record_event(&self, tenant: &TenantContext, event: AuditEvent) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

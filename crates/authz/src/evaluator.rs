@@ -1,8 +1,37 @@
-use appport_auth_mesh_contract::{Identity, Tenant};
+use appport_auth_mesh_contract::{Identity, TenantContext};
 
 use crate::policy::{CapabilityEnvelope, Condition, Policy};
 
-pub fn evaluate(policy: &Policy, identity: &Identity, _tenant: &Tenant) -> CapabilityEnvelope {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEvaluationError {
+    pub message: String,
+}
+
+impl std::fmt::Display for PolicyEvaluationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for PolicyEvaluationError {}
+
+pub fn evaluate(
+    policy: &Policy,
+    identity: &Identity,
+    tenant: &TenantContext,
+) -> Result<CapabilityEnvelope, PolicyEvaluationError> {
+    if identity.tenant_id != tenant.tenant_id {
+        return Err(PolicyEvaluationError {
+            message: "identity tenant does not match tenant context".to_string(),
+        });
+    }
+
+    if policy.id != tenant.policy_id {
+        return Err(PolicyEvaluationError {
+            message: "policy does not match tenant context".to_string(),
+        });
+    }
+
     let mut granted_capabilities = Vec::new();
 
     for rule in &policy.rules {
@@ -11,9 +40,9 @@ pub fn evaluate(policy: &Policy, identity: &Identity, _tenant: &Tenant) -> Capab
         }
     }
 
-    CapabilityEnvelope {
+    Ok(CapabilityEnvelope {
         granted_capabilities,
-    }
+    })
 }
 
 fn condition_matches(condition: &Condition, identity: &Identity) -> bool {
@@ -40,7 +69,7 @@ mod tests {
     use std::collections::HashMap;
 
     use appport_auth_mesh_contract::{
-        ClaimValue, Claims, ContractVersion, Identity, OfflineSemantics, Tenant,
+        ClaimValue, Claims, ContractVersion, Identity, OfflineSemantics, TenantContext,
     };
 
     use crate::{
@@ -63,8 +92,8 @@ mod tests {
                 must_revalidate: false,
             },
         };
-        let tenant = Tenant {
-            id: "tenant-a".to_string(),
+        let tenant = TenantContext {
+            tenant_id: "tenant-a".to_string(),
             namespace: "tenant-a".to_string(),
             policy_id: "p1".to_string(),
             storage_root_id: "root-a".to_string(),
@@ -80,7 +109,43 @@ mod tests {
             }],
         };
 
-        let envelope = evaluate(&policy, &identity, &tenant);
+        let envelope = evaluate(&policy, &identity, &tenant).expect("policy should evaluate");
         assert_eq!(envelope.granted_capabilities, vec!["billing.charge"]);
+    }
+
+    #[test]
+    fn fails_closed_when_identity_tenant_does_not_match_context() {
+        let identity = Identity {
+            id: "id-1".to_string(),
+            provider: "local".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            claims: Claims {
+                values: HashMap::new(),
+            },
+            version: ContractVersion { major: 1, minor: 0 },
+            offline: OfflineSemantics {
+                max_age_seconds: 300,
+                must_revalidate: false,
+            },
+        };
+        let tenant = TenantContext {
+            tenant_id: "tenant-b".to_string(),
+            namespace: "tenant-b".to_string(),
+            policy_id: "p1".to_string(),
+            storage_root_id: "root-b".to_string(),
+        };
+        let policy = Policy {
+            id: "p1".to_string(),
+            rules: vec![Rule {
+                capability: "storage.read".to_string(),
+                condition: Condition::TimeBound {
+                    start: 0,
+                    end: i64::MAX,
+                },
+            }],
+        };
+
+        let err = evaluate(&policy, &identity, &tenant).expect_err("tenant mismatch must fail");
+        assert_eq!(err.message, "identity tenant does not match tenant context");
     }
 }
