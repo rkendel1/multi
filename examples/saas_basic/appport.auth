@@ -6,6 +6,7 @@ use auth {
   claims = {
     role = enum["owner", "admin", "member"]
     plan = enum["free", "pro"]
+    billing = enum["none", "manager"]
   }
 
   agents = true

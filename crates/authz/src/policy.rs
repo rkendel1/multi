@@ -182,6 +182,9 @@ pub enum DenialReason {
     UnknownCapability,
     UnsupportedConnector,
     InvalidSession,
+    MissingCredential,
+    /// The decision could not be durably recorded, so it is not a decision.
+    AuditUnavailable,
 }
 
 impl DenialReason {
@@ -204,6 +207,8 @@ impl DenialReason {
             Self::UnknownCapability => "unknown_capability",
             Self::UnsupportedConnector => "unsupported_connector",
             Self::InvalidSession => "invalid_session",
+            Self::MissingCredential => "missing_credential",
+            Self::AuditUnavailable => "audit_unavailable",
         }
     }
 }

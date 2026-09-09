@@ -1,4 +1,6 @@
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::Mutex;
 
 use appport_auth_mesh_contract::{
@@ -131,15 +133,33 @@ impl IdentityStore for MemoryIdentityStore {
     }
 }
 
+/// Sessions are the credential the boundary accepts, so their ids must not be
+/// guessable. The id is derived from a per-process random seed, a counter and
+/// the wall clock; a production store replaces this with a CSPRNG.
 #[derive(Default)]
 pub struct MemorySessionStore {
     sessions: Mutex<HashMap<SessionId, Session>>,
     next_id: Mutex<u64>,
+    seed: RandomState,
 }
 
 impl MemorySessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn mint_session_id(&self, counter: u64) -> String {
+        let mut hasher = self.seed.build_hasher();
+        hasher.write_u64(counter);
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+        );
+        let high = hasher.finish();
+        hasher.write_u64(high);
+        format!("sess_{:016x}{:016x}", high, hasher.finish())
     }
 }
 
@@ -154,7 +174,7 @@ impl SessionStore for MemorySessionStore {
         let mut next_id = self.next_id.lock().map_err(lock_error)?;
         *next_id += 1;
         let session = Session {
-            id: SessionId(format!("session-{}", next_id)),
+            id: SessionId(self.mint_session_id(*next_id)),
             identity_id: identity_id.clone(),
             tenant_id: tenant.tenant_id.clone(),
             created_at: 0,

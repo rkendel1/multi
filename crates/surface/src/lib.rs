@@ -9,11 +9,11 @@
 pub mod inspect;
 pub mod surface;
 
-pub use inspect::{render_json, render_text};
+pub use inspect::{render_json, render_json_with, render_text};
 pub use surface::{
     AgentOperation, AgentSurface, AuthFeature, AuthFeatures, AuthMethod, AuthOperation, AuthRoute,
-    AuthSurface, AuthUiSurface, ClaimSurface, PrincipalSurfaceKind, ProviderSurface,
-    UiScreenSurface,
+    AuthSurface, AuthUiSurface, BindingModeSurface, BoundarySurface, ClaimSurface,
+    PrincipalSurfaceKind, ProviderSurface, UiScreenSurface,
 };
 
 #[cfg(test)]
