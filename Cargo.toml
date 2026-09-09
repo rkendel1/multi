@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/contract",
+  "crates/dsl",
+  "crates/runtime",
+  "crates/storage",
+  "crates/providers",
+  "crates/authz",
+  "examples/saas_basic",
+]
+resolver = "2"
