@@ -1,0 +1,7 @@
+[package]
+name = "appport-auth-mesh-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+appport-auth-mesh-contract = { path = "../contract" }

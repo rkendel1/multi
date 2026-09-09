@@ -1,0 +1,9 @@
+use auth {
+  multi_tenant: true
+  providers: [local, google, microsoft]
+  claims: {
+    role: enum["admin","user"]
+    plan: enum["free","pro"]
+  }
+  isolation: "strict"
+}
