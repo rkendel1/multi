@@ -58,6 +58,13 @@ impl AuthPortServer {
             return HttpResponse::new(200, "application/javascript", CLIENT_JS.as_bytes().to_vec());
         }
 
+        // Check for control plane routes
+        if request.path.starts_with("/_authport/") {
+            if let Some(response) = crate::control_routes::handle_control_route(&self.runtime, &request.path, http) {
+                return response;
+            }
+        }
+
         if let Some(route) = self.runtime.surface().route(&request.path).cloned() {
             let method = AuthMethod::parse(request.method.as_str());
             if !method.map(|method| route.allows(method)).unwrap_or(false) {

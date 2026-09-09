@@ -5,6 +5,45 @@ use std::net::TcpStream;
 use appport_auth_mesh_boundary::{BoundaryRequest, Method};
 use appport_auth_mesh_surface::BoundarySurface;
 
+/// Simple JSON value representation
+#[derive(Debug, Clone)]
+pub enum JsonValue {
+    String(String),
+    Number(f64),
+    Bool(bool),
+    Null,
+    Array(Vec<JsonValue>),
+    Object(Vec<(String, JsonValue)>),
+}
+
+impl JsonValue {
+    pub fn to_string(&self) -> String {
+        match self {
+            Self::String(s) => format!("\"{}\"", escape(s)),
+            Self::Number(n) => {
+                if n.fract() == 0.0 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Self::Null => "null".to_string(),
+            Self::Array(items) => {
+                let items_str = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                format!("[{}]", items_str)
+            }
+            Self::Object(pairs) => {
+                let pairs_str = pairs.iter()
+                    .map(|(k, v)| format!("\"{}\": {}", escape(k), v.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{}}}", pairs_str)
+            }
+        }
+    }
+}
+
 /// A parsed HTTP request. Deliberately small: the boundary does the thinking,
 /// this only gets bytes into a shape it understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +258,30 @@ impl HttpResponse {
         stream.write_all(head.as_bytes())?;
         stream.write_all(&self.body)?;
         stream.flush()
+    }
+
+    pub fn ok_json(json: JsonValue) -> Self {
+        Self::json(200, json.to_string())
+    }
+
+    pub fn bad_request(message: &str) -> Self {
+        Self::json(
+            400,
+            format!(
+                "{{\"error\": \"bad_request\", \"message\": \"{}\"}}",
+                escape(message)
+            ),
+        )
+    }
+
+    pub fn not_implemented(message: &str) -> Self {
+        Self::json(
+            501,
+            format!(
+                "{{\"error\": \"not_implemented\", \"message\": \"{}\"}}",
+                escape(message)
+            ),
+        )
     }
 }
 

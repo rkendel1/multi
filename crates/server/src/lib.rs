@@ -9,6 +9,8 @@
 //! authorization answer never depends on where the boundary is running.
 
 pub mod client;
+pub mod control_routes;
+pub mod control_types;
 pub mod http;
 pub mod proxy;
 pub mod router;
@@ -16,7 +18,8 @@ pub mod server;
 pub mod ui;
 
 pub use client::{cookie_value, send, ClientRequest};
-pub use http::{HttpError, HttpRequest, HttpResponse};
+pub use control_types::{ApplicationDescription, RouteDescription, RouteProtection};
+pub use http::{HttpError, HttpRequest, HttpResponse, JsonValue};
 pub use proxy::UpstreamProxy;
 pub use router::{
     AppHandler, AppRequest, ApplicationBinding, PathPattern, RouteOutcome, RoutePolicy, RouteRule,
