@@ -10,11 +10,13 @@ use appport_auth_mesh_contract::{
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_storage::audit_log::{AuditEvent, AuditEventKind, AuditLog};
+use appport_auth_mesh_storage::delegation_store::DelegationStore;
 use appport_auth_mesh_storage::identity_store::IdentityStore;
 use appport_auth_mesh_storage::memory::{
     audit_event_id, MemoryAuditLog, MemoryDelegationStore, MemoryIdentityStore,
     MemoryPrincipalStore, MemorySessionStore, MemoryTenantRoot,
 };
+use appport_auth_mesh_storage::principal_store::PrincipalStore;
 use appport_auth_mesh_storage::session_store::SessionStore;
 use appport_auth_mesh_storage::tenant_root::TenantRootStore;
 

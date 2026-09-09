@@ -4,4 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+appport-auth-mesh-authz = { path = "../../crates/authz" }
+appport-auth-mesh-contract = { path = "../../crates/contract" }
 appport-auth-mesh-dsl = { path = "../../crates/dsl" }
+appport-auth-mesh-providers = { path = "../../crates/providers" }
+appport-auth-mesh-runtime = { path = "../../crates/runtime" }
+appport-auth-mesh-storage = { path = "../../crates/storage" }
+appport-auth-mesh-surface = { path = "../../crates/surface" }

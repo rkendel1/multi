@@ -1,12 +1,13 @@
 [package]
-name = "appport-auth-mesh-runtime"
+name = "appport-auth-mesh-cli"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "authport"
+path = "src/main.rs"
+
 [dependencies]
-appport-auth-mesh-authz = { path = "../authz" }
-appport-auth-mesh-contract = { path = "../contract" }
 appport-auth-mesh-dsl = { path = "../dsl" }
 appport-auth-mesh-providers = { path = "../providers" }
-appport-auth-mesh-storage = { path = "../storage" }
 appport-auth-mesh-surface = { path = "../surface" }

@@ -1,7 +1,8 @@
 [package]
-name = "appport-auth-mesh-providers"
+name = "appport-auth-mesh-surface"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 appport-auth-mesh-dsl = { path = "../dsl" }
+appport-auth-mesh-providers = { path = "../providers" }

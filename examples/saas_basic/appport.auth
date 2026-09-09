@@ -1,0 +1,12 @@
+use auth {
+  providers = [local]
+
+  tenant = true
+
+  claims = {
+    role = enum["owner", "admin", "member"]
+    plan = enum["free", "pro"]
+  }
+
+  agents = true
+}

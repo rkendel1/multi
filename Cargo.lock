@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "appport-auth-mesh-cli"
+version = "0.1.0"
+dependencies = [
+ "appport-auth-mesh-dsl",
+ "appport-auth-mesh-providers",
+ "appport-auth-mesh-surface",
+]
+
+[[package]]
 name = "appport-auth-mesh-contract"
 version = "0.1.0"
 
@@ -22,6 +31,9 @@ version = "0.1.0"
 [[package]]
 name = "appport-auth-mesh-providers"
 version = "0.1.0"
+dependencies = [
+ "appport-auth-mesh-dsl",
+]
 
 [[package]]
 name = "appport-auth-mesh-runtime"
@@ -30,6 +42,9 @@ dependencies = [
  "appport-auth-mesh-authz",
  "appport-auth-mesh-contract",
  "appport-auth-mesh-dsl",
+ "appport-auth-mesh-providers",
+ "appport-auth-mesh-storage",
+ "appport-auth-mesh-surface",
 ]
 
 [[package]]
@@ -40,8 +55,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "saas_basic"
+name = "appport-auth-mesh-surface"
 version = "0.1.0"
 dependencies = [
  "appport-auth-mesh-dsl",
+ "appport-auth-mesh-providers",
+]
+
+[[package]]
+name = "saas_basic"
+version = "0.1.0"
+dependencies = [
+ "appport-auth-mesh-authz",
+ "appport-auth-mesh-contract",
+ "appport-auth-mesh-dsl",
+ "appport-auth-mesh-providers",
+ "appport-auth-mesh-runtime",
+ "appport-auth-mesh-storage",
+ "appport-auth-mesh-surface",
 ]
