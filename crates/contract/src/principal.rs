@@ -27,7 +27,12 @@ pub struct Principal {
 }
 
 impl Principal {
-    pub fn human(id: PrincipalId, tenant_id: TenantId, claims: Claims, version: ContractVersion) -> Self {
+    pub fn human(
+        id: PrincipalId,
+        tenant_id: TenantId,
+        claims: Claims,
+        version: ContractVersion,
+    ) -> Self {
         Self {
             id,
             kind: PrincipalKind::Human,
@@ -55,7 +60,12 @@ impl Principal {
         }
     }
 
-    pub fn service(id: PrincipalId, tenant_id: TenantId, claims: Claims, version: ContractVersion) -> Self {
+    pub fn service(
+        id: PrincipalId,
+        tenant_id: TenantId,
+        claims: Claims,
+        version: ContractVersion,
+    ) -> Self {
         Self {
             id,
             kind: PrincipalKind::Service,

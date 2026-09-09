@@ -340,7 +340,10 @@ mod tests {
             context.claims.values.get("role"),
             Some(&ClaimValue::Enum("admin".to_string()))
         );
-        assert_eq!(context.capabilities.capabilities(), vec!["storage.read".into()]);
+        assert_eq!(
+            context.capabilities.capabilities(),
+            vec!["storage.read".into()]
+        );
     }
 
     #[test]

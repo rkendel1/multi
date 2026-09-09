@@ -1,4 +1,6 @@
-use appport_auth_mesh_contract::{AgentState, Capability, Delegation, Principal, PrincipalKind, TenantContext};
+use appport_auth_mesh_contract::{
+    AgentState, Capability, Delegation, Principal, PrincipalKind, TenantContext,
+};
 
 use crate::policy::{
     AuthorizationDecision, CapabilityEnvelope, Condition, DenialReason, GrantedCapability, Policy,
@@ -82,7 +84,9 @@ pub fn evaluate_capability(
     if principal.kind == PrincipalKind::Agent {
         match principal.agent_state {
             Some(AgentState::Active) => {}
-            Some(AgentState::Revoked | AgentState::Retired) => return deny(DenialReason::AgentRevoked),
+            Some(AgentState::Revoked | AgentState::Retired) => {
+                return deny(DenialReason::AgentRevoked)
+            }
             Some(AgentState::Suspended) => return deny(DenialReason::AgentSuspended),
             Some(AgentState::Created) | None => return deny(DenialReason::UnknownPrincipal),
         }
@@ -246,6 +250,9 @@ mod tests {
         };
 
         let err = evaluate(&policy, &principal, &tenant).expect_err("tenant mismatch must fail");
-        assert_eq!(err.message, "principal tenant does not match tenant context");
+        assert_eq!(
+            err.message,
+            "principal tenant does not match tenant context"
+        );
     }
 }

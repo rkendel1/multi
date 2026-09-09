@@ -16,9 +16,18 @@ pub struct Rule {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
-    ClaimEquals { key: String, value: ClaimValue },
-    ClaimIn { key: String, values: Vec<ClaimValue> },
-    TimeBound { start: i64, end: i64 },
+    ClaimEquals {
+        key: String,
+        value: ClaimValue,
+    },
+    ClaimIn {
+        key: String,
+        values: Vec<ClaimValue>,
+    },
+    TimeBound {
+        start: i64,
+        end: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 pub mod audit_log;
 pub mod identity_store;
-pub mod session_store;
 pub mod memory;
+pub mod session_store;
 pub mod tenant_root;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
