@@ -12,11 +12,13 @@
 pub mod boundary;
 pub mod clock;
 pub mod context;
+pub mod control;
 pub mod request;
 pub mod runtime;
 
 pub use boundary::{AuthBoundary, Requirement};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use context::{AuthContext, ClientAuthContext, ClientDelegation, DelegationContext};
+pub use control::{ApplyOutcome, Approval, AuthorityChange, ChangeProposal, LiveAuthorityState, Preview};
 pub use request::{BoundaryRequest, Method, SessionCredential, RESERVED_HEADER_PREFIX};
 pub use runtime::{AuthPortRuntime, BindingMode, RegistrationPolicy, SignInOutcome};

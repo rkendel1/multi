@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use appport_auth_mesh_authz::{AuthorizationDecision, DenialReason};
 use appport_auth_mesh_contract::{Capability, PrincipalKind};
@@ -15,7 +16,8 @@ use appport_auth_mesh_surface::{AuthSurface, ProviderSurface};
 use crate::boundary::{AuthBoundary, Requirement};
 use crate::clock::{Clock, SystemClock};
 use crate::context::AuthContext;
-use crate::request::{BoundaryRequest, SessionCredential};
+use crate::control::{apply_change, Approval, AuthorityChange, ChangeProposal, LiveAuthorityState, Preview, PreviewState, RouteId};
+use crate::request::{BoundaryRequest, Method, SessionCredential};
 
 /// Where the boundary is placed.
 ///
@@ -94,6 +96,8 @@ pub struct AuthPortRuntime {
     mode: BindingMode,
     clock: Arc<dyn Clock>,
     registration: RegistrationPolicy,
+    /// Live authority state overlays the immutable contract
+    authority: Arc<RwLock<LiveAuthorityState>>,
 }
 
 impl AuthPortRuntime {
@@ -112,6 +116,7 @@ impl AuthPortRuntime {
             mode,
             clock: Arc::new(SystemClock),
             registration: RegistrationPolicy::default(),
+            authority: Arc::new(RwLock::new(LiveAuthorityState::new())),
         })
     }
 
@@ -297,6 +302,75 @@ impl AuthPortRuntime {
                 DenialReason::MissingCredential,
             )
         })
+    }
+
+    /// Get the current live authority state
+    pub fn live_authority(&self) -> LiveAuthorityState {
+        self.authority.read().unwrap().clone()
+    }
+
+    /// Propose a change to authority state
+    pub fn propose_change(&self, change: AuthorityChange) -> Result<ChangeProposal, String> {
+        let current = self.authority.read().unwrap().clone();
+        let after = apply_change(&current, &change)?;
+
+        Ok(ChangeProposal {
+            change,
+            preview: Preview {
+                before: PreviewState::from(&current),
+                after: PreviewState::from(&after),
+            },
+            revision: current.revision,
+        })
+    }
+
+    /// Apply a proposed change with approval
+    pub fn apply_change(&self, proposal: ChangeProposal, approval: Approval) -> Result<String, String> {
+        // Verify the approval was created for this proposal
+        if !approval.verify(&proposal) {
+            return Err("approval token does not match proposal".to_string());
+        }
+
+        let mut authority = self.authority.write().unwrap();
+
+        // The revision must match to prevent concurrent modification issues
+        if proposal.revision != authority.revision {
+            return Err("change conflicts with newer authority state".to_string());
+        }
+
+        let next = apply_change(&authority, &proposal.change)?;
+        let change_id = format!(
+            "change-{}-rev{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            next.revision
+        );
+
+        *authority = next;
+
+        Ok(change_id)
+    }
+
+    /// Is a route currently protected?
+    pub fn get_route_protection(&self, method: &Method, path: &str) -> Option<String> {
+        let authority = self.authority.read().unwrap();
+        let route_id = RouteId::new(method.clone(), path.to_string());
+        authority
+            .route_protection
+            .get(&route_id)
+            .and_then(|p| p.capability.clone())
+    }
+
+    /// Is a provider currently enabled?
+    pub fn is_provider_enabled(&self, provider: &str) -> bool {
+        let authority = self.authority.read().unwrap();
+        authority
+            .provider_state
+            .get(provider)
+            .map(|p| p.enabled)
+            .unwrap_or(true) // Providers default to enabled if not explicitly disabled
     }
 }
 
