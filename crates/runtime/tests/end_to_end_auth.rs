@@ -21,12 +21,8 @@ use appport_auth_mesh_providers::{
     AuthConnector, AuthRequest, AuthResponse, ConnectorRegistry, LocalAccount, LocalConnector,
 };
 use appport_auth_mesh_runtime::{
-    AuthError, AuthMesh, AuthenticatedSession, DelegationRequest, MemoryPolicyStore, MeshStores,
-    Registration, RuntimeContext,
-};
-use appport_auth_mesh_storage::memory::{
-    MemoryAuditLog, MemoryDelegationStore, MemoryIdentityStore, MemoryPrincipalStore,
-    MemorySessionStore, MemoryTenantRoot,
+    AuthError, AuthMesh, AuthenticatedSession, DelegationRequest, MemoryStores, Registration,
+    RuntimeContext,
 };
 use appport_auth_mesh_storage::{AuditEventKind, TenantRootStore};
 use appport_auth_mesh_surface::AuthSurface;
@@ -46,42 +42,6 @@ use auth {
 "#;
 
 const NOW: i64 = 1_000;
-
-struct Stores {
-    tenants: MemoryTenantRoot,
-    identities: MemoryIdentityStore,
-    principals: MemoryPrincipalStore,
-    sessions: MemorySessionStore,
-    delegations: MemoryDelegationStore,
-    policies: MemoryPolicyStore,
-    audit: MemoryAuditLog,
-}
-
-impl Stores {
-    fn new() -> Self {
-        Self {
-            tenants: MemoryTenantRoot::new(),
-            identities: MemoryIdentityStore::new(),
-            principals: MemoryPrincipalStore::new(),
-            sessions: MemorySessionStore::new(),
-            delegations: MemoryDelegationStore::new(),
-            policies: MemoryPolicyStore::new(),
-            audit: MemoryAuditLog::new(),
-        }
-    }
-
-    fn mesh_stores(&self) -> MeshStores<'_> {
-        MeshStores {
-            tenants: &self.tenants,
-            identities: &self.identities,
-            principals: &self.principals,
-            sessions: &self.sessions,
-            delegations: &self.delegations,
-            policies: &self.policies,
-            audit: &self.audit,
-        }
-    }
-}
 
 fn tenant(id: &str) -> TenantContext {
     TenantContext {
@@ -184,7 +144,7 @@ fn assert_denies(decision: &AuthorizationDecision, expected: DenialReason) {
 
 /// Setup shared by the scenarios: two tenants, their policies, Alice, Bob and
 /// the invoice agent.
-fn provision(stores: &Stores) {
+fn provision(stores: &MemoryStores) {
     let tenant_a = tenant("tenant-a");
     let tenant_b = tenant("tenant-b");
     stores.tenants.put_tenant(tenant_a.clone()).unwrap();
@@ -194,7 +154,7 @@ fn provision(stores: &Stores) {
 }
 
 fn sign_up_cast(
-    mesh: &AuthMesh<'_>,
+    mesh: &AuthMesh,
 ) -> (
     AuthenticatedSession,
     AuthenticatedSession,
@@ -236,7 +196,7 @@ fn sign_up_cast(
 
 #[test]
 fn declaration_flows_all_the_way_to_a_runtime_context() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
 
@@ -342,7 +302,7 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
 
 #[test]
 fn delegation_cannot_exceed_the_delegators_own_authority() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, _bob) = sign_up_cast(&mesh);
@@ -384,7 +344,7 @@ fn delegation_cannot_exceed_the_delegators_own_authority() {
 
 #[test]
 fn revoking_a_delegation_removes_agent_authority() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, _bob) = sign_up_cast(&mesh);
@@ -425,7 +385,7 @@ fn revoking_a_delegation_removes_agent_authority() {
         .is_allowed());
 
     // Every decision is recorded.
-    let events = stores.audit.events().unwrap();
+    let events = stores.audit_events();
     assert!(events
         .iter()
         .any(|event| event.kind == AuditEventKind::DelegationCreated));
@@ -440,7 +400,7 @@ fn revoking_a_delegation_removes_agent_authority() {
 
 #[test]
 fn an_expired_delegation_stops_granting_authority() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, _bob) = sign_up_cast(&mesh);
@@ -478,7 +438,7 @@ fn an_expired_delegation_stops_granting_authority() {
 
 #[test]
 fn a_revoked_agent_loses_authority_independently_of_its_delegator() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, _bob) = sign_up_cast(&mesh);
@@ -543,7 +503,7 @@ fn a_revoked_agent_loses_authority_independently_of_its_delegator() {
 
 #[test]
 fn tenant_isolation_holds_for_humans_and_for_agents() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, bob) = sign_up_cast(&mesh);
@@ -611,7 +571,7 @@ fn tenant_isolation_holds_for_humans_and_for_agents() {
 
 #[test]
 fn external_identities_resolve_deterministically_and_uniquely() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, _agent, _bob) = sign_up_cast(&mesh);
@@ -687,7 +647,7 @@ fn external_identities_resolve_deterministically_and_uniquely() {
 
 #[test]
 fn every_unresolved_input_is_denied() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, _agent, _bob) = sign_up_cast(&mesh);
@@ -837,7 +797,7 @@ fn every_unresolved_input_is_denied() {
 
 #[test]
 fn agents_are_only_available_when_declared() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
 
     let config = parse_auth_block(
@@ -899,7 +859,7 @@ use auth {
 
 #[test]
 fn an_unimplemented_connector_never_authenticates() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
 
     let config =
@@ -934,7 +894,7 @@ fn an_unimplemented_connector_never_authenticates() {
 
 #[test]
 fn the_generated_contract_is_deterministic() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
 
@@ -967,7 +927,7 @@ use auth {
 
 #[test]
 fn a_delegation_belongs_to_one_tenant() {
-    let stores = Stores::new();
+    let stores = MemoryStores::new();
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, agent, _bob) = sign_up_cast(&mesh);

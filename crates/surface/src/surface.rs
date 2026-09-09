@@ -12,6 +12,7 @@ use appport_auth_mesh_providers::{ConnectorKind, ConnectorStatus};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSurface {
     pub routes: Vec<AuthRoute>,
+    pub boundary: BoundarySurface,
     pub providers: Vec<ProviderSurface>,
     pub features: AuthFeatures,
     pub claims: Vec<ClaimSurface>,
@@ -30,6 +31,7 @@ impl AuthSurface {
 
         Self {
             routes: AuthRoute::derive(&features),
+            boundary: BoundarySurface::derive(),
             providers: config
                 .providers
                 .iter()
@@ -53,8 +55,10 @@ impl AuthSurface {
         }
     }
 
+    /// Canonical paths and their aliases both resolve to the same route: there
+    /// is one route table, however a caller spells it.
     pub fn route(&self, path: &str) -> Option<&AuthRoute> {
-        self.routes.iter().find(|route| route.path == path)
+        self.routes.iter().find(|route| route.matches(path))
     }
 
     pub fn exposes(&self, path: &str) -> bool {
@@ -81,6 +85,10 @@ impl AuthSurface {
         ));
         for route in &self.routes {
             material.push_str(&route.path);
+            for alias in &route.aliases {
+                material.push('|');
+                material.push_str(alias);
+            }
             material.push('(');
             for method in &route.methods {
                 material.push_str(method.as_str());
@@ -105,6 +113,7 @@ impl AuthSurface {
         }
         material.push_str(&self.features.canonical_string());
         material.push_str(&self.ui.canonical_string());
+        material.push_str(&self.boundary.canonical_string());
         format!("{:016x}", stable_hash(material.as_bytes()))
     }
 }
@@ -112,10 +121,23 @@ impl AuthSurface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthRoute {
     pub path: String,
+    /// Alternate spellings of the same operation (`/auth/sign-in` for
+    /// `/auth/login`). Aliases are part of the contract, not server sugar.
+    pub aliases: Vec<String>,
     pub methods: Vec<AuthMethod>,
     pub operation: AuthOperation,
     pub requires_session: bool,
     pub feature: AuthFeature,
+}
+
+impl AuthRoute {
+    pub fn matches(&self, path: &str) -> bool {
+        self.path == path || self.aliases.iter().any(|alias| alias == path)
+    }
+
+    pub fn allows(&self, method: AuthMethod) -> bool {
+        self.methods.contains(&method)
+    }
 }
 
 impl AuthRoute {
@@ -128,6 +150,7 @@ impl AuthRoute {
     ) -> Self {
         Self {
             path: path.to_string(),
+            aliases: Vec::new(),
             methods: methods.to_vec(),
             operation,
             requires_session,
@@ -135,20 +158,27 @@ impl AuthRoute {
         }
     }
 
+    fn with_alias(mut self, alias: &str) -> Self {
+        self.aliases.push(alias.to_string());
+        self
+    }
+
     fn derive(features: &AuthFeatures) -> Vec<Self> {
         use AuthMethod::{Delete, Get, Post};
 
         let mut routes = vec![
+            // GET renders the generated UI, POST performs the sign-in.
             Self::new(
                 "/auth/login",
-                &[Post],
+                &[Get, Post],
                 AuthOperation::Login,
                 false,
                 AuthFeature::Login,
-            ),
+            )
+            .with_alias("/auth/sign-in"),
             Self::new(
                 "/auth/signup",
-                &[Post],
+                &[Get, Post],
                 AuthOperation::Signup,
                 false,
                 AuthFeature::Signup,
@@ -159,7 +189,8 @@ impl AuthRoute {
                 AuthOperation::Logout,
                 true,
                 AuthFeature::Sessions,
-            ),
+            )
+            .with_alias("/auth/sign-out"),
             Self::new(
                 "/auth/session",
                 &[Get, Delete],
@@ -173,6 +204,15 @@ impl AuthRoute {
                 AuthOperation::Providers,
                 false,
                 AuthFeature::Login,
+            ),
+            // The boundary's own authority question, asked over HTTP: the
+            // answer is derived server-side, never supplied by the caller.
+            Self::new(
+                "/auth/authorize",
+                &[Post],
+                AuthOperation::Authorize,
+                true,
+                AuthFeature::Sessions,
             ),
         ];
 
@@ -235,6 +275,15 @@ pub enum AuthMethod {
 }
 
 impl AuthMethod {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            "DELETE" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Get => "GET",
@@ -251,6 +300,7 @@ pub enum AuthOperation {
     Logout,
     Session,
     Providers,
+    Authorize,
     AccountLinks,
     CurrentTenant,
     Tenants,
@@ -266,6 +316,7 @@ impl AuthOperation {
             Self::Logout => "logout",
             Self::Session => "session",
             Self::Providers => "providers",
+            Self::Authorize => "authorize",
             Self::AccountLinks => "account_links",
             Self::CurrentTenant => "current_tenant",
             Self::Tenants => "tenants",
@@ -553,6 +604,60 @@ impl UiScreenSurface {
             screen: screen.clone(),
             mode: config.ui.mode_for(screen),
             providers,
+        }
+    }
+}
+
+/// The runtime boundary the contract can be executed behind.
+///
+/// Embedded and standalone are two placements of one authority model, so this
+/// is derived from the contract rather than configured per deployment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundarySurface {
+    pub contract: String,
+    pub modes: Vec<BindingModeSurface>,
+    pub session_credential: String,
+}
+
+impl BoundarySurface {
+    pub const CONTRACT: &'static str = "authport.boundary/v1";
+    /// The cookie the boundary issues and reads. It is an opaque server-issued
+    /// handle: nothing inside it is trusted without being re-verified.
+    pub const SESSION_COOKIE: &'static str = "authport_session";
+
+    fn derive() -> Self {
+        Self {
+            contract: Self::CONTRACT.to_string(),
+            modes: vec![BindingModeSurface::Embedded, BindingModeSurface::Standalone],
+            session_credential: format!("cookie:{}", Self::SESSION_COOKIE),
+        }
+    }
+
+    fn canonical_string(&self) -> String {
+        let modes = self
+            .modes
+            .iter()
+            .map(|mode| mode.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "boundary={};{};{};",
+            self.contract, modes, self.session_credential
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingModeSurface {
+    Embedded,
+    Standalone,
+}
+
+impl BindingModeSurface {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Standalone => "standalone",
         }
     }
 }

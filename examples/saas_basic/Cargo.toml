@@ -5,9 +5,19 @@ edition = "2021"
 
 [dependencies]
 appport-auth-mesh-authz = { path = "../../crates/authz" }
+appport-auth-mesh-boundary = { path = "../../crates/boundary" }
 appport-auth-mesh-contract = { path = "../../crates/contract" }
 appport-auth-mesh-dsl = { path = "../../crates/dsl" }
 appport-auth-mesh-providers = { path = "../../crates/providers" }
 appport-auth-mesh-runtime = { path = "../../crates/runtime" }
+appport-auth-mesh-server = { path = "../../crates/server" }
 appport-auth-mesh-storage = { path = "../../crates/storage" }
 appport-auth-mesh-surface = { path = "../../crates/surface" }
+
+[lib]
+name = "saas_basic"
+path = "src/lib.rs"
+
+[[bin]]
+name = "saas_basic"
+path = "src/main.rs"

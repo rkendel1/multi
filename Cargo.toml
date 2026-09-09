@@ -6,6 +6,8 @@ members = [
   "crates/storage",
   "crates/providers",
   "crates/surface",
+  "crates/boundary",
+  "crates/server",
   "crates/cli",
   "crates/authz",
   "examples/saas_basic",

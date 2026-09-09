@@ -64,9 +64,31 @@ pub fn render_text(surface: &AuthSurface) -> String {
         ));
     }
 
+    out.push_str("\nRuntime boundary:\n");
+    out.push_str(&format!("  contract: {}\n", surface.boundary.contract));
+    out.push_str(&format!(
+        "  modes: {}\n",
+        surface
+            .boundary
+            .modes
+            .iter()
+            .map(|mode| mode.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    out.push_str(&format!(
+        "  session credential: {}\n",
+        surface.boundary.session_credential
+    ));
+
     out.push_str("\nGenerated surfaces:\n");
     for route in &surface.routes {
-        out.push_str(&format!("  {}\n", route.path));
+        let aliases = if route.aliases.is_empty() {
+            String::new()
+        } else {
+            format!("  (also {})", route.aliases.join(", "))
+        };
+        out.push_str(&format!("  {}{}\n", route.path, aliases));
     }
 
     out
@@ -94,8 +116,17 @@ fn enabled(value: bool) -> &'static str {
 
 /// A deterministic JSON rendering, for tooling that wants the surface as data.
 pub fn render_json(surface: &AuthSurface) -> String {
+    render_json_with(surface, &[])
+}
+
+/// The same rendering with deployment-level fields the contract does not own
+/// (which mode a particular deployment is running in, for instance).
+pub fn render_json_with(surface: &AuthSurface, extra: &[(String, String)]) -> String {
     let mut out = String::new();
     out.push_str("{\n");
+    for (name, value) in extra {
+        out.push_str(&format!("  \"{}\": \"{}\",\n", escape(name), escape(value)));
+    }
     out.push_str(&format!(
         "  \"contract_fingerprint\": \"{}\",\n",
         surface.contract_fingerprint
@@ -165,9 +196,16 @@ pub fn render_json(surface: &AuthSurface) -> String {
             .map(|method| format!("\"{}\"", method.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
+        let aliases = route
+            .aliases
+            .iter()
+            .map(|alias| format!("\"{}\"", escape(alias)))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
-            "    {{\"path\": \"{}\", \"methods\": [{}], \"operation\": \"{}\", \"requires_session\": {}, \"feature\": \"{}\"}}{}\n",
+            "    {{\"path\": \"{}\", \"aliases\": [{}], \"methods\": [{}], \"operation\": \"{}\", \"requires_session\": {}, \"feature\": \"{}\"}}{}\n",
             escape(&route.path),
+            aliases,
             methods,
             route.operation.as_str(),
             route.requires_session,
@@ -176,6 +214,20 @@ pub fn render_json(surface: &AuthSurface) -> String {
         ));
     }
     out.push_str("  ],\n");
+
+    let modes = surface
+        .boundary
+        .modes
+        .iter()
+        .map(|mode| format!("\"{}\"", mode.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "  \"boundary\": {{\"contract\": \"{}\", \"modes\": [{}], \"session_credential\": \"{}\"}},\n",
+        escape(&surface.boundary.contract),
+        modes,
+        escape(&surface.boundary.session_credential)
+    ));
 
     out.push_str("  \"ui\": {\n");
     out.push_str(&format!(

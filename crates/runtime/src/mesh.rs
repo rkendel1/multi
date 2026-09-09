@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use appport_auth_mesh_authz::{
     evaluate_capability, evaluate_with_delegations, AuthorizationDecision, CapabilityEnvelope,
@@ -33,14 +34,15 @@ pub const DEFAULT_SESSION_TTL_SECONDS: i64 = 3600;
 ///
 /// The application declares `use auth { ... }`; it does not declare session
 /// tables, identity tables, token storage or tenant lookup.
-pub struct MeshStores<'a> {
-    pub tenants: &'a dyn TenantRootStore,
-    pub identities: &'a dyn IdentityStore,
-    pub principals: &'a dyn PrincipalStore,
-    pub sessions: &'a dyn SessionStore,
-    pub delegations: &'a dyn DelegationStore,
-    pub policies: &'a dyn PolicyStore,
-    pub audit: &'a dyn AuditLog,
+#[derive(Clone)]
+pub struct MeshStores {
+    pub tenants: Arc<dyn TenantRootStore + Send + Sync>,
+    pub identities: Arc<dyn IdentityStore + Send + Sync>,
+    pub principals: Arc<dyn PrincipalStore + Send + Sync>,
+    pub sessions: Arc<dyn SessionStore + Send + Sync>,
+    pub delegations: Arc<dyn DelegationStore + Send + Sync>,
+    pub policies: Arc<dyn PolicyStore + Send + Sync>,
+    pub audit: Arc<dyn AuditLog + Send + Sync>,
 }
 
 /// The auth capability.
@@ -48,11 +50,11 @@ pub struct MeshStores<'a> {
 /// One object holds the declaration, the derived surface, the connector
 /// registry and the durable state, and every authority question — for humans
 /// and for agents alike — is answered through it.
-pub struct AuthMesh<'a> {
+pub struct AuthMesh {
     config: AuthConfig,
     surface: AuthSurface,
     registry: ConnectorRegistry,
-    stores: MeshStores<'a>,
+    stores: MeshStores,
     session_ttl: i64,
     audit_sequence: AtomicU64,
 }
@@ -157,7 +159,7 @@ impl<'r> AuditRecord<'r> {
     }
 }
 
-impl<'a> AuthMesh<'a> {
+impl AuthMesh {
     /// Build the capability from a declaration.
     ///
     /// Every declared provider must be resolvable through the registry: a
@@ -166,7 +168,7 @@ impl<'a> AuthMesh<'a> {
     pub fn new(
         config: AuthConfig,
         registry: ConnectorRegistry,
-        stores: MeshStores<'a>,
+        stores: MeshStores,
     ) -> Result<Self, AuthError> {
         config.validate().map_err(|err| {
             AuthError::new(
@@ -214,6 +216,12 @@ impl<'a> AuthMesh<'a> {
         &self.registry
     }
 
+    /// The durable state behind the mesh, for surfaces that read it directly
+    /// (listing a tenant's agents, for instance). Every store is tenant-scoped.
+    pub fn stores(&self) -> &MeshStores {
+        &self.stores
+    }
+
     /// The developer-facing view of what this declaration generated.
     pub fn inspect(&self) -> String {
         render_text(&self.surface)
@@ -243,8 +251,8 @@ impl<'a> AuthMesh<'a> {
         let external = self.authenticate_external(&tenant, response)?;
 
         let resolved = resolve_principal(
-            self.stores.identities,
-            self.stores.principals,
+            self.stores.identities.as_ref(),
+            self.stores.principals.as_ref(),
             &tenant,
             &external,
         )?
@@ -321,8 +329,8 @@ impl<'a> AuthMesh<'a> {
         };
 
         let resolved = provision_principal(
-            self.stores.identities,
-            self.stores.principals,
+            self.stores.identities.as_ref(),
+            self.stores.principals.as_ref(),
             &tenant,
             &external,
             registration.kind.clone(),
@@ -361,8 +369,8 @@ impl<'a> AuthMesh<'a> {
         let external = self.authenticate_external(&tenant, response)?;
 
         let binding = link_external_identity(
-            self.stores.identities,
-            self.stores.principals,
+            self.stores.identities.as_ref(),
+            self.stores.principals.as_ref(),
             &tenant,
             principal_id,
             &external,
@@ -404,6 +412,21 @@ impl<'a> AuthMesh<'a> {
         session_id: &SessionId,
         now: i64,
     ) -> Result<RuntimeContext, AuthError> {
+        self.resolve_session(tenant_id, session_id, now)
+            .map(|(_, context)| context)
+    }
+
+    /// The session record together with the authority derived from it.
+    ///
+    /// Nothing about the caller's request is carried through: the principal,
+    /// the tenant, the claims and the capabilities are all read back from
+    /// AuthPort's own state.
+    pub fn resolve_session(
+        &self,
+        tenant_id: &str,
+        session_id: &SessionId,
+        now: i64,
+    ) -> Result<(Session, RuntimeContext), AuthError> {
         let tenant = self.tenant(tenant_id)?;
         let session = self
             .stores
@@ -445,7 +468,8 @@ impl<'a> AuthMesh<'a> {
 
         let principal = self.principal(&tenant, &principal_id)?;
         self.assert_principal_is_usable(&principal)?;
-        self.context_for(&tenant, principal, Some(session.id), now)
+        let context = self.context_for(&tenant, principal, Some(session.id.clone()), now)?;
+        Ok((session, context))
     }
 
     /// Delegate a subset of the delegator's own authority to an agent.
@@ -657,7 +681,7 @@ impl<'a> AuthMesh<'a> {
         match self.record_decision(context, capability, &decision, now) {
             Ok(audit_event_id) => attach_audit_event(decision, audit_event_id),
             // An authorization that cannot be recorded is not an authorization.
-            Err(_) => deny(DenialReason::PolicyNotFound),
+            Err(_) => deny(DenialReason::AuditUnavailable),
         }
     }
 

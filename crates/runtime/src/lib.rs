@@ -12,6 +12,7 @@ pub mod claims;
 pub mod context;
 pub mod error;
 pub mod injection;
+pub mod memory_stores;
 pub mod mesh;
 pub mod policy_store;
 pub mod resolution;
@@ -19,6 +20,7 @@ pub mod resolution;
 pub use context::RuntimeContext;
 pub use error::{AuthError, AuthLifecycleStage};
 pub use injection::{inject_auth_context, IncomingRequest};
+pub use memory_stores::MemoryStores;
 pub use mesh::{
     AuthMesh, AuthenticatedSession, DelegationRequest, MeshStores, Registration,
     DEFAULT_SESSION_TTL_SECONDS,
