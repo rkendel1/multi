@@ -227,8 +227,6 @@ fn node_package_manager(root: &Path) -> Option<String> {
         Some("pnpm".to_string())
     } else if root.join("yarn.lock").exists() {
         Some("yarn".to_string())
-    } else if root.join("package-lock.json").exists() {
-        Some("npm".to_string())
     } else {
         Some("npm".to_string())
     }

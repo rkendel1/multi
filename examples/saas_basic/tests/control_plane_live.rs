@@ -49,9 +49,7 @@ fn killer_test_route_protection_without_restart() {
             .any(|(r, p)| {
                 r.method == Method::Post
                     && r.path == "/invoices"
-                    && p.capability
-                        .as_ref()
-                        .map_or(false, |c| c == "invoice.create")
+                    && p.capability.as_ref().is_some_and(|c| c == "invoice.create")
             }),
         "after: POST /invoices should require invoice.create"
     );
@@ -125,7 +123,7 @@ fn multiple_routes_independently_protected() {
 
     for (method, path, capability) in routes {
         let change = AuthorityChange::ProtectRoute {
-            method: method.clone(),
+            method,
             path: path.to_string(),
             capability: capability.to_string(),
         };
@@ -193,8 +191,8 @@ fn state_survives_multiple_sequential_changes() {
     }
 
     // Verify all proposals had correct revisions
-    for i in 0..revisions.len() {
-        assert_eq!(revisions[i], i as u64, "proposal {} had wrong revision", i);
+    for (i, revision) in revisions.iter().enumerate() {
+        assert_eq!(*revision, i as u64, "proposal {} had wrong revision", i);
     }
 
     // Verify all routes are still protected

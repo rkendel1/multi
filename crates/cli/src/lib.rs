@@ -581,15 +581,12 @@ use auth {
 
     #[test]
     fn init_rolls_back_when_a_write_fails_partway_through() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
         let dir = temp_dir("init-rollback");
         write_express_app(&dir);
         let original = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
 
-        std::env::set_var("AUTHPORT_INIT_FAIL_AFTER_WRITE", "1");
+        std::fs::write(dir.join(".authport-fail-after-write"), "").unwrap();
         let error = run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap_err();
-        std::env::remove_var("AUTHPORT_INIT_FAIL_AFTER_WRITE");
 
         assert!(error.message.contains("simulated initialization failure"));
         assert_eq!(

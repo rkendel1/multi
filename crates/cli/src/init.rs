@@ -284,7 +284,12 @@ fn apply_plan(plan: &InitPlan) -> Result<(), CliError> {
             return Err(err);
         }
         written.push((change, before));
-        if std::env::var("AUTHPORT_INIT_FAIL_AFTER_WRITE").is_ok() {
+        if plan
+            .application
+            .root
+            .join(".authport-fail-after-write")
+            .exists()
+        {
             rollback(&written);
             return Err(error("simulated initialization failure"));
         }

@@ -20,11 +20,9 @@ fn setup() -> AuthPortRuntime {
     let registry = ConnectorRegistry::from_config(&config).expect("registry");
     let stores = MemoryStores::new();
 
-    let runtime = AuthPortRuntime::standalone(config, registry, stores.mesh_stores())
+    AuthPortRuntime::standalone(config, registry, stores.mesh_stores())
         .expect("create runtime")
-        .with_registration(RegistrationPolicy::self_service(&[("role", "member")]));
-
-    runtime
+        .with_registration(RegistrationPolicy::self_service(&[("role", "member")]))
 }
 
 #[test]
@@ -67,9 +65,7 @@ fn control_plane_proposes_and_applies_protection() {
             .any(|(r, p)| {
                 r.method == Method::Post
                     && r.path == "/invoices"
-                    && p.capability
-                        .as_ref()
-                        .map_or(false, |c| c == "invoice.create")
+                    && p.capability.as_ref().is_some_and(|c| c == "invoice.create")
             }),
         "after: POST /invoices should require invoice.create"
     );

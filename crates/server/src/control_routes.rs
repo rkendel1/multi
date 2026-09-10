@@ -609,10 +609,10 @@ fn extract_quoted_field(json: &str, field: &str) -> Option<String> {
     // Skip whitespace
     let rest = rest.trim_start();
 
-    if rest.starts_with('"') {
+    if let Some(rest) = rest.strip_prefix('"') {
         // Quoted string value
-        let end = rest[1..].find('"')?;
-        Some(rest[1..end + 1].to_string())
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
     } else {
         None
     }
