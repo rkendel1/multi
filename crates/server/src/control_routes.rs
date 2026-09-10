@@ -1,7 +1,7 @@
 use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 use crate::http::{HttpRequest, HttpResponse, JsonValue};
 use crate::router::ApplicationBinding;
-use appport_auth_mesh_authz::{AuthorizationDecision, Policy};
+use appport_auth_mesh_authz::{AuthorizationEvidence, ConditionEvidence, Policy};
 use appport_auth_mesh_boundary::{
     Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method, ProposalMetadata,
     ProposalSource, ProposalStatus, RouteId, RouteProtection as LiveRouteProtection,
@@ -57,6 +57,15 @@ pub fn handle_control_route(
         }
         ("GET", "/_authport/authorization/decisions") => Some(authorization_decisions(runtime)),
         ("GET", "/_authport/authorization/explain") => Some(authorization_explain(runtime)),
+        _ if method == "GET"
+            && path.starts_with("/_authport/authorization/decisions/")
+            && path.ends_with("/explain") =>
+        {
+            Some(authorization_decision_explain(runtime, path))
+        }
+        _ if method == "GET" && path.starts_with("/_authport/authorization/decisions/") => {
+            Some(authorization_decision(runtime, path))
+        }
         ("GET", "/_authport/providers") => Some(providers(runtime)),
         ("POST", "/_authport/propose") => Some(propose(runtime, request)),
         ("POST", "/_authport/approve") => Some(approve(runtime, request)),
@@ -496,6 +505,38 @@ fn authorization_explain(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpRespo
     ]))
 }
 
+fn authorization_decision(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
+    let id = path.trim_start_matches("/_authport/authorization/decisions/");
+    match runtime
+        .mesh()
+        .recent_decisions()
+        .iter()
+        .find(|decision| decision.decision_id == id)
+    {
+        Some(decision) => HttpResponse::ok_json(decision_json(decision)),
+        None => HttpResponse::denied(404, "decision_not_found", "no such authorization decision"),
+    }
+}
+
+fn authorization_decision_explain(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+) -> HttpResponse {
+    let id = path
+        .trim_start_matches("/_authport/authorization/decisions/")
+        .trim_end_matches("/explain")
+        .trim_end_matches('/');
+    match runtime
+        .mesh()
+        .recent_decisions()
+        .iter()
+        .find(|decision| decision.decision_id == id)
+    {
+        Some(decision) => HttpResponse::ok_json(decision_json(decision)),
+        None => HttpResponse::denied(404, "decision_not_found", "no such authorization decision"),
+    }
+}
+
 fn policy_summary_json(capability: &str, policy: &Policy) -> JsonValue {
     JsonValue::Object(vec![
         ("id".to_string(), JsonValue::String(policy.id.0.clone())),
@@ -549,115 +590,163 @@ fn policy_summary_json(capability: &str, policy: &Policy) -> JsonValue {
     ])
 }
 
-fn decision_json(decision: &AuthorizationDecision) -> JsonValue {
-    match decision {
-        AuthorizationDecision::Allow {
-            grant,
-            resource,
-            action,
-            matched_rules,
-            audit_event_id,
-        } => JsonValue::Object(vec![
-            ("allowed".to_string(), JsonValue::Bool(true)),
-            (
-                "capability".to_string(),
-                JsonValue::String(grant.capability.to_string()),
+fn decision_json(decision: &AuthorizationEvidence) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "decision_id".to_string(),
+            JsonValue::String(decision.decision_id.clone()),
+        ),
+        (
+            "timestamp".to_string(),
+            JsonValue::Number(decision.timestamp as f64),
+        ),
+        (
+            "decision".to_string(),
+            JsonValue::String(decision.decision.as_str().to_string()),
+        ),
+        (
+            "allowed".to_string(),
+            JsonValue::Bool(decision.decision.as_str() == "allow"),
+        ),
+        (
+            "reason".to_string(),
+            JsonValue::String(decision.reason.as_str().to_string()),
+        ),
+        (
+            "principal".to_string(),
+            JsonValue::String(decision.principal.to_string()),
+        ),
+        (
+            "tenant".to_string(),
+            JsonValue::String(decision.tenant.to_string()),
+        ),
+        (
+            "capability".to_string(),
+            JsonValue::String(decision.capability.to_string()),
+        ),
+        (
+            "resource".to_string(),
+            decision
+                .resource
+                .as_ref()
+                .map(|resource| JsonValue::String(resource.opaque()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "action".to_string(),
+            decision
+                .action
+                .as_ref()
+                .map(|action| JsonValue::String(action.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "policy_id".to_string(),
+            decision
+                .policy_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "matched_rules".to_string(),
+            JsonValue::Array(
+                decision
+                    .matched_rules
+                    .iter()
+                    .map(|rule| JsonValue::String(rule.clone()))
+                    .collect(),
             ),
-            (
-                "policy_id".to_string(),
-                JsonValue::String(grant.policy_id.to_string()),
-            ),
-            (
-                "resource".to_string(),
-                resource
+        ),
+        (
+            "conditions".to_string(),
+            JsonValue::Array(decision.conditions.iter().map(condition_json).collect()),
+        ),
+        (
+            "authority".to_string(),
+            decision
+                .authority
+                .as_ref()
+                .map(|authority| JsonValue::String(authority.as_str().to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "source".to_string(),
+            JsonValue::String(
+                decision
+                    .authority
                     .as_ref()
-                    .map(|resource| JsonValue::String(resource.opaque()))
-                    .unwrap_or(JsonValue::Null),
+                    .map(|authority| match authority.as_str() {
+                        "delegated" => "delegation",
+                        _ => "policy",
+                    })
+                    .unwrap_or("policy")
+                    .to_string(),
             ),
-            (
-                "action".to_string(),
-                action
-                    .as_ref()
-                    .map(|action| JsonValue::String(action.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "matched_rules".to_string(),
-                JsonValue::Array(
-                    matched_rules
-                        .iter()
-                        .map(|rule| JsonValue::String(rule.clone()))
-                        .collect(),
-                ),
-            ),
-            (
-                "audit_event_id".to_string(),
-                audit_event_id
-                    .as_ref()
-                    .map(|id| JsonValue::String(id.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-        ]),
-        AuthorizationDecision::Deny {
-            reason,
-            capability,
-            resource,
-            action,
-            policy_id,
-            matched_rules,
-            audit_event_id,
-        } => JsonValue::Object(vec![
-            ("allowed".to_string(), JsonValue::Bool(false)),
-            (
-                "reason".to_string(),
-                JsonValue::String(reason.as_str().to_string()),
-            ),
-            (
-                "capability".to_string(),
-                capability
-                    .as_ref()
-                    .map(|capability| JsonValue::String(capability.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "resource".to_string(),
-                resource
-                    .as_ref()
-                    .map(|resource| JsonValue::String(resource.opaque()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "action".to_string(),
-                action
-                    .as_ref()
-                    .map(|action| JsonValue::String(action.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "policy_id".to_string(),
-                policy_id
-                    .as_ref()
-                    .map(|id| JsonValue::String(id.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "matched_rules".to_string(),
-                JsonValue::Array(
-                    matched_rules
-                        .iter()
-                        .map(|rule| JsonValue::String(rule.clone()))
-                        .collect(),
-                ),
-            ),
-            (
-                "audit_event_id".to_string(),
-                audit_event_id
-                    .as_ref()
-                    .map(|id| JsonValue::String(id.to_string()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-        ]),
-    }
+        ),
+        (
+            "authority_revision".to_string(),
+            JsonValue::Number(decision.authority_revision as f64),
+        ),
+        (
+            "contract_fingerprint".to_string(),
+            JsonValue::String(decision.contract_fingerprint.clone()),
+        ),
+        (
+            "audit_event_id".to_string(),
+            decision
+                .audit_event_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "summary".to_string(),
+            JsonValue::String(decision_summary(decision)),
+        ),
+    ])
+}
+
+fn condition_json(condition: &ConditionEvidence) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "condition".to_string(),
+            JsonValue::String(condition.condition.clone()),
+        ),
+        (
+            "result".to_string(),
+            JsonValue::String(condition.result.as_str().to_string()),
+        ),
+        (
+            "fact".to_string(),
+            condition
+                .fact
+                .as_ref()
+                .map(|fact| JsonValue::String(fact.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+    ])
+}
+
+fn decision_summary(decision: &AuthorizationEvidence) -> String {
+    let resource = decision
+        .resource
+        .as_ref()
+        .map(|resource| resource.opaque())
+        .unwrap_or_else(|| "no resource".to_string());
+    format!(
+        "{} {} {} for {} on {} because {}",
+        decision.capability,
+        decision
+            .action
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "use".to_string()),
+        decision.decision.as_str(),
+        decision.principal,
+        resource,
+        decision.reason.as_str()
+    )
 }
 
 fn providers(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {

@@ -719,10 +719,11 @@ impl AuthBoundary for AuthPortRuntime {
 
         // Humans, agents and services all arrive here. There is no second
         // authorization path, and an unrecordable decision denies.
-        Ok(self.mesh.authorize(
+        Ok(self.mesh.authorize_with_authority_revision(
             context.runtime(),
             &Capability(capability.to_string()),
             self.now(),
+            self.live_authority().revision,
         ))
     }
 }
@@ -744,11 +745,12 @@ impl AuthPortRuntime {
             .resource
             .as_ref()
             .map(|resource| self.resource_resolver.resolve(resource, &request.context));
-        Ok(self.mesh.authorize_request(
+        Ok(self.mesh.authorize_request_with_authority_revision(
             context.runtime(),
             &request,
             attributes.as_ref(),
             self.now(),
+            self.live_authority().revision,
         ))
     }
 }

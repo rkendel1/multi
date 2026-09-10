@@ -157,6 +157,63 @@ pub struct AuthorizationRequest {
     pub context: AuthorizationContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationEvidence {
+    pub decision_id: String,
+    pub timestamp: i64,
+    pub principal: PrincipalId,
+    pub tenant: TenantId,
+    pub capability: Capability,
+    pub action: Option<Action>,
+    pub resource: Option<ResourceRef>,
+    pub policy_id: Option<PolicyId>,
+    pub matched_rules: Vec<String>,
+    pub conditions: Vec<ConditionEvidence>,
+    pub authority: Option<AuthorityBasis>,
+    pub authority_revision: u64,
+    pub contract_fingerprint: String,
+    pub decision: AuthorizationOutcome,
+    pub reason: DecisionReason,
+    pub audit_event_id: Option<AuditEventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationOutcome {
+    Allow,
+    Deny,
+}
+
+impl AuthorizationOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionEvidence {
+    pub condition: String,
+    pub result: ConditionResult,
+    pub fact: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionResult {
+    Pass,
+    Fail,
+}
+
+impl ConditionResult {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+        }
+    }
+}
+
 pub trait ResourceResolver {
     fn resolve(&self, resource: &ResourceRef, context: &AuthorizationContext)
         -> ResourceAttributes;
@@ -321,6 +378,7 @@ pub enum AuthorizationDecision {
         resource: Option<ResourceRef>,
         action: Option<Action>,
         matched_rules: Vec<String>,
+        conditions: Vec<ConditionEvidence>,
         audit_event_id: Option<AuditEventId>,
     },
     Deny {
@@ -330,6 +388,7 @@ pub enum AuthorizationDecision {
         action: Option<Action>,
         policy_id: Option<PolicyId>,
         matched_rules: Vec<String>,
+        conditions: Vec<ConditionEvidence>,
         audit_event_id: Option<AuditEventId>,
     },
 }
@@ -360,6 +419,8 @@ pub enum DenialReason {
     UnsupportedConnector,
     InvalidSession,
     MissingCredential,
+    PolicyDenied,
+    ConditionFailed,
     /// The decision could not be durably recorded, so it is not a decision.
     AuditUnavailable,
 }
@@ -385,7 +446,42 @@ impl DenialReason {
             Self::UnsupportedConnector => "unsupported_connector",
             Self::InvalidSession => "invalid_session",
             Self::MissingCredential => "missing_credential",
+            Self::PolicyDenied => "policy_denied",
+            Self::ConditionFailed => "condition_failed",
             Self::AuditUnavailable => "audit_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionReason {
+    AllowedByPolicy,
+    CapabilityMissing,
+    PolicyDenied,
+    TenantMismatch,
+    ConditionFailed,
+    ResourceResolutionFailed,
+    PrincipalMissing,
+    SessionInvalid,
+    RouteUnprotected,
+    AuthorityUnavailable,
+    FailClosed,
+}
+
+impl DecisionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllowedByPolicy => "allowed_by_policy",
+            Self::CapabilityMissing => "capability_missing",
+            Self::PolicyDenied => "policy_denied",
+            Self::TenantMismatch => "tenant_mismatch",
+            Self::ConditionFailed => "condition_failed",
+            Self::ResourceResolutionFailed => "resource_resolution_failed",
+            Self::PrincipalMissing => "principal_missing",
+            Self::SessionInvalid => "session_invalid",
+            Self::RouteUnprotected => "route_unprotected",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::FailClosed => "fail_closed",
         }
     }
 }
@@ -402,6 +498,43 @@ impl AuthorizationDecision {
         match self {
             Self::Allow { grant, .. } => Some(grant),
             Self::Deny { .. } => None,
+        }
+    }
+
+    pub fn conditions(&self) -> &[ConditionEvidence] {
+        match self {
+            Self::Allow { conditions, .. } | Self::Deny { conditions, .. } => conditions,
+        }
+    }
+
+    pub fn reason(&self) -> DecisionReason {
+        match self {
+            Self::Allow { .. } => DecisionReason::AllowedByPolicy,
+            Self::Deny { reason, .. } => match reason {
+                DenialReason::UnknownPrincipal => DecisionReason::PrincipalMissing,
+                DenialReason::TenantMismatch | DenialReason::UnknownTenant => {
+                    DecisionReason::TenantMismatch
+                }
+                DenialReason::PolicyNotFound | DenialReason::UnknownCapability => {
+                    DecisionReason::AuthorityUnavailable
+                }
+                DenialReason::CapabilityNotGranted
+                | DenialReason::MissingClaim
+                | DenialReason::ClaimMismatch => DecisionReason::CapabilityMissing,
+                DenialReason::ExpiredSession
+                | DenialReason::RevokedSession
+                | DenialReason::InvalidSession
+                | DenialReason::MissingCredential => DecisionReason::SessionInvalid,
+                DenialReason::PolicyDenied => DecisionReason::PolicyDenied,
+                DenialReason::ConditionFailed => DecisionReason::ConditionFailed,
+                DenialReason::ExpiredDelegation
+                | DenialReason::RevokedDelegation
+                | DenialReason::InvalidDelegation
+                | DenialReason::AgentRevoked
+                | DenialReason::AgentSuspended
+                | DenialReason::UnsupportedConnector
+                | DenialReason::AuditUnavailable => DecisionReason::FailClosed,
+            },
         }
     }
 }

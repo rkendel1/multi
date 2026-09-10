@@ -6,7 +6,8 @@ pub use evaluator::{
     PolicyEvaluationError,
 };
 pub use policy::{
-    Action, AuthorityBasis, AuthorizationContext, AuthorizationDecision, AuthorizationRequest,
-    CapabilityEnvelope, Condition, DenialReason, Effect, GrantedCapability, Policy,
+    Action, AuthorityBasis, AuthorizationContext, AuthorizationDecision, AuthorizationEvidence,
+    AuthorizationOutcome, AuthorizationRequest, CapabilityEnvelope, Condition, ConditionEvidence,
+    ConditionResult, DecisionReason, DenialReason, Effect, GrantedCapability, Policy,
     PrincipalAttribute, ResourceAttributes, ResourceRef, ResourceResolver, ResourceSelector, Rule,
 };
