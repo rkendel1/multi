@@ -113,7 +113,7 @@ fn capabilities_gate_the_application() {
     // Alice owns the tenant and still cannot charge it.
     let charge = transport.call(&Call::post("/billing/charge", "{}").with_session(&credential));
     assert_eq!(charge.status, 403);
-    assert_eq!(reason(&charge), "capability_not_granted");
+    assert_eq!(reason(&charge), "condition_failed");
 }
 
 // 7. Tenants are isolated for humans.
@@ -207,7 +207,7 @@ fn agents_act_within_their_delegation() {
     // The delegation did not include billing.
     let charge = transport.call(&Call::post("/billing/charge", "{}").with_session(&credential));
     assert_eq!(charge.status, 403);
-    assert_eq!(reason(&charge), "capability_not_granted");
+    assert_eq!(reason(&charge), "delegation_missing");
 
     // The context keeps the two principals distinct.
     let profile = transport.call(&Call::get("/profile").with_session(&credential));
@@ -248,7 +248,7 @@ fn revoking_a_delegation_takes_effect_immediately() {
 
     let after = transport.call(&Call::get("/invoices").with_session(&agent_session));
     assert_eq!(after.status, 403);
-    assert_eq!(reason(&after), "revoked_delegation");
+    assert_eq!(reason(&after), "delegation_revoked");
 
     // Alice is unaffected.
     assert_eq!(

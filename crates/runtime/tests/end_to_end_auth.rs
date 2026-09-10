@@ -235,7 +235,7 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
     assert!(grant.explain().contains("authority: claim"));
     assert_denies(
         &mesh.authorize(&context, &capability("billing.charge"), NOW + 10),
-        DenialReason::DelegationMissing,
+        DenialReason::CapabilityNotGranted,
     );
 
     // Human and agent are distinct principals, both authenticated.
@@ -931,11 +931,11 @@ fn every_unresolved_input_is_denied() {
     };
     assert_denies(
         &mesh.authorize(&context, &capability("invoice.create"), NOW),
-        DenialReason::DelegationMissing,
+        DenialReason::CapabilityNotGranted,
     );
     assert_denies(
         &mesh.authorize(&context, &capability("nonsense.capability"), NOW),
-        DenialReason::DelegationMissing,
+        DenialReason::CapabilityNotGranted,
     );
 }
 
