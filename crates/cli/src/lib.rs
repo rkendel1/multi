@@ -17,6 +17,7 @@ use appport_auth_mesh_surface::{render_json_with, render_text, AuthSurface};
 pub mod control;
 pub mod init;
 pub mod serve;
+pub mod studio;
 
 pub const USAGE: &str = "\
 authboundry — the application authority boundary
@@ -24,6 +25,9 @@ authboundry — the application authority boundary
 USAGE:
     authboundry inspect [FILE] [--json] [--mode embedded|standalone]
     authboundry init [PATH] [--dry-run] [--json] [--yes] [--standalone]
+    authboundry attach [PATH] --upstream URL [--yes]
+    authboundry status [PATH] [--server URL]
+    authboundry studio [PATH] [--no-open] [--addr ADDRESS]
     authboundry verify [PATH] [--json]
     authboundry fingerprint [FILE]
     authboundry routes [FILE]
@@ -63,8 +67,8 @@ SERVE OPTIONS:
     --public PATH               forward this path prefix without a session
     --require PATH=CAPABILITY   require a capability for this path prefix
 
-FILE defaults to the first of authboundry.toml, appport.auth, authport.toml or
-auth.appport that exists in the current directory.
+FILE defaults to authboundry.toml, appport.auth, appport.toml or auth.appport in
+the current directory. Legacy declaration names remain readable when explicit.
 ";
 
 /// Candidate declaration files, in the order they are tried.
@@ -135,6 +139,15 @@ where
     }
     if matches!(args.first().map(String::as_str), Some("init")) {
         return init::run(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("attach")) {
+        return init::attach(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("status")) {
+        return init::status(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("studio")) {
+        return studio::run(&args[1..]);
     }
     if matches!(args.first().map(String::as_str), Some("verify")) {
         return init::verify(&args[1..]);
@@ -256,6 +269,14 @@ where
             .unwrap_or_else(|| "(default contract)".to_string());
         error(format!("{}: {}", display, err.message))
     })?;
+
+    if command == "serve" && serve_options.upstream.is_none() {
+        let root = path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        serve_options.upstream = init::adoption_upstream(root);
+    }
 
     let text = match command.as_str() {
         "inspect" => {
@@ -453,15 +474,23 @@ fn run_server(config: AuthConfig, options: &serve::ServeOptions) -> Result<Outpu
     let running = serve::start(config, options)?;
     let address = running.authport.address();
 
-    println!("AuthBoundry listening on http://{} (standalone)", address);
-    println!("  sign in           http://{}/auth/login", address);
-    println!("  session           http://{}/auth/session", address);
-    println!("  providers         http://{}/auth/providers", address);
-    println!("  tenants           {}", running.tenants.join(", "));
+    println!("AuthBoundry listening on http://{}", address);
     match &running.upstream {
-        Some(upstream) => println!("  application       {}", upstream),
-        None => println!("  application       (none: serving the auth surface only)"),
+        Some(upstream) => {
+            println!("Mode:\n  standalone application boundary");
+            println!("Application:\n  ATTACHED {}", upstream);
+            println!("Protection:\n  ACTIVE");
+        }
+        None => {
+            println!("Mode:\n  standalone authority surface");
+            println!("Application:\n  NOT ATTACHED");
+            println!("AuthBoundry is serving authentication and authority endpoints only.");
+            println!("It is NOT currently protecting or proxying an application.");
+        }
     }
+    println!("  sign in    http://{}/auth/login", address);
+    println!("  session    http://{}/auth/session", address);
+    println!("  providers  http://{}/auth/providers", address);
 
     running.authport.wait();
     Ok(Output {
@@ -498,6 +527,14 @@ fn describe(
     if !json {
         let mut out = render_text(&surface);
         if let Some(app) = application {
+            let adoption = root.and_then(init::read_adoption);
+            let upstream = adoption
+                .as_ref()
+                .and_then(|state| state.upstream.as_deref());
+            let integration_mode = adoption
+                .as_ref()
+                .map(|state| state.mode.as_str())
+                .unwrap_or("standalone");
             let proposal = propose_authority(
                 &app,
                 config.fingerprint(),
@@ -510,11 +547,32 @@ fn describe(
                 "  found: {}\n",
                 app.name.as_deref().unwrap_or("(unknown)")
             ));
-            out.push_str("Routes:\n");
+            out.push_str("Application integration:\n");
+            out.push_str(&format!(
+                "  status: {}\n  mode: {}\n  upstream: {}\n",
+                if upstream.is_some() {
+                    "configured"
+                } else {
+                    "unattached"
+                },
+                integration_mode,
+                upstream.unwrap_or("none")
+            ));
+            out.push_str(&format!(
+                "Routes:\n  {} discovered\n",
+                proposal.routes.len()
+            ));
             for route in &proposal.routes {
                 out.push_str(&format!("  {:<6} {}\n", route.method, route.path));
             }
             out.push_str("Inferred capabilities:\n");
+            if proposal
+                .routes
+                .iter()
+                .all(|route| route.inference.is_none())
+            {
+                out.push_str("  none\n");
+            }
             for route in proposal
                 .routes
                 .iter()
@@ -528,6 +586,9 @@ fn describe(
                 ));
             }
             out.push_str("Safe defaults:\n");
+            if proposal.routes.is_empty() {
+                out.push_str("  protected routes deny by default\n");
+            }
             for route in &proposal.routes {
                 out.push_str(&format!(
                     "  {:<6} {:<24} {}\n",
@@ -536,6 +597,7 @@ fn describe(
                     route.protection.as_str()
                 ));
             }
+            out.push_str("Authority:\n  configured\nProtection:\n  inactive\n");
             out.push_str("Nothing has been changed.\n");
         }
         return out;
@@ -590,6 +652,17 @@ fn resolve_file(file: Option<PathBuf>) -> Result<PathBuf, CliError> {
 mod tests {
     use super::*;
 
+    fn assert_no_deprecated_public_name(surface: &str) {
+        for forbidden in ["authport", "AuthPort", "_authport", "authport_"] {
+            assert!(
+                !surface.contains(forbidden),
+                "deprecated public identifier `{}` leaked in:\n{}",
+                forbidden,
+                surface
+            );
+        }
+    }
+
     fn write_declaration(dir: &std::path::Path, body: &str) -> PathBuf {
         let path = dir.join("appport.auth");
         std::fs::write(&path, body).unwrap();
@@ -635,6 +708,7 @@ use auth {
         assert!(output.text.contains("Agents:\n  enabled"));
         assert!(output.text.contains("Delegation:\n  enabled"));
         assert!(output.text.contains("/auth/delegations"));
+        assert_no_deprecated_public_name(&output.text);
     }
 
     #[test]
@@ -651,7 +725,7 @@ use auth {
         assert!(json.contains("\"mode\": \"any\""));
         assert!(json.contains("\"boundary\": {\"contract\": \"authboundry.boundary/v1\""));
         assert!(json.contains("\"modes\": [\"embedded\", \"standalone\"]"));
-        assert!(json.contains("\"session_credential\": \"cookie:authport_session\""));
+        assert!(json.contains("\"session_credential\": \"cookie:authboundry_session\""));
         assert!(json.contains("\"aliases\": [\"/auth/sign-in\"]"));
 
         let standalone = run_with(&["inspect", file, "--json", "--mode", "standalone"])
@@ -777,12 +851,12 @@ use auth {
         .expect("sign-in responds");
         assert_eq!(signed_in.status, 200);
         let credential =
-            cookie_value(&signed_in, "authport_session").expect("a session cookie is issued");
+            cookie_value(&signed_in, "authboundry_session").expect("a session cookie is issued");
 
         let granted = send(
             address,
             &ClientRequest::post_json("/auth/authorize", "{\"capability\": \"invoice.read\"}")
-                .with_cookie("authport_session", &credential),
+                .with_cookie("authboundry_session", &credential),
         )
         .unwrap();
         assert!(granted.body_string().contains("\"allowed\": true"));
@@ -790,7 +864,7 @@ use auth {
         let refused = send(
             address,
             &ClientRequest::post_json("/auth/authorize", "{\"capability\": \"billing.charge\"}")
-                .with_cookie("authport_session", &credential),
+                .with_cookie("authboundry_session", &credential),
         )
         .unwrap();
         assert!(refused.body_string().contains("\"allowed\": false"));
@@ -915,6 +989,7 @@ use auth {
         assert!(!preview.contains("hidden"));
         assert!(preview.contains("Files to modify:"));
         assert!(preview.contains("src/server.js"));
+        assert_no_deprecated_public_name(&preview);
         assert!(!dir.join("authboundry.toml").exists());
 
         let json = run_with(&["init", dir.to_str().unwrap(), "--json"])
@@ -922,28 +997,39 @@ use auth {
             .text;
         assert!(json.contains("\"application\": \"zero-app\""));
         assert!(json.contains("\"framework\": \"Express\""));
-        assert!(json.contains("\"already_integrated\": false"));
+        assert!(json.contains("\"already_configured\": false"));
         assert!(json.contains("\"changes\": ["));
 
         let applied = run_with(&["init", dir.to_str().unwrap(), "--yes"])
             .unwrap()
             .text;
-        assert!(applied.contains("✓ AuthBoundry integrated"));
+        assert!(applied.contains("AuthBoundry adoption complete."));
         assert!(applied.contains("✓ 3 application routes discovered"));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert_eq!(server.matches("app.use(authboundry());").count(), 1);
+        assert_eq!(server.matches("app.use(authboundry());").count(), 0);
         assert!(server.contains("app.get('/health'"));
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
-        assert!(package_json.contains("\"authboundry\":\"latest\""));
+        assert!(!package_json.contains("@authboundry/core"));
         assert!(dir.join("authboundry.toml").exists());
         assert!(dir.join(".authboundry/adoption.json").exists());
+        assert_no_deprecated_public_name(
+            &std::fs::read_to_string(dir.join("authboundry.toml")).unwrap(),
+        );
+        assert_no_deprecated_public_name(
+            &std::fs::read_to_string(dir.join(".authboundry/adoption.json")).unwrap(),
+        );
+        let adoption = std::fs::read_to_string(dir.join(".authboundry/adoption.json")).unwrap();
+        assert!(adoption.contains("\"authority\": \"configured\""));
+        assert!(adoption.contains("\"attachment\": \"none\""));
+        assert!(adoption.contains("\"protection\": \"inactive\""));
+        assert!(applied.contains("Application integration not established"));
 
         let second = run_with(&["init", dir.to_str().unwrap(), "--yes"])
             .unwrap()
             .text;
         assert!(second.contains("AuthBoundry already detected."));
         let server_again = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert_eq!(server_again.matches("app.use(authboundry());").count(), 1);
+        assert_eq!(server_again.matches("app.use(authboundry());").count(), 0);
 
         let routes = run_with(&["routes", dir.join("authboundry.toml").to_str().unwrap()])
             .unwrap()
@@ -957,7 +1043,7 @@ use auth {
             .text;
         assert!(verify.contains("\"ok\": true"));
         assert!(verify.contains("\"contract_fingerprint_stable\": true"));
-        assert!(verify.contains("\"live_authority_available\": true"));
+        assert!(verify.contains("\"authority_state_available\": true"));
     }
 
     #[test]
@@ -983,16 +1069,16 @@ use auth {
         assert!(applied.contains("✓ 5 application routes discovered"));
 
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
-        assert!(package_json.contains("\"authboundry\":\"latest\""));
+        assert!(!package_json.contains("@authboundry/core"));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert!(server.contains("const { authboundry } = require(\"authboundry\");"));
-        assert_eq!(server.matches("app.use(authboundry());").count(), 1);
+        assert!(!server.contains("@authboundry/core"));
+        assert_eq!(server.matches("app.use(authboundry());").count(), 0);
         assert!(server.contains("app.post('/refunds', createRefund);"));
 
         let verify = run_with(&["verify", dir.to_str().unwrap()]).unwrap().text;
         assert!(verify.contains("✓ application discovered"));
-        assert!(verify.contains("✓ AuthBoundry boundary present"));
-        assert!(verify.contains("✓ live authority state available"));
+        assert!(verify.contains("✓ AuthBoundry configuration present"));
+        assert!(verify.contains("✓ authority state available"));
 
         let routes = run_with(&["routes", dir.join("authboundry.toml").to_str().unwrap()])
             .unwrap()
@@ -1020,13 +1106,16 @@ use auth {
         .unwrap();
         let standalone_server = std::fs::read_to_string(standalone.join("src/server.js")).unwrap();
         assert!(!standalone_server.contains("authboundry()"));
-        let manifest = std::fs::read_to_string(standalone.join(".authboundry/adoption.json")).unwrap();
+        let manifest =
+            std::fs::read_to_string(standalone.join(".authboundry/adoption.json")).unwrap();
         assert!(manifest.contains("\"mode\": \"standalone\""));
         assert!(manifest.contains("\"run_command\": \"node src/server.js\""));
-        let standalone_routes =
-            run_with(&["routes", standalone.join("authboundry.toml").to_str().unwrap()])
-                .unwrap()
-                .text;
+        let standalone_routes = run_with(&[
+            "routes",
+            standalone.join("authboundry.toml").to_str().unwrap(),
+        ])
+        .unwrap()
+        .text;
         assert!(standalone_routes.contains("POST               /refunds"));
     }
 
@@ -1056,10 +1145,48 @@ use auth {
         let applied = run_with(&["init", dir.to_str().unwrap(), "--standalone", "--yes"])
             .unwrap()
             .text;
-        assert!(applied.contains("✓ Runtime boundary configured"));
+        assert!(applied.contains("AuthBoundry adoption complete."));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
         assert!(!server.contains("authboundry()"));
         let manifest = std::fs::read_to_string(dir.join(".authboundry/adoption.json")).unwrap();
         assert!(manifest.contains("\"mode\": \"standalone\""));
+    }
+
+    #[test]
+    fn attach_records_a_real_reachable_upstream_and_status_stays_truthful() {
+        use std::net::TcpListener;
+
+        let dir = temp_dir("attach-upstream");
+        write_express_app(&dir);
+        run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepts = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let _ = listener.accept();
+            }
+        });
+        let upstream = format!("http://{}", address);
+        let attached = init::attach(&[
+            dir.to_string_lossy().to_string(),
+            "--upstream".to_string(),
+            upstream.clone(),
+            "--yes".to_string(),
+        ])
+        .unwrap()
+        .text;
+        assert!(attached.contains("Application attached."));
+        let status = init::status(&[dir.to_string_lossy().to_string()])
+            .unwrap()
+            .text;
+        assert!(
+            status.contains(&format!("✓ upstream {}", upstream)),
+            "{}",
+            status
+        );
+        assert!(status.contains("Runtime:\n  stopped"));
+        assert!(status.contains("Protection:\n  not active"));
+        accepts.join().unwrap();
     }
 }

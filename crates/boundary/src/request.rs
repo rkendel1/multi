@@ -8,7 +8,7 @@ use appport_auth_mesh_surface::BoundarySurface;
 /// A standalone deployment injects the resolved context into the upstream
 /// request using this prefix, so anything arriving from outside carrying it is
 /// stripped before the request is looked at.
-pub const RESERVED_HEADER_PREFIX: &str = "x-authport-";
+pub const RESERVED_HEADER_PREFIX: &str = "x-authboundry-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Method {

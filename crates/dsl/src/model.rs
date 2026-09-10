@@ -489,7 +489,7 @@ impl Default for StorageConfig {
         Self {
             authority: "feltdb".to_string(),
             audit: "feltdb".to_string(),
-            reporting: "authport_projection".to_string(),
+            reporting: "authboundry_projection".to_string(),
         }
     }
 }
@@ -812,7 +812,7 @@ pub struct UiTheme {
 impl Default for UiTheme {
     fn default() -> Self {
         Self {
-            name: "authport-default".to_string(),
+            name: "authboundry-default".to_string(),
         }
     }
 }

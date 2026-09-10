@@ -6,7 +6,9 @@
 //! embedded deployment uses.
 
 use std::collections::BTreeMap;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 
 use appport_auth_mesh_authz::{Condition, Policy, Rule};
 use appport_auth_mesh_boundary::{AuthPortRuntime, BindingMode, Method, Requirement};
@@ -31,6 +33,7 @@ pub struct ServeOptions {
     pub public_paths: Vec<String>,
     pub required: Vec<(String, String)>,
     pub proxy_secret: String,
+    pub studio_page: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -43,7 +46,8 @@ impl Default for ServeOptions {
             upstream: None,
             public_paths: Vec::new(),
             required: Vec::new(),
-            proxy_secret: "authport-development-secret".to_string(),
+            proxy_secret: "authboundry-development-secret".to_string(),
+            studio_page: None,
         }
     }
 }
@@ -195,9 +199,19 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
 
     let server = match &options.upstream {
         Some(upstream) => {
-            let address = upstream
+            let socket = upstream
+                .strip_prefix("http://")
+                .unwrap_or(upstream)
+                .trim_end_matches('/');
+            let address: SocketAddr = socket
                 .parse()
                 .map_err(|_| error(format!("invalid --upstream address `{}`", upstream)))?;
+            TcpStream::connect_timeout(&address, Duration::from_millis(500)).map_err(|err| {
+                error(format!(
+                    "application upstream `{}` is not reachable: {}",
+                    upstream, err
+                ))
+            })?;
             let proxy = UpstreamProxy::new(
                 address,
                 application_policy(options),
@@ -208,6 +222,10 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
         // With no application behind it, AuthBoundry still serves its own surface:
         // sign-in, session, providers and authorization.
         None => AuthPortServer::new(runtime, Arc::new(AuthOnly)).with_tenants(&tenant_names),
+    };
+    let server = match &options.studio_page {
+        Some(page) => server.with_studio_page(page.clone()),
+        None => server,
     };
 
     let handle = serve(Arc::new(server), options.address.as_str())

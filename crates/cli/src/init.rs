@@ -1,8 +1,12 @@
 use std::fs;
+use std::io::{self, BufRead, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use appport_auth_mesh_discovery::{
-    discover, propose_authority, ApplicationCandidate, EntrypointKind, RouteCandidate,
+    discover, propose_authority, ApplicationCandidate, RouteCandidate,
 };
 
 use crate::{error, CliError, Output};
@@ -58,14 +62,14 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
             std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?
         }
     };
-    let plan = build_plan(&root, options.mode.unwrap_or(InitMode::Embedded))?;
+    let plan = build_plan(&root, options.mode.unwrap_or(InitMode::Standalone))?;
 
     if options.json {
         return Ok(Output {
             text: render_plan_json(&plan, options.dry_run),
         });
     }
-    if options.dry_run || !options.yes {
+    if options.dry_run {
         return Ok(Output {
             text: render_plan_text(&plan, true),
         });
@@ -77,14 +81,224 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         });
     }
 
+    let interactive = !options.yes;
+    if interactive {
+        let preview = render_plan_text(&plan, true);
+        print!("{}Apply this adoption plan? [y/N] ", preview);
+        io::stdout()
+            .flush()
+            .map_err(|err| error(format!("cannot display adoption plan: {}", err)))?;
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        if !confirm_adoption(&mut input)? {
+            return Ok(Output {
+                text: "Adoption cancelled. No files were changed.\n".to_string(),
+            });
+        }
+
+        // Discovery may have changed while the user reviewed the preview.
+        // Never apply a plan other than the exact plan that was confirmed.
+        let current = build_plan(&root, options.mode.unwrap_or(InitMode::Standalone))?;
+        if current != plan {
+            return Err(error(
+                "the application changed while the adoption plan was being reviewed; refusing to apply a stale plan",
+            ));
+        }
+    }
+
     apply_plan(&plan)?;
     let verified = verify_root(&root)?;
     if !verified.ok {
         return Err(error("AuthBoundry initialization verification failed"));
     }
+    let mut applied = applied_plan_text(&plan, &verified);
+    if interactive {
+        applied.push_str(&launch_studio(&root));
+    }
     Ok(Output {
-        text: first_run_text(&plan, &verified),
+        text: if interactive {
+            applied
+        } else {
+            format!("{}{}", render_plan_text(&plan, true), applied)
+        },
     })
+}
+
+fn launch_studio(root: &Path) -> String {
+    if cfg!(test) || std::env::var_os("AUTHBOUNDRY_NO_STUDIO").is_some() {
+        return "Studio:\n  Run `authboundry studio` to continue.\n".to_string();
+    }
+    let executable = match std::env::current_exe() {
+        Ok(value) => value,
+        Err(_) => return studio_fallback(),
+    };
+    let child = Command::new(executable)
+        .arg("studio")
+        .arg(root)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if child.is_err() {
+        return studio_fallback();
+    }
+    for _ in 0..20 {
+        if upstream_reachable("http://127.0.0.1:8787") {
+            return "Starting Studio...\n✓ Studio listening on http://127.0.0.1:8787\nOpening browser...\n".to_string();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    studio_fallback()
+}
+
+fn studio_fallback() -> String {
+    "Studio could not be started automatically.\nRun:\n  authboundry studio\n".to_string()
+}
+
+pub fn attach(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut upstream = None;
+    let mut yes = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--yes" => yes = true,
+            "--upstream" => {
+                index += 1;
+                upstream = Some(
+                    args.get(index)
+                        .ok_or_else(|| error("--upstream needs a value"))?
+                        .clone(),
+                );
+            }
+            flag if flag.starts_with('-') => return Err(error(format!("unknown flag `{}`", flag))),
+            value => root = Some(PathBuf::from(value)),
+        }
+        index += 1;
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let upstream = upstream.ok_or_else(|| {
+        error("no application upstream configured\nUse:\n  authboundry attach --upstream http://127.0.0.1:9000")
+    })?;
+    upstream_address(&upstream)?;
+    if !upstream_reachable(&upstream) {
+        return Err(error(format!(
+            "application upstream `{}` is not reachable; start the application and try again",
+            upstream
+        )));
+    }
+    let before = fs::read_to_string(root.join(MANIFEST_FILE))
+        .map_err(|_| error("no AuthBoundry adoption exists; run `authboundry init` first"))?;
+    let application = discover(&root).ok_or_else(|| error("no supported application found"))?;
+    let after = render_manifest_with_upstream(&application, InitMode::Standalone, Some(&upstream));
+    let preview = format!(
+        "AuthBoundry · Attach Application\nApplication:\n  {}\nIntegration mode:\n  standalone\nApplication upstream:\n  {}\nAuthBoundry will:\n  ✓ receive application requests\n  ✓ establish the authority context\n  ✓ enforce configured route policy\n  ✓ forward authorized requests\nApplication source:\n  unchanged\nPatch preview:\n--- .authboundry/adoption.json\n+++ .authboundry/adoption.json\n+ attachment: upstream\n+ upstream: {}\n",
+        application.name.as_deref().unwrap_or("(unknown)"),
+        upstream,
+        upstream
+    );
+    if !yes {
+        print!("{}Attach this application? [y/N] ", preview);
+        io::stdout().flush().map_err(|err| error(err.to_string()))?;
+        if !confirm_adoption(&mut io::stdin().lock())? {
+            return Ok(Output {
+                text: "Attachment cancelled. No files were changed.\n".to_string(),
+            });
+        }
+        if fs::read_to_string(root.join(MANIFEST_FILE)).ok().as_deref() != Some(before.as_str()) {
+            return Err(error("the adoption state changed while the attachment plan was reviewed; refusing to apply a stale plan"));
+        }
+    }
+    atomic_write(&root.join(MANIFEST_FILE), &after)?;
+    Ok(Output {
+        text: format!(
+            "{}Application attached.\nAuthority state:\n  configured\nApplication attachment:\n  upstream {}\nProtection:\n  ready when AuthBoundry is running\nApplication source:\n  unchanged\n",
+            if yes { preview } else { String::new() },
+            upstream
+        ),
+    })
+}
+
+pub fn status(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut server = "http://127.0.0.1:8787".to_string();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--server" => {
+                index += 1;
+                server = args
+                    .get(index)
+                    .ok_or_else(|| error("--server needs a value"))?
+                    .clone();
+            }
+            flag if flag.starts_with('-') => return Err(error(format!("unknown flag `{}`", flag))),
+            value => root = Some(PathBuf::from(value)),
+        }
+        index += 1;
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let adoption = read_adoption(&root);
+    let authority = resolve_config(&root).is_ok();
+    let running = upstream_reachable(&server);
+    let upstream = adoption.as_ref().and_then(|state| state.upstream.clone());
+    let attached = upstream.as_deref().map(upstream_reachable).unwrap_or(false);
+    let protected = running && attached;
+    let application = adoption
+        .as_ref()
+        .map(|state| state.application.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("(none)");
+    let mode = adoption
+        .as_ref()
+        .map(|state| state.mode.as_str())
+        .unwrap_or("standalone");
+    let routes = adoption.as_ref().map(|state| state.routes).unwrap_or(0);
+    let attachment = match (&upstream, attached) {
+        (Some(value), true) => format!("✓ upstream {}", value),
+        (Some(value), false) => format!("configured but unreachable: {}", value),
+        (None, _) => "none".to_string(),
+    };
+    let reason = if upstream.is_none() {
+        "no application upstream configured"
+    } else if !attached {
+        "application upstream is not reachable"
+    } else if !running {
+        "AuthBoundry runtime is stopped"
+    } else {
+        "authority boundary is active"
+    };
+    Ok(Output {
+        text: format!(
+            "AuthBoundry · Status\n────────────────────\nAuthority:\n  {}\nRuntime:\n  {}\nApplication:\n  {}\nAttachment:\n  {}\nProtection:\n  {}\nMode:\n  {}\nRoutes:\n  {} discovered\nReason:\n  {}\n",
+            if authority { "configured" } else { "not configured" },
+            if running { "running" } else { "stopped" },
+            application,
+            attachment,
+            if protected { "✓ active" } else { "not active" },
+            mode,
+            routes,
+            reason
+        ),
+    })
+}
+
+fn confirm_adoption(input: &mut impl BufRead) -> Result<bool, CliError> {
+    let mut answer = String::new();
+    match input.read_line(&mut answer) {
+        Ok(0) => Err(error(
+            "AuthBoundry cannot obtain interactive confirmation.\nRefusing to modify the application.\nUse:\n  authboundry init --yes",
+        )),
+        Ok(_) => Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")),
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+            Err(error("AuthBoundry adoption interrupted; no files were changed"))
+        }
+        Err(err) => Err(error(format!(
+            "AuthBoundry cannot obtain interactive confirmation: {}\nRefusing to modify the application.\nUse:\n  authboundry init --yes",
+            err
+        ))),
+    }
 }
 
 pub fn verify(args: &[String]) -> Result<Output, CliError> {
@@ -168,27 +382,15 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
     let mut changes = Vec::new();
 
     if !already_integrated {
-        if mode == InitMode::Embedded {
-            if let Some(change) = node_dependency_change(&application)? {
-                changes.push(change);
-            }
-            if let Some(change) = node_embedded_change(&application)? {
-                changes.push(change);
-            }
-        }
         if !application.existing_authport.configuration {
             changes.push(config_change(root));
         }
         changes.push(manifest_change(&application, mode));
     }
 
-    let integration_supported = mode == InitMode::Standalone
-        || changes
-            .iter()
-            .any(|change| change.path.extension().and_then(|ext| ext.to_str()) == Some("js"))
-        || changes
-            .iter()
-            .any(|change| change.path.extension().and_then(|ext| ext.to_str()) == Some("ts"));
+    // The current public package does not expose server middleware. Adoption
+    // records the authority boundary without rewriting application source.
+    let integration_supported = mode == InitMode::Standalone;
 
     Ok(InitPlan {
         application,
@@ -201,179 +403,8 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
 }
 
 fn boundary_integrated(application: &ApplicationCandidate, mode: InitMode) -> bool {
-    match mode {
-        InitMode::Embedded => {
-            application.existing_authport.configuration
-                && (application.existing_authport.middleware
-                    || application.existing_authport.initialization)
-        }
-        InitMode::Standalone => {
-            application.existing_authport.configuration && application.existing_authport.manifest
-        }
-    }
-}
-
-fn node_dependency_change(
-    application: &ApplicationCandidate,
-) -> Result<Option<FileChange>, CliError> {
-    if application.language.as_deref() != Some("Node") {
-        return Ok(None);
-    }
-    let path = application.root.join("package.json");
-    let before = fs::read_to_string(&path)
-        .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
-    if before.contains("\"authboundry\"") {
-        return Ok(None);
-    }
-    Ok(Some(FileChange {
-        path,
-        before: Some(before.clone()),
-        after: add_authport_dependency(&before)?,
-    }))
-}
-
-fn add_authport_dependency(package_json: &str) -> Result<String, CliError> {
-    if let Some(dependencies_index) = package_json.find("\"dependencies\"") {
-        let after_key = &package_json[dependencies_index + "\"dependencies\"".len()..];
-        let colon = after_key
-            .find(':')
-            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
-        let after_colon = dependencies_index + "\"dependencies\"".len() + colon + 1;
-        let object_start = package_json[after_colon..]
-            .find('{')
-            .map(|index| after_colon + index)
-            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
-        let object_end = matching_brace(package_json, object_start)
-            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
-        let inside = &package_json[object_start + 1..object_end];
-        let insertion = if inside.trim().is_empty() {
-            "\"authboundry\":\"latest\"".to_string()
-        } else {
-            ",\"authboundry\":\"latest\"".to_string()
-        };
-        return Ok(format!(
-            "{}{}{}",
-            &package_json[..object_end],
-            insertion,
-            &package_json[object_end..]
-        ));
-    }
-
-    let root_end = package_json
-        .rfind('}')
-        .ok_or_else(|| error("package.json root must be an object"))?;
-    let prefix = &package_json[..root_end];
-    let separator = if prefix.trim_end().ends_with('{') {
-        ""
-    } else {
-        ","
-    };
-    Ok(format!(
-        "{}{}\"dependencies\":{{\"authboundry\":\"latest\"}}{}",
-        prefix,
-        separator,
-        &package_json[root_end..]
-    ))
-}
-
-fn matching_brace(source: &str, start: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in source
-        .char_indices()
-        .skip_while(|(index, _)| *index < start)
-    {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn node_embedded_change(
-    application: &ApplicationCandidate,
-) -> Result<Option<FileChange>, CliError> {
-    if application.language.as_deref() != Some("Node")
-        || application.framework.as_deref() != Some("Express")
-    {
-        return Ok(None);
-    }
-    let Some(entrypoint) = application
-        .entrypoints
-        .iter()
-        .find(|candidate| matches!(candidate.kind, EntrypointKind::NodeScript))
-    else {
-        return Ok(None);
-    };
-    let before = fs::read_to_string(&entrypoint.path).map_err(|err| {
-        error(format!(
-            "cannot read entrypoint `{}`: {}",
-            entrypoint.path.display(),
-            err
-        ))
-    })?;
-    if before.contains("authboundry()") || before.contains("app.use(authboundry") {
-        return Ok(None);
-    }
-    let after = integrate_express(&before)?;
-    Ok(Some(FileChange {
-        path: entrypoint.path.clone(),
-        before: Some(before),
-        after,
-    }))
-}
-
-fn integrate_express(source: &str) -> Result<String, CliError> {
-    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
-    let uses_imports = lines
-        .iter()
-        .any(|line| line.trim_start().starts_with("import "));
-    let auth_line = if uses_imports {
-        "import { authboundry } from \"authboundry\";".to_string()
-    } else {
-        "const { authboundry } = require(\"authboundry\");".to_string()
-    };
-    if !lines.iter().any(|line| line.contains("authboundry")) {
-        let insert_at = lines
-            .iter()
-            .rposition(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("import ")
-                    || trimmed.starts_with("const ") && trimmed.contains("require(")
-            })
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        lines.insert(insert_at, auth_line);
-    }
-    let app_index = lines
-        .iter()
-        .position(|line| line.contains("express()"))
-        .ok_or_else(|| error("Express entrypoint has no `express()` application to mount"))?;
-    lines.insert(app_index + 1, "app.use(authboundry());".to_string());
-    let mut out = lines.join("\n");
-    if source.ends_with('\n') {
-        out.push('\n');
-    }
-    Ok(out)
+    let _ = mode;
+    application.existing_authport.configuration && application.existing_authport.manifest
 }
 
 fn config_change(root: &Path) -> FileChange {
@@ -450,7 +481,7 @@ struct VerifyReport {
     runtime_starts: bool,
     control_plane_responds: bool,
     application_routes_remain_reachable: bool,
-    authport_routes_respond: bool,
+    authboundry_routes_respond: bool,
     contract_fingerprint_stable: bool,
     live_authority_available: bool,
     application_routes: usize,
@@ -493,7 +524,7 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
         runtime_starts,
         control_plane_responds: runtime_starts,
         application_routes_remain_reachable: application_routes > 0,
-        authport_routes_respond: runtime_starts,
+        authboundry_routes_respond: runtime_starts,
         contract_fingerprint_stable: runtime_starts,
         live_authority_available: runtime_starts,
         application_routes,
@@ -561,13 +592,13 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
         }
     }
     out.push_str("Proposed integration:\n");
-    if plan.mode == InitMode::Standalone {
-        out.push_str("  + write standalone AuthBoundry adoption manifest\n");
-    } else if plan.integration_supported {
+    if plan.integration_supported && plan.mode == InitMode::Embedded {
         out.push_str("  + initialize AuthBoundry\n  + mount AuthBoundry boundary\n  + preserve existing application routes\n");
     } else {
         out.push_str("  (automatic source integration is not supported for this application)\n");
     }
+    out.push_str("Authority:\n  configured\nApplication attachment:\n  none\n");
+    out.push_str("Reason:\n  automatic source integration is not supported\n  and no application runtime attachment was discovered\n");
     out.push_str("No application routes will be rewritten.\n");
     out.push_str("Files to modify:\n");
     for change in plan.changes.iter().filter(|change| change.before.is_some()) {
@@ -589,28 +620,47 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
         for change in &plan.changes {
             out.push_str(&render_patch(change, &plan.application.root));
         }
-        out.push_str("Run `authboundry init --yes` to apply.\n");
     }
     out
 }
 
-fn first_run_text(plan: &InitPlan, report: &VerifyReport) -> String {
-    format!(
-        "✓ Application detected\n✓ AuthBoundry integrated\n✓ Runtime boundary configured\n✓ {} application routes discovered\n✓ AuthBoundry surface available\nNext:\n  authboundry serve\n  authboundry inspect\n  authboundry routes\n",
+fn applied_plan_text(plan: &InitPlan, report: &VerifyReport) -> String {
+    let mut out = String::from("Applying adoption plan...\n");
+    for change in &plan.changes {
+        let action = if change.before.is_some() {
+            "Modified"
+        } else {
+            "Created"
+        };
+        out.push_str(&format!(
+            "✓ {} {}\n",
+            action,
+            display_path(&change.path, &plan.application.root)
+        ));
+    }
+    out.push_str("✓ Application routes unchanged\n");
+    out.push_str(&format!(
+        "✓ {} application routes discovered\n",
         report.application_routes.max(plan.application.routes.len())
-    )
+    ));
+    out.push_str("✓ Application detected\n✓ AuthBoundry configuration created\n");
+    out.push_str("⚠ Application integration not established\n");
+    out.push_str("Authority state:\n  configured\nApplication state:\n  unattached\n");
+    out.push_str("Reason:\n  no application runtime attachment was discovered\n");
+    out.push_str("AuthBoundry adoption complete.\n");
+    out
 }
 
 fn render_verify_text(report: &VerifyReport) -> String {
     let mark = |ok| if ok { "✓" } else { "✗" };
     format!(
-        "{} application discovered\n{} AuthBoundry boundary present\n{} runtime starts\n{} control plane responds\n{} application routes remain reachable\n{} AuthBoundry routes respond\n{} contract fingerprint stable\n{} live authority state available\n",
+        "{} application discovered\n{} AuthBoundry configuration present\n{} authority configuration valid\n{} control plane surface derivable\n{} application routes discovered\n{} authority routes derivable\n{} contract fingerprint stable\n{} authority state available\n",
         mark(report.application_discovered),
         mark(report.boundary_present),
         mark(report.runtime_starts),
         mark(report.control_plane_responds),
         mark(report.application_routes_remain_reachable),
-        mark(report.authport_routes_respond),
+        mark(report.authboundry_routes_respond),
         mark(report.contract_fingerprint_stable),
         mark(report.live_authority_available)
     )
@@ -618,7 +668,7 @@ fn render_verify_text(report: &VerifyReport) -> String {
 
 fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
     format!(
-        "{{\n  \"application\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"detected\": {},\n  \"already_integrated\": {},\n  \"mode\": \"{}\",\n  \"dry_run\": {},\n  \"routes\": {},\n  \"providers\": [{}],\n  \"changes\": [{}]\n}}\n",
+        "{{\n  \"application\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"detected\": {},\n  \"already_configured\": {},\n  \"mode\": \"{}\",\n  \"dry_run\": {},\n  \"routes\": {},\n  \"providers\": [{}],\n  \"changes\": [{}]\n}}\n",
         escape(plan.application.name.as_deref().unwrap_or("")),
         escape(plan.application.language.as_deref().unwrap_or("")),
         escape(plan.application.framework.as_deref().unwrap_or("")),
@@ -663,14 +713,14 @@ fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
 
 fn render_verify_json(report: &VerifyReport) -> String {
     format!(
-        "{{\"ok\": {}, \"application_discovered\": {}, \"boundary_present\": {}, \"runtime_starts\": {}, \"control_plane_responds\": {}, \"application_routes_remain_reachable\": {}, \"authport_routes_respond\": {}, \"contract_fingerprint_stable\": {}, \"live_authority_available\": {}, \"application_routes\": {}}}\n",
+        "{{\"ok\": {}, \"application_discovered\": {}, \"authority_configured\": {}, \"authority_configuration_valid\": {}, \"control_plane_surface_derivable\": {}, \"application_routes_discovered\": {}, \"authority_routes_derivable\": {}, \"contract_fingerprint_stable\": {}, \"authority_state_available\": {}, \"application_routes\": {}}}\n",
         report.ok,
         report.application_discovered,
         report.boundary_present,
         report.runtime_starts,
         report.control_plane_responds,
         report.application_routes_remain_reachable,
-        report.authport_routes_respond,
+        report.authboundry_routes_respond,
         report.contract_fingerprint_stable,
         report.live_authority_available,
         report.application_routes
@@ -678,10 +728,20 @@ fn render_verify_json(report: &VerifyReport) -> String {
 }
 
 fn render_manifest(application: &ApplicationCandidate, mode: InitMode) -> String {
+    render_manifest_with_upstream(application, mode, None)
+}
+
+fn render_manifest_with_upstream(
+    application: &ApplicationCandidate,
+    mode: InitMode,
+    upstream: Option<&str>,
+) -> String {
     format!(
-        "{{\n  \"application\": \"{}\",\n  \"mode\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"routes\": {}\n}}\n",
+        "{{\n  \"application\": \"{}\",\n  \"mode\": \"{}\",\n  \"authority\": \"configured\",\n  \"attachment\": \"{}\",\n  \"protection\": \"inactive\",\n  \"upstream\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"routes\": {}\n}}\n",
         escape(application.name.as_deref().unwrap_or("")),
         mode_str(mode),
+        if upstream.is_some() { "upstream" } else { "none" },
+        escape(upstream.unwrap_or("")),
         escape(application.language.as_deref().unwrap_or("")),
         escape(application.framework.as_deref().unwrap_or("")),
         escape(application.package_manager.as_deref().unwrap_or("")),
@@ -701,6 +761,64 @@ fn render_manifest(application: &ApplicationCandidate, mode: InitMode) -> String
         ),
         application.routes.len()
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptionState {
+    pub application: String,
+    pub mode: String,
+    pub authority: String,
+    pub upstream: Option<String>,
+    pub routes: usize,
+}
+
+pub fn read_adoption(root: &Path) -> Option<AdoptionState> {
+    let source = fs::read_to_string(root.join(MANIFEST_FILE)).ok()?;
+    Some(AdoptionState {
+        application: json_string(&source, "application").unwrap_or_default(),
+        mode: json_string(&source, "mode").unwrap_or_else(|| "standalone".to_string()),
+        authority: json_string(&source, "authority").unwrap_or_else(|| "configured".to_string()),
+        upstream: json_string(&source, "upstream").filter(|value| !value.is_empty()),
+        routes: json_usize(&source, "routes").unwrap_or(0),
+    })
+}
+
+pub fn adoption_upstream(root: &Path) -> Option<String> {
+    read_adoption(root)?.upstream
+}
+
+fn json_string(source: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{}\":", key);
+    let value = source.split_once(&marker)?.1.trim_start();
+    let value = value.strip_prefix('"')?;
+    Some(value.split_once('"')?.0.to_string())
+}
+
+fn json_usize(source: &str, key: &str) -> Option<usize> {
+    let marker = format!("\"{}\":", key);
+    let value = source.split_once(&marker)?.1.trim_start();
+    value
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn upstream_address(value: &str) -> Result<SocketAddr, CliError> {
+    let address = value
+        .strip_prefix("http://")
+        .unwrap_or(value)
+        .trim_end_matches('/');
+    address.parse().map_err(|_| {
+        error("application upstream must be an explicit HTTP socket, for example http://127.0.0.1:9000")
+    })
+}
+
+pub(crate) fn upstream_reachable(value: &str) -> bool {
+    upstream_address(value)
+        .ok()
+        .and_then(|address| TcpStream::connect_timeout(&address, Duration::from_millis(250)).ok())
+        .is_some()
 }
 
 fn render_patch(change: &FileChange, root: &Path) -> String {
@@ -744,4 +862,26 @@ fn escape(value: &str) -> String {
 #[allow(dead_code)]
 fn _manifest_path(root: &Path) -> PathBuf {
     root.join(MANIFEST_DIR)
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::confirm_adoption;
+    use std::io::Cursor;
+
+    #[test]
+    fn confirmation_defaults_to_no_and_accepts_only_explicit_yes() {
+        assert!(!confirm_adoption(&mut Cursor::new("\n")).unwrap());
+        assert!(!confirm_adoption(&mut Cursor::new("n\n")).unwrap());
+        assert!(confirm_adoption(&mut Cursor::new("y\n")).unwrap());
+        assert!(confirm_adoption(&mut Cursor::new("YES\n")).unwrap());
+    }
+
+    #[test]
+    fn unavailable_stdin_fails_closed() {
+        let error = confirm_adoption(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();
+        assert!(error
+            .message
+            .contains("cannot obtain interactive confirmation"));
+    }
 }

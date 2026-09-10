@@ -75,7 +75,7 @@ impl HttpHandler for UpstreamApp {
 fn unauthenticated() -> HttpResponse {
     HttpResponse::denied(
         403,
-        "no_authport_context",
+        "no_authboundry_context",
         "this application is only reachable through AuthBoundry",
     )
 }

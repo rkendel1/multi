@@ -29,6 +29,7 @@ pub struct AuthPortServer {
     runtime: Arc<AuthPortRuntime>,
     app: Arc<dyn ApplicationBinding>,
     tenants: Vec<String>,
+    studio_page: Option<String>,
 }
 
 impl AuthPortServer {
@@ -37,7 +38,15 @@ impl AuthPortServer {
             runtime,
             app,
             tenants: Vec::new(),
+            studio_page: None,
         }
+    }
+
+    /// Add a read-only Studio landing page. The page is a projection of the
+    /// repository contract and adoption state; it is not configuration state.
+    pub fn with_studio_page(mut self, page: String) -> Self {
+        self.studio_page = Some(page);
+        self
     }
 
     /// Tenants offered by the generated sign-in page. A hint for the form only:
@@ -56,12 +65,18 @@ impl AuthPortServer {
     pub fn handle(&self, http: &HttpRequest) -> HttpResponse {
         let request = http.to_boundary();
 
+        if request.method == Method::Get && request.path == "/" {
+            if let Some(page) = &self.studio_page {
+                return HttpResponse::html(200, page.clone());
+            }
+        }
+
         if request.path == "/authboundry/client.js" {
             return HttpResponse::new(200, "application/javascript", CLIENT_JS.as_bytes().to_vec());
         }
 
         // Check for control plane routes
-        if request.path.starts_with("/_authport/") {
+        if request.path.starts_with("/_authboundry/") {
             if let Some(response) = crate::control_routes::handle_control_route(
                 &self.runtime,
                 self.app.as_ref(),

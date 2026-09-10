@@ -10,15 +10,15 @@ use crate::router::{ApplicationBinding, RouteOutcome, RoutePolicy};
 
 /// Header names AuthPort injects into an upstream request.
 pub mod headers {
-    pub const PRINCIPAL: &str = "x-authport-principal";
-    pub const PRINCIPAL_KIND: &str = "x-authport-principal-kind";
-    pub const TENANT: &str = "x-authport-tenant";
-    pub const CLAIMS: &str = "x-authport-claims";
-    pub const CAPABILITIES: &str = "x-authport-capabilities";
-    pub const DELEGATION: &str = "x-authport-delegation";
-    pub const DELEGATED_BY: &str = "x-authport-delegated-by";
-    pub const CONTEXT: &str = "x-authport-context";
-    pub const SIGNATURE: &str = "x-authport-signature";
+    pub const PRINCIPAL: &str = "x-authboundry-principal";
+    pub const PRINCIPAL_KIND: &str = "x-authboundry-principal-kind";
+    pub const TENANT: &str = "x-authboundry-tenant";
+    pub const CLAIMS: &str = "x-authboundry-claims";
+    pub const CAPABILITIES: &str = "x-authboundry-capabilities";
+    pub const DELEGATION: &str = "x-authboundry-delegation";
+    pub const DELEGATED_BY: &str = "x-authboundry-delegated-by";
+    pub const CONTEXT: &str = "x-authboundry-context";
+    pub const SIGNATURE: &str = "x-authboundry-signature";
 }
 
 /// The standalone placement: AuthPort owns the socket and the application sits

@@ -159,7 +159,7 @@ fn a_context_exists_only_after_verification() {
         "apt_acme",
         "",
     ] {
-        let request = BoundaryRequest::get("/invoices").with_cookie("authport_session", forged);
+        let request = BoundaryRequest::get("/invoices").with_cookie("authboundry_session", forged);
         assert!(
             runtime.authenticate(&request).is_err(),
             "`{forged}` must not authenticate"
@@ -246,8 +246,8 @@ fn a_tenant_hint_must_agree_with_the_session() {
 #[test]
 fn reserved_headers_never_reach_the_boundary() {
     let request = BoundaryRequest::get("/invoices")
-        .with_header("x-authport-principal", "prn_root")
-        .with_header("x-authport-capabilities", "billing.charge")
+        .with_header("x-authboundry-principal", "prn_root")
+        .with_header("x-authboundry-capabilities", "billing.charge")
         .with_header("x-app-header", "kept")
         .sanitized();
 
@@ -265,7 +265,8 @@ fn a_public_route_neither_grants_nor_denies() {
     let credential = seed_alice(&runtime, "acme", "owner");
 
     // A stale cookie on a public route is simply not a context.
-    let stale = BoundaryRequest::get("/public").with_cookie("authport_session", "apt_acme.sess_x");
+    let stale =
+        BoundaryRequest::get("/public").with_cookie("authboundry_session", "apt_acme.sess_x");
     assert!(runtime
         .enforce(&stale, &Requirement::Public)
         .expect("public routes do not deny")

@@ -160,7 +160,7 @@ pub fn render_sign_in(
       passwordInput.addEventListener("input", update);
       update();
     }}
-    fetch("/_authport/password-policy")
+    fetch("/_authboundry/password-policy")
       .then((response) => response.json())
       .then(renderPasswordPolicy)
       .catch(() => {{}});

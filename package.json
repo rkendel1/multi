@@ -1,6 +1,6 @@
 {
-  "name": "authboundry",
-  "version": "2.0.0",
+  "name": "@authboundry/core",
+  "version": "1.0.0",
   "description": "The authority boundary for an application.",
   "type": "module",
   "exports": {
@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "build": "sh scripts/build-npm-package.sh",
-    "test": "node --test clients/js/authboundry.test.js test/npm-package.test.js",
+    "test": "node --test clients/js/authboundry.test.js test/npm-package.test.js && sh scripts/check-public-naming.sh",
     "prepack": "npm run build",
     "verify:package": "sh scripts/verify-npm-package.sh",
     "publish:packages": "sh scripts/publish-packages.sh"
@@ -42,7 +42,7 @@
   "bugs": {
     "url": "https://github.com/rkendel1/multi/issues"
   },
-  "homepage": "https://github.com/rkendel1/multi#readme",
+  "homepage": "https://authboundry.com",
   "license": "UNLICENSED",
   "keywords": [
     "authorization",

@@ -1,0 +1,38 @@
+{
+  "name": "authboundry",
+  "version": "2.0.0",
+  "description": "Compatibility redirect to @authboundry/core.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./react": {
+      "types": "./react.d.ts",
+      "import": "./react.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "import": "./client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "authboundry": "bin/authboundry.js"
+  },
+  "files": [
+    "bin/",
+    "*.js",
+    "*.d.ts",
+    "README.md"
+  ],
+  "dependencies": {
+    "@authboundry/core": "1.0.0"
+  },
+  "homepage": "https://authboundry.com",
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  }
+}

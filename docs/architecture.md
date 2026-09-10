@@ -40,7 +40,7 @@ AuthBoundry's own state.
 
 - `AuthContext` has a private field and no public constructor: outside the
   boundary crate it cannot be built, only received.
-- Inbound `x-authport-*` headers are stripped before a request is examined
+- Inbound `x-authboundry-*` headers are stripped before a request is examined
   (`BoundaryRequest::sanitized`), so a client cannot inject the context a
   standalone deployment forwards upstream.
 - A tenant named by the caller is only ever checked against the tenant the
@@ -124,7 +124,7 @@ There is no second audit implementation in the HTTP layer.
 
 - `examples/saas_basic/tests/backend_boundary.rs::an_unrecordable_decision_is_denied`.
 
-Audit events use the canonical `authport.audit/v1` shape: id, timestamp, tenant,
+Audit events use the canonical `authboundry.audit/v1` shape: id, timestamp, tenant,
 principal, delegator, session, delegation, run, action, resource, decision,
 reason, authority revision, contract fingerprint, durability and metadata.
 Storage implementations append events; they do not update or delete audit rows

@@ -35,83 +35,85 @@ pub fn handle_control_route(
     // Parse control plane paths
     let method = request.method.as_str().to_uppercase();
     match (method.as_str(), path) {
-        ("GET", "/_authport/overview") => Some(overview(runtime)),
-        ("GET", "/_authport/routes") => Some(routes(runtime)),
-        ("GET", "/_authport/authority-proposal") => Some(authority_proposal(runtime, app)),
-        ("GET", "/_authport/authority-reconciliation") => {
+        ("GET", "/_authboundry/overview") => Some(overview(runtime)),
+        ("GET", "/_authboundry/routes") => Some(routes(runtime)),
+        ("GET", "/_authboundry/authority-proposal") => Some(authority_proposal(runtime, app)),
+        ("GET", "/_authboundry/authority-reconciliation") => {
             Some(authority_reconciliation(runtime, app))
         }
-        ("POST", "/_authport/authority-reconciliation/run") => {
+        ("POST", "/_authboundry/authority-reconciliation/run") => {
             Some(authority_reconciliation(runtime, app))
         }
-        ("GET", "/_authport/authority-drift") => Some(authority_drift(runtime, app)),
-        ("GET", "/_authport/password-policy") => {
+        ("GET", "/_authboundry/authority-drift") => Some(authority_drift(runtime, app)),
+        ("GET", "/_authboundry/password-policy") => {
             Some(HttpResponse::ok_json(password_policy_json(runtime)))
         }
-        ("GET", "/_authport/storage") => Some(storage(runtime)),
-        ("GET", "/_authport/storage/capabilities") => Some(storage_capabilities(runtime)),
-        ("GET", "/_authport/audit") => Some(audit_config(runtime)),
-        ("GET", "/_authport/audit/events") => Some(audit_events(runtime, request)),
-        ("GET", "/_authport/audit/export") => Some(audit_export(runtime, request)),
-        ("GET", "/_authport/reporting") => Some(reporting(runtime)),
+        ("GET", "/_authboundry/storage") => Some(storage(runtime)),
+        ("GET", "/_authboundry/storage/capabilities") => Some(storage_capabilities(runtime)),
+        ("GET", "/_authboundry/audit") => Some(audit_config(runtime)),
+        ("GET", "/_authboundry/audit/events") => Some(audit_events(runtime, request)),
+        ("GET", "/_authboundry/audit/export") => Some(audit_export(runtime, request)),
+        ("GET", "/_authboundry/reporting") => Some(reporting(runtime)),
         _ if method == "POST"
-            && path.starts_with("/_authport/authority-proposal/")
+            && path.starts_with("/_authboundry/authority-proposal/")
             && path.ends_with("/approve") =>
         {
             Some(approve_authority_proposal(runtime, path))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/authority-proposal/")
+            && path.starts_with("/_authboundry/authority-proposal/")
             && path.ends_with("/apply") =>
         {
             Some(apply_authority_proposal(runtime, path))
         }
-        ("POST", "/_authport/authority-proposals/approve") => Some(approve_bulk(runtime, request)),
-        ("POST", "/_authport/authority-proposals/apply") => Some(apply_bulk(runtime, request)),
-        ("GET", "/_authport/policies") => Some(policies(runtime)),
-        _ if method == "GET" && path.starts_with("/_authport/policies/") => {
+        ("POST", "/_authboundry/authority-proposals/approve") => {
+            Some(approve_bulk(runtime, request))
+        }
+        ("POST", "/_authboundry/authority-proposals/apply") => Some(apply_bulk(runtime, request)),
+        ("GET", "/_authboundry/policies") => Some(policies(runtime)),
+        _ if method == "GET" && path.starts_with("/_authboundry/policies/") => {
             Some(policy(runtime, path))
         }
-        ("GET", "/_authport/authorization/decisions") => Some(authorization_decisions(runtime)),
-        ("GET", "/_authport/authorization/explain") => Some(authorization_explain(runtime)),
+        ("GET", "/_authboundry/authorization/decisions") => Some(authorization_decisions(runtime)),
+        ("GET", "/_authboundry/authorization/explain") => Some(authorization_explain(runtime)),
         _ if method == "GET"
-            && path.starts_with("/_authport/authorization/decisions/")
+            && path.starts_with("/_authboundry/authorization/decisions/")
             && path.ends_with("/explain") =>
         {
             Some(authorization_decision_explain(runtime, path))
         }
-        _ if method == "GET" && path.starts_with("/_authport/authorization/decisions/") => {
+        _ if method == "GET" && path.starts_with("/_authboundry/authorization/decisions/") => {
             Some(authorization_decision(runtime, path))
         }
-        ("GET", "/_authport/providers") => Some(providers(runtime)),
-        ("GET", "/_authport/agents") => Some(agents(runtime, request)),
-        ("POST", "/_authport/agents") => Some(create_agent(runtime, request)),
+        ("GET", "/_authboundry/providers") => Some(providers(runtime)),
+        ("GET", "/_authboundry/agents") => Some(agents(runtime, request)),
+        ("POST", "/_authboundry/agents") => Some(create_agent(runtime, request)),
         _ if method == "GET"
-            && path.starts_with("/_authport/agents/")
+            && path.starts_with("/_authboundry/agents/")
             && path.ends_with("/runs") =>
         {
             Some(agent_runs(runtime, path, request))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/agents/")
+            && path.starts_with("/_authboundry/agents/")
             && path.ends_with("/runs") =>
         {
             Some(create_agent_run(runtime, path, request))
         }
-        _ if method == "GET" && path.starts_with("/_authport/runs/") => {
+        _ if method == "GET" && path.starts_with("/_authboundry/runs/") => {
             Some(agent_run(runtime, path, request))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/runs/")
+            && path.starts_with("/_authboundry/runs/")
             && path.ends_with("/cancel") =>
         {
             Some(cancel_agent_run(runtime, path, request))
         }
-        _ if method == "GET" && path.starts_with("/_authport/agents/") => {
+        _ if method == "GET" && path.starts_with("/_authboundry/agents/") => {
             Some(agent(runtime, path, request))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/agents/")
+            && path.starts_with("/_authboundry/agents/")
             && path.ends_with("/suspend") =>
         {
             Some(set_agent_state(
@@ -122,36 +124,36 @@ pub fn handle_control_route(
             ))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/agents/")
+            && path.starts_with("/_authboundry/agents/")
             && path.ends_with("/revoke") =>
         {
             Some(set_agent_state(runtime, path, request, AgentState::Revoked))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/agents/")
+            && path.starts_with("/_authboundry/agents/")
             && path.ends_with("/retire") =>
         {
             Some(set_agent_state(runtime, path, request, AgentState::Retired))
         }
-        ("GET", "/_authport/delegations") => Some(delegations(runtime, request)),
-        ("POST", "/_authport/delegations") => Some(create_delegation(runtime, request)),
-        _ if method == "GET" && path.starts_with("/_authport/delegations/") => {
+        ("GET", "/_authboundry/delegations") => Some(delegations(runtime, request)),
+        ("POST", "/_authboundry/delegations") => Some(create_delegation(runtime, request)),
+        _ if method == "GET" && path.starts_with("/_authboundry/delegations/") => {
             Some(delegation(runtime, path, request))
         }
         _ if method == "POST"
-            && path.starts_with("/_authport/delegations/")
+            && path.starts_with("/_authboundry/delegations/")
             && path.ends_with("/revoke") =>
         {
             Some(revoke_delegation(runtime, path, request))
         }
-        ("POST", "/_authport/propose") => Some(propose(runtime, request)),
-        ("POST", "/_authport/approve") => Some(approve(runtime, request)),
-        ("POST", "/_authport/apply") => Some(apply(runtime, request)),
-        ("POST", "/_authport/reject") => Some(reject(runtime, request)),
-        ("POST", "/_authport/revert") => Some(revert(runtime, request)),
-        ("GET", "/_authport/history") => Some(history(runtime, request)),
-        ("GET", "/_authport/proposals") => Some(proposals(runtime, request)),
-        _ if method == "GET" && path.starts_with("/_authport/proposals/") => {
+        ("POST", "/_authboundry/propose") => Some(propose(runtime, request)),
+        ("POST", "/_authboundry/approve") => Some(approve(runtime, request)),
+        ("POST", "/_authboundry/apply") => Some(apply(runtime, request)),
+        ("POST", "/_authboundry/reject") => Some(reject(runtime, request)),
+        ("POST", "/_authboundry/revert") => Some(revert(runtime, request)),
+        ("GET", "/_authboundry/history") => Some(history(runtime, request)),
+        ("GET", "/_authboundry/proposals") => Some(proposals(runtime, request)),
+        _ if method == "GET" && path.starts_with("/_authboundry/proposals/") => {
             Some(proposal(runtime, path))
         }
         _ => None,
@@ -492,7 +494,7 @@ fn audit_config(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     HttpResponse::ok_json(JsonValue::Object(vec![
         (
             "canonical_event".to_string(),
-            JsonValue::String("authport.audit/v1".to_string()),
+            JsonValue::String("authboundry.audit/v1".to_string()),
         ),
         (
             "durable_store".to_string(),
@@ -840,7 +842,7 @@ pub fn password_policy_json(runtime: &std::sync::Arc<AuthPortRuntime>) -> JsonVa
 }
 
 fn policy(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
-    let id = path.trim_start_matches("/_authport/policies/");
+    let id = path.trim_start_matches("/_authboundry/policies/");
     let authority = runtime.live_authority();
     if let Some((capability, policy)) = authority
         .capability_policies
@@ -909,7 +911,7 @@ fn authorization_explain(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpRespo
 }
 
 fn authorization_decision(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
-    let id = path.trim_start_matches("/_authport/authorization/decisions/");
+    let id = path.trim_start_matches("/_authboundry/authorization/decisions/");
     match runtime
         .mesh()
         .recent_decisions()
@@ -926,7 +928,7 @@ fn authorization_decision_explain(
     path: &str,
 ) -> HttpResponse {
     let id = path
-        .trim_start_matches("/_authport/authorization/decisions/")
+        .trim_start_matches("/_authboundry/authorization/decisions/")
         .trim_end_matches("/explain")
         .trim_end_matches('/');
     match runtime
@@ -1304,7 +1306,7 @@ fn agent(
         Ok(tenant) => tenant,
         Err(response) => return response,
     };
-    let Some(id) = path_id(path, "/_authport/agents/") else {
+    let Some(id) = path_id(path, "/_authboundry/agents/") else {
         return HttpResponse::bad_request("missing agent id");
     };
     match runtime
@@ -1358,7 +1360,7 @@ fn agent_runs(
     let Some(tenant) = request_value(request, "tenant") else {
         return HttpResponse::bad_request("missing tenant");
     };
-    let Some(agent_id) = path_id(path, "/_authport/agents/") else {
+    let Some(agent_id) = path_id(path, "/_authboundry/agents/") else {
         return HttpResponse::bad_request("missing agent id");
     };
     let agent_id = agent_id.trim_end_matches("/runs");
@@ -1383,7 +1385,7 @@ fn agent_run(
     let Some(tenant) = request_value(request, "tenant") else {
         return HttpResponse::bad_request("missing tenant");
     };
-    let Some(id) = path_id(path, "/_authport/runs/") else {
+    let Some(id) = path_id(path, "/_authboundry/runs/") else {
         return HttpResponse::bad_request("missing run id");
     };
     match runtime.agent_run(&tenant, &RunId(id.to_string())) {
@@ -1406,7 +1408,7 @@ fn create_agent_run(
     let Some(tenant) = request_value(request, "tenant") else {
         return HttpResponse::bad_request("missing tenant");
     };
-    let Some(agent_id) = path_id(path, "/_authport/agents/") else {
+    let Some(agent_id) = path_id(path, "/_authboundry/agents/") else {
         return HttpResponse::bad_request("missing agent id");
     };
     let agent_id = agent_id.trim_end_matches("/runs");
@@ -1458,7 +1460,7 @@ fn cancel_agent_run(
     let Some(tenant) = request_value(request, "tenant") else {
         return HttpResponse::bad_request("missing tenant");
     };
-    let Some(id) = path_id(path, "/_authport/runs/") else {
+    let Some(id) = path_id(path, "/_authboundry/runs/") else {
         return HttpResponse::bad_request("missing run id");
     };
     let run_id = id.trim_end_matches("/cancel");
@@ -1482,7 +1484,7 @@ fn set_agent_state(
         Some(tenant) => tenant,
         None => return HttpResponse::bad_request("missing tenant"),
     };
-    let Some(id) = path_id(path, "/_authport/agents/") else {
+    let Some(id) = path_id(path, "/_authboundry/agents/") else {
         return HttpResponse::bad_request("missing agent id");
     };
     let agent_id = id
@@ -1553,7 +1555,7 @@ fn delegation(
         Ok(tenant) => tenant,
         Err(response) => return response,
     };
-    let Some(id) = path_id(path, "/_authport/delegations/") else {
+    let Some(id) = path_id(path, "/_authboundry/delegations/") else {
         return HttpResponse::bad_request("missing delegation id");
     };
     match runtime
@@ -1619,7 +1621,7 @@ fn revoke_delegation(
     let Some(tenant) = request_value(request, "tenant") else {
         return HttpResponse::bad_request("missing tenant");
     };
-    let Some(id) = path_id(path, "/_authport/delegations/") else {
+    let Some(id) = path_id(path, "/_authboundry/delegations/") else {
         return HttpResponse::bad_request("missing delegation id");
     };
     let delegation_id = id.trim_end_matches("/revoke");
@@ -2019,7 +2021,7 @@ fn approve_authority_proposal(
     path: &str,
 ) -> HttpResponse {
     let proposal_id = path
-        .trim_start_matches("/_authport/authority-proposal/")
+        .trim_start_matches("/_authboundry/authority-proposal/")
         .trim_end_matches("/approve");
     match runtime.approve_stored_proposal(proposal_id) {
         Ok(()) => HttpResponse::ok_json(JsonValue::Object(vec![
@@ -2038,7 +2040,7 @@ fn approve_authority_proposal(
 
 fn apply_authority_proposal(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
     let proposal_id = path
-        .trim_start_matches("/_authport/authority-proposal/")
+        .trim_start_matches("/_authboundry/authority-proposal/")
         .trim_end_matches("/apply");
     match runtime.apply_approved_stored_proposal(proposal_id) {
         Ok((change_id, new_revision)) => HttpResponse::ok_json(JsonValue::Object(vec![
@@ -2157,7 +2159,7 @@ fn proposals(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -
 }
 
 fn proposal(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
-    let proposal_id = path.trim_start_matches("/_authport/proposals/");
+    let proposal_id = path.trim_start_matches("/_authboundry/proposals/");
     match runtime.retrieve_proposal(proposal_id) {
         Ok(item) => HttpResponse::ok_json(stored_proposal_to_json(&item)),
         Err(msg) => HttpResponse::bad_request(&msg),

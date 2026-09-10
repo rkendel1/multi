@@ -50,8 +50,8 @@ fn requests_become_boundary_requests_without_their_reserved_headers() {
         "/invoices?draft=true",
         &[
             ("content-type", "application/json"),
-            ("cookie", "authport_session=apt_acme.sess_1; theme=dark"),
-            ("x-authport-principal", "prn_root"),
+            ("cookie", "authboundry_session=apt_acme.sess_1; theme=dark"),
+            ("x-authboundry-principal", "prn_root"),
             ("x-tenant-id", "acme"),
         ],
         "{\"reference\": \"INV-9\", \"amount\": 42, \"nested\": {\"ignored\": true}}",
@@ -207,7 +207,7 @@ fn control_plane_lists_shows_and_creates_agents() {
 
     let listed = server.handle(&request(
         Method::Get,
-        "/_authport/agents?tenant=acme",
+        "/_authboundry/agents?tenant=acme",
         &[],
         "",
     ));
@@ -217,7 +217,7 @@ fn control_plane_lists_shows_and_creates_agents() {
 
     let shown = server.handle(&request(
         Method::Get,
-        "/_authport/agents/agent:invoice?tenant=acme",
+        "/_authboundry/agents/agent:invoice?tenant=acme",
         &[],
         "",
     ));
@@ -226,7 +226,7 @@ fn control_plane_lists_shows_and_creates_agents() {
 
     let created = server.handle(&request(
         Method::Post,
-        "/_authport/agents",
+        "/_authboundry/agents",
         &[("content-type", "application/json")],
         "{\"tenant\":\"acme\",\"name\":\"reports\",\"id\":\"agent:reports\"}",
     ));
@@ -284,7 +284,7 @@ use auth {
     );
     let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
 
-    let storage = server.handle(&request(Method::Get, "/_authport/storage", &[], ""));
+    let storage = server.handle(&request(Method::Get, "/_authboundry/storage", &[], ""));
     assert_eq!(storage.status, 200);
     let storage = storage.body_string();
     assert!(storage.contains("\"authority_store\": \"postgresql\""));
@@ -292,13 +292,13 @@ use auth {
     assert!(storage.contains("\"reporting_store\": \"customer_warehouse\""));
     assert!(!storage.contains("://"));
 
-    let audit_config = server.handle(&request(Method::Get, "/_authport/audit", &[], ""));
+    let audit_config = server.handle(&request(Method::Get, "/_authboundry/audit", &[], ""));
     assert_eq!(audit_config.status, 200);
     assert!(audit_config
         .body_string()
         .contains("\"required_event_failures\": \"fail_closed\""));
 
-    let reporting = server.handle(&request(Method::Get, "/_authport/reporting", &[], ""));
+    let reporting = server.handle(&request(Method::Get, "/_authboundry/reporting", &[], ""));
     assert_eq!(reporting.status, 200);
     assert!(reporting.body_string().contains("\"authoritative\": false"));
 
@@ -325,7 +325,7 @@ use auth {
 
     let events = server.handle(&request(
         Method::Get,
-        "/_authport/audit/events?tenant=acme",
+        "/_authboundry/audit/events?tenant=acme",
         &[],
         "",
     ));
@@ -339,7 +339,7 @@ use auth {
 
     let export = server.handle(&request(
         Method::Get,
-        "/_authport/audit/export?tenant=acme",
+        "/_authboundry/audit/export?tenant=acme",
         &[],
         "",
     ));
@@ -432,7 +432,7 @@ fn control_plane_creates_lists_shows_and_cancels_agent_runs() {
 
     let created = server.handle(&request(
         Method::Post,
-        "/_authport/agents/agent:invoice/runs",
+        "/_authboundry/agents/agent:invoice/runs",
         &[("content-type", "application/json")],
         &format!(
             "{{\"tenant\":\"acme\",\"id\":\"run-invoice\",\"task_id\":\"task-invoice\",\"purpose\":\"Review invoices\",\"delegation_id\":\"delegation-invoice\",\"capability\":\"invoice.read\",\"resource_type\":\"invoice\",\"resource_tenant\":\"acme\",\"expires_at\":{}}}",
@@ -450,7 +450,7 @@ fn control_plane_creates_lists_shows_and_cancels_agent_runs() {
 
     let listed = server.handle(&request(
         Method::Get,
-        "/_authport/agents/agent:invoice/runs?tenant=acme",
+        "/_authboundry/agents/agent:invoice/runs?tenant=acme",
         &[],
         "",
     ));
@@ -460,7 +460,7 @@ fn control_plane_creates_lists_shows_and_cancels_agent_runs() {
 
     let shown = server.handle(&request(
         Method::Get,
-        "/_authport/runs/run-invoice?tenant=acme",
+        "/_authboundry/runs/run-invoice?tenant=acme",
         &[],
         "",
     ));
@@ -469,7 +469,7 @@ fn control_plane_creates_lists_shows_and_cancels_agent_runs() {
 
     let cancelled = server.handle(&request(
         Method::Post,
-        "/_authport/runs/run-invoice/cancel",
+        "/_authboundry/runs/run-invoice/cancel",
         &[("content-type", "application/json")],
         "{\"tenant\":\"acme\"}",
     ));
@@ -573,7 +573,7 @@ fn authorization_explain_endpoints_return_decision_evidence_by_id() {
     let server = AuthPortServer::new(runtime, Arc::new(NoApp));
     let listed = server.handle(&request(
         Method::Get,
-        "/_authport/authorization/decisions",
+        "/_authboundry/authorization/decisions",
         &[],
         "",
     ));
@@ -589,7 +589,7 @@ fn authorization_explain_endpoints_return_decision_evidence_by_id() {
 
     let by_id = server.handle(&request(
         Method::Get,
-        &format!("/_authport/authorization/decisions/{}", decision_id),
+        &format!("/_authboundry/authorization/decisions/{}", decision_id),
         &[],
         "",
     ));
@@ -600,7 +600,10 @@ fn authorization_explain_endpoints_return_decision_evidence_by_id() {
 
     let explained = server.handle(&request(
         Method::Get,
-        &format!("/_authport/authorization/decisions/{}/explain", decision_id),
+        &format!(
+            "/_authboundry/authorization/decisions/{}/explain",
+            decision_id
+        ),
         &[],
         "",
     ));
@@ -633,6 +636,9 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     // The page drives the same client library the JS package ships.
     assert!(html.contains("/authboundry/client.js"));
     assert!(html.contains("AuthBoundry.createAuthBoundry"));
+    for forbidden in ["authport", "AuthPort", "_authport", "authport_"] {
+        assert!(!html.contains(forbidden), "public UI leaked {forbidden}");
+    }
 
     // A single-tenant contract does not ask the visitor to pick one.
     let single =
@@ -675,14 +681,19 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     );
     let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
 
-    let defaults = server.handle(&request(Method::Get, "/_authport/password-policy", &[], ""));
+    let defaults = server.handle(&request(
+        Method::Get,
+        "/_authboundry/password-policy",
+        &[],
+        "",
+    ));
     assert_eq!(defaults.status, 200);
     assert!(defaults.body_string().contains("\"min_length\": 12"));
     assert!(defaults.body_string().contains("\"history_count\": 5"));
 
     let proposed = server.handle(&request(
         Method::Post,
-        "/_authport/propose",
+        "/_authboundry/propose",
         &[("content-type", "application/json")],
         "{\"type\":\"set_password_policy\",\"min_length\":16,\"require_special_character\":true,\"expiration_days\":90,\"history_count\":5}",
     ));
@@ -690,20 +701,25 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     let proposal_id = json_string_field(&proposed.body_string(), "proposal_id").unwrap();
     let approved = server.handle(&request(
         Method::Post,
-        "/_authport/approve",
+        "/_authboundry/approve",
         &[("content-type", "application/json")],
         &format!("{{\"proposal_id\":\"{}\"}}", proposal_id),
     ));
     assert_eq!(approved.status, 200);
     let applied = server.handle(&request(
         Method::Post,
-        "/_authport/apply",
+        "/_authboundry/apply",
         &[("content-type", "application/json")],
         &format!("{{\"proposal_id\":\"{}\"}}", proposal_id),
     ));
     assert_eq!(applied.status, 200);
 
-    let live = server.handle(&request(Method::Get, "/_authport/password-policy", &[], ""));
+    let live = server.handle(&request(
+        Method::Get,
+        "/_authboundry/password-policy",
+        &[],
+        "",
+    ));
     let live_body = live.body_string();
     assert!(live_body.contains("\"min_length\": 16"));
     assert!(live_body.contains("\"require_special_character\": true"));
@@ -715,7 +731,9 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     assert!(signup
         .body_string()
         .contains("Contains a special character"));
-    assert!(signup.body_string().contains("/_authport/password-policy"));
+    assert!(signup
+        .body_string()
+        .contains("/_authboundry/password-policy"));
 
     let rejected = server.handle(&request(
         Method::Post,
@@ -757,7 +775,7 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
 
 #[test]
 fn the_session_cookie_is_the_one_the_contract_names() {
-    assert_eq!(BoundarySurface::SESSION_COOKIE, "authport_session");
+    assert_eq!(BoundarySurface::SESSION_COOKIE, "authboundry_session");
 
     let surface =
         AuthSurface::derive(&parse_auth_block("use auth { providers = [local] }").unwrap());
@@ -839,7 +857,7 @@ fn control_plane_http_routes_store_apply_and_list_history() {
 
     let proposed = server.handle(&request(
         Method::Post,
-        "/_authport/propose",
+        "/_authboundry/propose",
         &[("content-type", "application/json")],
         "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/invoices\", \"capability\": \"invoice.create\"}",
     ));
@@ -849,13 +867,13 @@ fn control_plane_http_routes_store_apply_and_list_history() {
     assert!(body.contains("\"route_protection\""));
     assert!(body.contains("\"approval_token\""));
 
-    let listed = server.handle(&request(Method::Get, "/_authport/proposals", &[], ""));
+    let listed = server.handle(&request(Method::Get, "/_authboundry/proposals", &[], ""));
     assert_eq!(listed.status, 200);
     assert!(listed.body_string().contains(&proposal_id));
 
     let approved = server.handle(&request(
         Method::Post,
-        &format!("/_authport/authority-proposal/{}/approve", proposal_id),
+        &format!("/_authboundry/authority-proposal/{}/approve", proposal_id),
         &[],
         "",
     ));
@@ -864,7 +882,7 @@ fn control_plane_http_routes_store_apply_and_list_history() {
 
     let applied = server.handle(&request(
         Method::Post,
-        "/_authport/apply",
+        "/_authboundry/apply",
         &[("content-type", "application/json")],
         &format!("{{\"proposal_id\": \"{}\"}}", proposal_id),
     ));
@@ -873,7 +891,7 @@ fn control_plane_http_routes_store_apply_and_list_history() {
     assert!(body.contains("\"new_revision\": 1"));
     let change_id = json_string_field(&body, "applied_change_id").expect("change id");
 
-    let history = server.handle(&request(Method::Get, "/_authport/history", &[], ""));
+    let history = server.handle(&request(Method::Get, "/_authboundry/history", &[], ""));
     assert_eq!(history.status, 200);
     assert!(history.body_string().contains(&change_id));
 }
@@ -906,7 +924,7 @@ fn control_plane_exposes_same_authority_proposal_without_applying_it() {
 
     let proposed = server.handle(&request(
         Method::Get,
-        "/_authport/authority-proposal",
+        "/_authboundry/authority-proposal",
         &[],
         "",
     ));
@@ -953,7 +971,7 @@ fn inferred_authority_proposals_can_be_rejected_or_approved_and_applied() {
 
     let proposed = server.handle(&request(
         Method::Get,
-        "/_authport/authority-proposal",
+        "/_authboundry/authority-proposal",
         &[],
         "",
     ));
@@ -968,7 +986,7 @@ fn inferred_authority_proposals_can_be_rejected_or_approved_and_applied() {
 
     let rejected = server.handle(&request(
         Method::Post,
-        "/_authport/reject",
+        "/_authboundry/reject",
         &[("content-type", "application/json")],
         &format!(
             "{{\"proposal_id\": \"{}\", \"reason\": \"not this route\"}}",
@@ -979,7 +997,7 @@ fn inferred_authority_proposals_can_be_rejected_or_approved_and_applied() {
 
     let proposed_again = server.handle(&request(
         Method::Get,
-        "/_authport/authority-proposal",
+        "/_authboundry/authority-proposal",
         &[],
         "",
     ));
@@ -989,14 +1007,14 @@ fn inferred_authority_proposals_can_be_rejected_or_approved_and_applied() {
     let protected_id = "proposal-2".to_string();
     let approved = server.handle(&request(
         Method::Post,
-        &format!("/_authport/authority-proposal/{}/approve", protected_id),
+        &format!("/_authboundry/authority-proposal/{}/approve", protected_id),
         &[],
         "",
     ));
     assert_eq!(approved.status, 200);
     let applied = server.handle(&request(
         Method::Post,
-        &format!("/_authport/authority-proposal/{}/apply", protected_id),
+        &format!("/_authboundry/authority-proposal/{}/apply", protected_id),
         &[],
         "",
     ));
@@ -1030,7 +1048,7 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
 
     let stale = server.handle(&request(
         Method::Post,
-        "/_authport/propose",
+        "/_authboundry/propose",
         &[("content-type", "application/json")],
         "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/stale\", \"capability\": \"stale.write\"}",
     ));
@@ -1038,7 +1056,7 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
 
     let current = server.handle(&request(
         Method::Post,
-        "/_authport/propose",
+        "/_authboundry/propose",
         &[("content-type", "application/json")],
         "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/current\", \"capability\": \"current.write\"}",
     ));
@@ -1047,7 +1065,7 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
         server
             .handle(&request(
                 Method::Post,
-                &format!("/_authport/authority-proposal/{}/approve", current_id),
+                &format!("/_authboundry/authority-proposal/{}/approve", current_id),
                 &[],
                 "",
             ))
@@ -1058,7 +1076,7 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
         server
             .handle(&request(
                 Method::Post,
-                &format!("/_authport/authority-proposal/{}/apply", current_id),
+                &format!("/_authboundry/authority-proposal/{}/apply", current_id),
                 &[],
                 "",
             ))
@@ -1068,7 +1086,7 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
 
     let stale_approval = server.handle(&request(
         Method::Post,
-        &format!("/_authport/authority-proposal/{}/approve", stale_id),
+        &format!("/_authboundry/authority-proposal/{}/approve", stale_id),
         &[],
         "",
     ));
@@ -1108,7 +1126,7 @@ fn bulk_apply_adopts_compatible_approved_proposals_together() {
         server
             .handle(&request(
                 Method::Get,
-                "/_authport/authority-proposal",
+                "/_authboundry/authority-proposal",
                 &[],
                 "",
             ))
@@ -1117,14 +1135,14 @@ fn bulk_apply_adopts_compatible_approved_proposals_together() {
     );
     let approved = server.handle(&request(
         Method::Post,
-        "/_authport/authority-proposals/approve",
+        "/_authboundry/authority-proposals/approve",
         &[("content-type", "application/json")],
         "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
     ));
     assert_eq!(approved.status, 200);
     let applied = server.handle(&request(
         Method::Post,
-        "/_authport/authority-proposals/apply",
+        "/_authboundry/authority-proposals/apply",
         &[("content-type", "application/json")],
         "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
     ));
@@ -1164,7 +1182,7 @@ fn control_plane_reconciliation_reports_drift_without_applying_authority() {
 
     let reconciled = server.handle(&request(
         Method::Post,
-        "/_authport/authority-reconciliation/run",
+        "/_authboundry/authority-reconciliation/run",
         &[],
         "",
     ));
@@ -1183,7 +1201,7 @@ fn control_plane_reconciliation_reports_drift_without_applying_authority() {
 
     let repeated = server.handle(&request(
         Method::Get,
-        "/_authport/authority-reconciliation",
+        "/_authboundry/authority-reconciliation",
         &[],
         "",
     ));
@@ -1192,7 +1210,12 @@ fn control_plane_reconciliation_reports_drift_without_applying_authority() {
     assert!(repeated_body.contains("\"id\": \"proposal-1\""));
     assert!(!repeated_body.contains("\"id\": \"proposal-2\""));
 
-    let drift = server.handle(&request(Method::Get, "/_authport/authority-drift", &[], ""));
+    let drift = server.handle(&request(
+        Method::Get,
+        "/_authboundry/authority-drift",
+        &[],
+        "",
+    ));
     assert_eq!(drift.status, 200);
     assert!(drift.body_string().contains("\"type\": \"new_route\""));
 }
@@ -1226,7 +1249,12 @@ fn control_plane_reconciliation_reports_orphaned_authority() {
     );
     let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
 
-    let drift = server.handle(&request(Method::Get, "/_authport/authority-drift", &[], ""));
+    let drift = server.handle(&request(
+        Method::Get,
+        "/_authboundry/authority-drift",
+        &[],
+        "",
+    ));
     assert_eq!(drift.status, 200);
     let body = drift.body_string();
     assert!(body.contains("\"type\": \"orphaned_authority\""));

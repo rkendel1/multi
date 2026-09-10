@@ -27,7 +27,10 @@ Your application should not have to implement its own authority system.
 ## Quick start
 
 ```sh
-npm install authboundry
+npm install @authboundry/core
+npx authboundry init
+npx authboundry studio
+npx authboundry status
 npx authboundry inspect app.auth
 ```
 
@@ -53,6 +56,23 @@ connector is available only when its implementation exists.
 ```text
 declare authority -> inspect authority -> run AuthBoundry -> connect application
 ```
+
+`init` creates an authority configuration and adoption record. It does not
+claim the application is attached. When automatic attachment is unavailable,
+start the application and explicitly record its reachable target:
+
+```sh
+npx authboundry attach --upstream http://127.0.0.1:9000
+npx authboundry serve
+```
+
+`status` distinguishes configured, running, attached and actively protected
+states. A configuration file alone means only **configured**.
+
+Interactive initialization starts Studio automatically. Use
+`authboundry studio --no-open` for CI or headless environments. Studio reads
+the contract and adoption record; repository changes still require an explicit
+CLI preview and human approval.
 
 ## Why an authority boundary?
 
@@ -107,7 +127,7 @@ The placement changes. The authority model does not.
 
 Embedded mode binds the boundary to an application-owned server. Standalone
 mode owns the socket, authenticates and authorizes requests, strips inbound
-`x-authport-*` authority headers, and forwards only explicitly governed routes.
+`x-authboundry-*` authority headers, and forwards only explicitly governed routes.
 See [embedded](docs/deployment/embedded.md) and
 [standalone](docs/deployment/standalone.md) deployment.
 
@@ -163,7 +183,7 @@ The browser client projects what the server decided. It cannot manufacture an
 authority context.
 
 ```js
-import { createAuthBoundry } from "authboundry";
+import { createAuthBoundry } from "@authboundry/core";
 
 const client = createAuthBoundry();
 const auth = await client.session();
@@ -173,7 +193,7 @@ client.can("invoice.create");             // UI rendering hint only
 ```
 
 ```js
-import { createAuthBoundryReact } from "authboundry/react";
+import { createAuthBoundryReact } from "@authboundry/core/react";
 const { AuthBoundry, useAuth } = createAuthBoundryReact(React);
 // <AuthBoundry><App /></AuthBoundry>
 ```

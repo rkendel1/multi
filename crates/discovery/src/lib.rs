@@ -1506,7 +1506,8 @@ fn node_servers(package_json: &str) -> Vec<ServerCandidate> {
 
 fn existing_authport(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> ExistingAuthPort {
     ExistingAuthPort {
-        dependency: manifest.contains("\"authboundry\"")
+        dependency: manifest.contains("\"@authboundry/core\"")
+            || manifest.contains("\"authboundry\"")
             || manifest.contains("\"authport\"")
             || manifest.contains("appport-auth-mesh"),
         initialization: files.iter().any(|(_, source)| {

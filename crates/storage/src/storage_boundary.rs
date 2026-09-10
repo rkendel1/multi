@@ -128,7 +128,7 @@ impl StorageTopology {
         });
         stores.push(StoreDescriptor {
             class: StoreClass::Reporting,
-            provider: "authport_projection".to_string(),
+            provider: "authboundry_projection".to_string(),
             role: StoreRole::ReportingProjection,
             capabilities: vec![StorageCapability::Query, StorageCapability::ExportImport],
         });

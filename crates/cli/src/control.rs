@@ -34,7 +34,7 @@ fn audit(args: &[String]) -> Result<Output, CliError> {
     let filtered = strip_common_options(args);
     match filtered.first().map(String::as_str) {
         None => {
-            let response = http_get(&server, "/_authport/audit")?;
+            let response = http_get(&server, "/_authboundry/audit")?;
             Ok(Output {
                 text: format!("audit config from {}\n{}\n", server, response),
             })
@@ -48,7 +48,7 @@ fn audit(args: &[String]) -> Result<Output, CliError> {
             let response = http_get(
                 &server,
                 &format!(
-                    "/_authport/audit/events?tenant={}{}",
+                    "/_authboundry/audit/events?tenant={}{}",
                     escape_path(&tenant),
                     since
                 ),
@@ -66,7 +66,7 @@ fn audit(args: &[String]) -> Result<Output, CliError> {
             let response = http_get(
                 &server,
                 &format!(
-                    "/_authport/audit/export?tenant={}{}",
+                    "/_authboundry/audit/export?tenant={}{}",
                     escape_path(&tenant),
                     since
                 ),
@@ -81,7 +81,7 @@ fn audit(args: &[String]) -> Result<Output, CliError> {
 
 fn storage(args: &[String]) -> Result<Output, CliError> {
     let (server, _output_token, _) = common_options(args)?;
-    let response = http_get(&server, "/_authport/storage")?;
+    let response = http_get(&server, "/_authboundry/storage")?;
     Ok(Output {
         text: format!("storage from {}\n{}\n", server, response),
     })
@@ -89,7 +89,7 @@ fn storage(args: &[String]) -> Result<Output, CliError> {
 
 fn reporting(args: &[String]) -> Result<Output, CliError> {
     let (server, _output_token, _) = common_options(args)?;
-    let response = http_get(&server, "/_authport/reporting")?;
+    let response = http_get(&server, "/_authboundry/reporting")?;
     Ok(Output {
         text: format!("reporting from {}\n{}\n", server, response),
     })
@@ -97,7 +97,7 @@ fn reporting(args: &[String]) -> Result<Output, CliError> {
 
 fn connect(args: &[String]) -> Result<Output, CliError> {
     let (server, output_token, _) = common_options(args)?;
-    let response = http_get(&server, "/_authport/overview")?;
+    let response = http_get(&server, "/_authboundry/overview")?;
     if output_token {
         if let Some(token) = extract_quoted_field(&response, "token") {
             write_token(&token)?;
@@ -122,7 +122,7 @@ fn propose(args: &[String]) -> Result<Output, CliError> {
         });
     }
 
-    let response = http_post(&server, "/_authport/propose", &body)?;
+    let response = http_post(&server, "/_authboundry/propose", &body)?;
     if let Some(proposal_id) = extract_quoted_field(&response, "proposal_id") {
         cache_proposal(&proposal_id, &server, &response)?;
     }
@@ -159,7 +159,7 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
     if all {
         let proposal_ids = inferred_proposal_ids(&server)?;
         let body = proposal_ids_body(&proposal_ids);
-        let response = http_post(&server, "/_authport/authority-proposals/apply", &body)?;
+        let response = http_post(&server, "/_authboundry/authority-proposals/apply", &body)?;
         return Ok(Output {
             text: format!("apply response from {}\n{}\n", server, response),
         });
@@ -180,7 +180,7 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
             escape(&approval_token)
         )
     };
-    let response = http_post(&server, "/_authport/apply", &body)?;
+    let response = http_post(&server, "/_authboundry/apply", &body)?;
     Ok(Output {
         text: format!("apply response from {}\n{}\n", server, response),
     })
@@ -213,7 +213,7 @@ fn approve(args: &[String]) -> Result<Output, CliError> {
     let (path, body) = if all {
         let proposal_ids = inferred_proposal_ids(&server)?;
         (
-            "/_authport/authority-proposals/approve".to_string(),
+            "/_authboundry/authority-proposals/approve".to_string(),
             proposal_ids_body(&proposal_ids),
         )
     } else {
@@ -222,7 +222,7 @@ fn approve(args: &[String]) -> Result<Output, CliError> {
             None => latest_proposal_id()?,
         };
         (
-            "/_authport/approve".to_string(),
+            "/_authboundry/approve".to_string(),
             format!("{{\"proposal_id\": \"{}\"}}", escape(&proposal_id)),
         )
     };
@@ -265,7 +265,7 @@ fn reject(args: &[String]) -> Result<Output, CliError> {
         escape(&proposal_id),
         escape(&reason)
     );
-    let response = http_post(&server, "/_authport/reject", &body)?;
+    let response = http_post(&server, "/_authboundry/reject", &body)?;
     Ok(Output {
         text: format!("reject response from {}\n{}\n", server, response),
     })
@@ -277,7 +277,7 @@ fn agents(args: &[String]) -> Result<Output, CliError> {
         option_value(args, "--tenant").ok_or_else(|| error("agents needs --tenant TENANT"))?;
     let response = http_get(
         &server,
-        &format!("/_authport/agents?tenant={}", escape_path(&tenant)),
+        &format!("/_authboundry/agents?tenant={}", escape_path(&tenant)),
     )?;
     Ok(Output {
         text: format!("agents from {}\n{}\n", server, response),
@@ -302,7 +302,7 @@ fn agent(args: &[String]) -> Result<Output, CliError> {
                 escape(&name),
                 id
             );
-            let response = http_post(&server, "/_authport/agents", &body)?;
+            let response = http_post(&server, "/_authboundry/agents", &body)?;
             Ok(Output {
                 text: format!("agent create response from {}\n{}\n", server, response),
             })
@@ -316,7 +316,7 @@ fn agent(args: &[String]) -> Result<Output, CliError> {
             let response = http_get(
                 &server,
                 &format!(
-                    "/_authport/agents/{}?tenant={}",
+                    "/_authboundry/agents/{}?tenant={}",
                     escape_path(id),
                     escape_path(&tenant)
                 ),
@@ -359,7 +359,7 @@ fn run_command(args: &[String]) -> Result<Output, CliError> {
 
 fn runs_path(tenant: &str, agent: &str) -> String {
     format!(
-        "/_authport/agents/{}/runs?tenant={}",
+        "/_authboundry/agents/{}/runs?tenant={}",
         escape_path(agent),
         escape_path(tenant)
     )
@@ -367,7 +367,7 @@ fn runs_path(tenant: &str, agent: &str) -> String {
 
 fn run_show_path(id: &str, tenant: &str) -> String {
     format!(
-        "/_authport/runs/{}?tenant={}",
+        "/_authboundry/runs/{}?tenant={}",
         escape_path(id),
         escape_path(tenant)
     )
@@ -375,7 +375,7 @@ fn run_show_path(id: &str, tenant: &str) -> String {
 
 fn policies(args: &[String]) -> Result<Output, CliError> {
     let (server, _output_token, _) = common_options(args)?;
-    let response = http_get(&server, "/_authport/policies")?;
+    let response = http_get(&server, "/_authboundry/policies")?;
     Ok(Output {
         text: format!("policies from {}\n{}\n", server, response),
     })
@@ -391,7 +391,7 @@ fn password_policy(args: &[String]) -> Result<Output, CliError> {
                 text: format!("dry-run proposal for {}\n{}\n", server, body),
             });
         }
-        let response = http_post(&server, "/_authport/propose", &body)?;
+        let response = http_post(&server, "/_authboundry/propose", &body)?;
         if let Some(proposal_id) = extract_quoted_field(&response, "proposal_id") {
             cache_proposal(&proposal_id, &server, &response)?;
         }
@@ -399,7 +399,7 @@ fn password_policy(args: &[String]) -> Result<Output, CliError> {
             text: format!("proposal response from {}\n{}\n", server, response),
         });
     }
-    let response = http_get(&server, "/_authport/password-policy")?;
+    let response = http_get(&server, "/_authboundry/password-policy")?;
     Ok(Output {
         text: format!("password policy from {}\n{}\n", server, response),
     })
@@ -415,7 +415,7 @@ fn policy(args: &[String]) -> Result<Output, CliError> {
     let id = filtered
         .get(1)
         .ok_or_else(|| error("policy show needs an id"))?;
-    let response = http_get(&server, &format!("/_authport/policies/{}", id))?;
+    let response = http_get(&server, &format!("/_authboundry/policies/{}", id))?;
     Ok(Output {
         text: format!("policy {} from {}\n{}\n", id, server, response),
     })
@@ -433,8 +433,8 @@ fn explain(args: &[String]) -> Result<Output, CliError> {
 
 fn explain_path(args: &[String]) -> String {
     match args.first() {
-        Some(id) => format!("/_authport/authorization/decisions/{}/explain", id),
-        None => "/_authport/authorization/explain".to_string(),
+        Some(id) => format!("/_authboundry/authorization/decisions/{}/explain", id),
+        None => "/_authboundry/authorization/explain".to_string(),
     }
 }
 
@@ -563,7 +563,7 @@ fn option_value(args: &[String], name: &str) -> Option<String> {
 }
 
 fn load_server_url() -> String {
-    std::env::var("AUTHPORT_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_string())
+    std::env::var("AUTHBOUNDRY_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_string())
 }
 
 fn http_get(server: &str, path: &str) -> Result<String, CliError> {
@@ -571,8 +571,8 @@ fn http_get(server: &str, path: &str) -> Result<String, CliError> {
 }
 
 fn inferred_proposal_ids(server: &str) -> Result<Vec<String>, CliError> {
-    let _ = http_get(server, "/_authport/authority-proposal")?;
-    let proposals = http_get(server, "/_authport/proposals?source=inferred")?;
+    let _ = http_get(server, "/_authboundry/authority-proposal")?;
+    let proposals = http_get(server, "/_authboundry/proposals?source=inferred")?;
     let ids = extract_all_quoted_fields(&proposals, "id");
     if ids.is_empty() {
         return Err(error("no inferred proposals to approve or apply"));
@@ -803,11 +803,11 @@ mod tests {
     fn explain_uses_latest_or_specific_decision_endpoint() {
         assert_eq!(
             explain_path(&[]),
-            "/_authport/authorization/explain".to_string()
+            "/_authboundry/authorization/explain".to_string()
         );
         assert_eq!(
             explain_path(&strings(&["evt_1"])),
-            "/_authport/authorization/decisions/evt_1/explain".to_string()
+            "/_authboundry/authorization/decisions/evt_1/explain".to_string()
         );
     }
 
@@ -836,11 +836,11 @@ mod tests {
             .contains("--tenant"));
         assert_eq!(
             runs_path("acme", "agent:invoice"),
-            "/_authport/agents/agent:invoice/runs?tenant=acme"
+            "/_authboundry/agents/agent:invoice/runs?tenant=acme"
         );
         assert_eq!(
             run_show_path("run-1", "acme"),
-            "/_authport/runs/run-1?tenant=acme"
+            "/_authboundry/runs/run-1?tenant=acme"
         );
     }
 }

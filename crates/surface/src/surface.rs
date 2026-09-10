@@ -220,7 +220,7 @@ impl AuthRoute {
             ));
         }
         routes.extend([Self::new(
-            "/_authport/password-policy",
+            "/_authboundry/password-policy",
             &[Get],
             AuthOperation::PasswordPolicy,
             false,
@@ -343,21 +343,21 @@ impl AuthRoute {
                 AuthFeature::Sessions,
             ),
             Self::new(
-                "/_authport/policies",
+                "/_authboundry/policies",
                 &[Get],
                 AuthOperation::Policies,
                 true,
                 AuthFeature::ControlPlane,
             ),
             Self::new(
-                "/_authport/authorization/decisions",
+                "/_authboundry/authorization/decisions",
                 &[Get],
                 AuthOperation::AuthorizationDecisions,
                 true,
                 AuthFeature::ControlPlane,
             ),
             Self::new(
-                "/_authport/authorization/explain",
+                "/_authboundry/authorization/explain",
                 &[Get],
                 AuthOperation::AuthorizationExplain,
                 true,
@@ -903,15 +903,15 @@ impl ExperienceSurface {
                 Some(AuthOperation::Sessions),
             ),
             AuthExperienceCapability::Profile => (
-                "read AuthPort identity profile data, not application domain profile data",
+                "read AuthBoundry identity profile data, not application domain profile data",
                 Vec::new(),
                 AuthenticationAssurance::Basic,
                 vec!["session"],
-                vec!["authport_identity_profile", "application_profile_ref"],
+                vec!["authboundry_identity_profile", "application_profile_ref"],
                 Some(AuthOperation::Profile),
             ),
             AuthExperienceCapability::TenantSwitching => (
-                "select among tenant identities authorized by AuthPort",
+                "select among tenant identities authorized by AuthBoundry",
                 Vec::new(),
                 AuthenticationAssurance::Basic,
                 vec!["session"],
@@ -1059,7 +1059,7 @@ impl BoundarySurface {
     pub const CONTRACT: &'static str = "authboundry.boundary/v1";
     /// The cookie the boundary issues and reads. It is an opaque server-issued
     /// handle: nothing inside it is trusted without being re-verified.
-    pub const SESSION_COOKIE: &'static str = "authport_session";
+    pub const SESSION_COOKIE: &'static str = "authboundry_session";
 
     fn derive() -> Self {
         Self {
