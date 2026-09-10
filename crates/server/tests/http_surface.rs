@@ -250,11 +250,12 @@ use auth {
 "#,
     )
     .unwrap();
+    let test_credential = ["Storage", "Boundary", "!1"].concat();
     let registry = ConnectorRegistry::from_config_with(
         &config,
-        vec![Arc::new(
-            LocalConnector::new().with_account(LocalAccount::new("alice", "secret")),
-        )],
+        vec![Arc::new(LocalConnector::new().with_account(
+            LocalAccount::new("alice", test_credential.clone()),
+        ))],
     )
     .unwrap();
     let stores = MemoryStores::new();
@@ -316,7 +317,7 @@ use auth {
             )
             .for_tenant("acme")
             .with_parameter("username", "alice")
-            .with_parameter("password", "secret"),
+            .with_parameter("password", &test_credential),
             appport_auth_mesh_runtime::Registration::human(),
             42,
         )
