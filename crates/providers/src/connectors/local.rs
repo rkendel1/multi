@@ -70,6 +70,16 @@ impl LocalConnector {
             .unwrap_or_default()
     }
 
+    pub fn account_attribute(&self, username: &str, key: &str) -> Option<String> {
+        self.accounts
+            .lock()
+            .ok()?
+            .get(username)?
+            .attributes
+            .get(key)
+            .cloned()
+    }
+
     fn invalid_credentials() -> ConnectorError {
         ConnectorError::InvalidCredentials {
             connector: Self::ID.to_string(),
@@ -168,6 +178,32 @@ impl AuthConnector for LocalConnector {
 
     fn supports_password_management(&self) -> bool {
         true
+    }
+
+    fn recovery_address(&self, username: &str) -> Option<String> {
+        self.accounts
+            .lock()
+            .ok()?
+            .get(username)?
+            .attributes
+            .get("email")
+            .cloned()
+    }
+
+    fn mark_email_verified(&self, username: &str) -> Result<(), ConnectorError> {
+        let mut accounts =
+            self.accounts
+                .lock()
+                .map_err(|_| ConnectorError::PasswordHashingFailed {
+                    connector: Self::ID.to_string(),
+                })?;
+        let account = accounts
+            .get_mut(username)
+            .ok_or_else(Self::invalid_credentials)?;
+        account
+            .attributes
+            .insert("email_verified".to_string(), "true".to_string());
+        Ok(())
     }
 
     fn change_password(

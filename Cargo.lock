@@ -22,6 +22,8 @@ dependencies = [
  "appport-auth-mesh-runtime",
  "appport-auth-mesh-storage",
  "appport-auth-mesh-surface",
+ "rand_core",
+ "sha2",
 ]
 
 [[package]]
@@ -469,6 +471,17 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

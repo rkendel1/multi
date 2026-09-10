@@ -684,6 +684,25 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     );
     let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
 
+    let known_recovery = server.handle(&request(
+        Method::Post,
+        "/auth/password/forgot",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\"}",
+    ));
+    let unknown_recovery = server.handle(&request(
+        Method::Post,
+        "/auth/password/forgot",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"nobody\"}",
+    ));
+    assert_eq!(known_recovery.status, 202);
+    assert_eq!(known_recovery, unknown_recovery);
+
+    let reset_page = server.handle(&request(Method::Get, "/auth/password/reset", &[], ""));
+    assert_eq!(reset_page.status, 200);
+    assert!(reset_page.body_string().contains("Reset password"));
+
     let defaults = server.handle(&request(
         Method::Get,
         "/_authboundry/password-policy",

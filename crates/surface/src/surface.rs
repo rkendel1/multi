@@ -212,8 +212,15 @@ impl AuthRoute {
             .enabled(AuthExperienceCapability::PasswordReset)
         {
             routes.push(Self::new(
-                "/auth/password/reset",
+                "/auth/password/forgot",
                 &[Post],
+                AuthOperation::PasswordForgot,
+                false,
+                AuthFeature::Signup,
+            ));
+            routes.push(Self::new(
+                "/auth/password/reset",
+                &[Get, Post],
                 AuthOperation::PasswordReset,
                 false,
                 AuthFeature::Signup,
@@ -286,7 +293,7 @@ impl AuthRoute {
                 "/auth/email/verification",
                 &[Get, Post],
                 AuthOperation::EmailVerification,
-                true,
+                false,
                 AuthFeature::EmailVerification,
             ));
         }
@@ -455,6 +462,7 @@ pub enum AuthOperation {
     Login,
     Signup,
     PasswordChange,
+    PasswordForgot,
     PasswordReset,
     PasswordPolicy,
     Logout,
@@ -484,6 +492,7 @@ impl AuthOperation {
             Self::Login => "login",
             Self::Signup => "signup",
             Self::PasswordChange => "password_change",
+            Self::PasswordForgot => "password_forgot",
             Self::PasswordReset => "password_reset",
             Self::PasswordPolicy => "password_policy",
             Self::Logout => "logout",

@@ -11,3 +11,5 @@ appport-auth-mesh-providers = { path = "../providers" }
 appport-auth-mesh-runtime = { path = "../runtime" }
 appport-auth-mesh-storage = { path = "../storage" }
 appport-auth-mesh-surface = { path = "../surface" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"

@@ -7,12 +7,13 @@ use appport_auth_mesh_authz::{
     ResourceRef, ResourceResolver, ResourceSelector, Rule,
 };
 use appport_auth_mesh_boundary::{
-    AuthBoundary, AuthPortRuntime, BindingMode, BoundaryRequest, Method, RegistrationPolicy,
-    Requirement, SessionCredential, SignInOutcome, TestClock, RESERVED_HEADER_PREFIX,
+    AuthBoundary, AuthPortRuntime, BindingMode, BoundaryRequest, MemoryMailPort, Method,
+    RegistrationPolicy, Requirement, SessionCredential, SignInOutcome, TestClock,
+    RESERVED_HEADER_PREFIX,
 };
 use appport_auth_mesh_contract::{Capability, ClaimValue, TenantContext};
 use appport_auth_mesh_dsl::parse_auth_block;
-use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
+use appport_auth_mesh_providers::{AuthConnector, ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{MemoryStores, Registration};
 use appport_auth_mesh_storage::TenantRootStore;
 
@@ -24,6 +25,14 @@ use auth {
     role = enum["owner", "member"]
   }
   agents = true
+}
+use mail
+mail {
+  identities { auth = "auth@example.com" }
+  templates {
+    password_reset = "./emails/password-reset.html"
+    email_verification = "./emails/email-verification.html"
+  }
 }
 "#;
 
@@ -447,4 +456,108 @@ fn signing_in_requires_a_declared_connector_and_real_credentials() {
             .denial,
         DenialReason::UnknownTenant
     );
+}
+
+#[test]
+fn password_recovery_is_opaque_single_use_and_delivered_through_mailport() {
+    let stores = stores();
+    let config = parse_auth_block(DECLARATION).unwrap();
+    let directory = Arc::new(LocalConnector::new().with_account(
+        LocalAccount::new("alice", "alice-secret").with_attribute("email", "alice@example.com"),
+    ));
+    let connectors: Vec<Arc<dyn AuthConnector>> = vec![directory.clone()];
+    let registry = ConnectorRegistry::from_config_with(&config, connectors).unwrap();
+    let inbox = Arc::new(MemoryMailPort::default());
+    let clock = Arc::new(TestClock::new(NOW));
+    let runtime = AuthPortRuntime::new(
+        config,
+        registry,
+        stores.mesh_stores(),
+        BindingMode::Standalone,
+    )
+    .unwrap()
+    .with_clock(clock.clone())
+    .with_mail_port(inbox.clone());
+    seed_alice(&runtime, "acme", "owner");
+
+    let forgot = |username: &str| {
+        BoundaryRequest::post("/auth/password/forgot")
+            .with_field("tenant", "acme")
+            .with_field("connector", "local")
+            .with_field("username", username)
+    };
+    runtime.forgot_password(&forgot("nobody")).unwrap();
+    assert!(inbox.messages().is_empty());
+    runtime.forgot_password(&forgot("alice")).unwrap();
+    let message = inbox
+        .messages()
+        .pop()
+        .expect("MailPort receives reset mail");
+    assert_eq!(message.template, "password_reset");
+    assert_eq!(message.to, "alice@example.com");
+    let token = message.variables.get("token").unwrap().clone();
+    assert!(!token.contains("alice"));
+
+    let reset = BoundaryRequest::post("/auth/password/reset")
+        .with_field("token", &token)
+        .with_field("new_password", "replacement-secret");
+    runtime.reset_password(&reset).unwrap();
+    assert!(
+        runtime.reset_password(&reset).is_err(),
+        "a challenge cannot be replayed"
+    );
+    assert!(runtime
+        .sign_in(&sign_in_request("acme", "alice", "alice-secret"))
+        .is_err());
+    assert!(runtime
+        .sign_in(&sign_in_request("acme", "alice", "replacement-secret"))
+        .is_ok());
+
+    runtime.forgot_password(&forgot("alice")).unwrap();
+    let expired = inbox.messages().pop().unwrap().variables["token"].clone();
+    clock.advance(901);
+    assert!(runtime
+        .reset_password(
+            &BoundaryRequest::post("/auth/password/reset")
+                .with_field("token", expired)
+                .with_field("new_password", "another-replacement"),
+        )
+        .is_err());
+}
+
+#[test]
+fn email_verification_uses_the_same_single_use_ceremony() {
+    let stores = stores();
+    let config = parse_auth_block(DECLARATION).unwrap();
+    let directory = Arc::new(LocalConnector::new().with_account(
+        LocalAccount::new("alice", "alice-secret").with_attribute("email", "alice@example.com"),
+    ));
+    let connectors: Vec<Arc<dyn AuthConnector>> = vec![directory.clone()];
+    let registry = ConnectorRegistry::from_config_with(&config, connectors).unwrap();
+    let inbox = Arc::new(MemoryMailPort::default());
+    let runtime = AuthPortRuntime::new(
+        config,
+        registry,
+        stores.mesh_stores(),
+        BindingMode::Standalone,
+    )
+    .unwrap()
+    .with_clock(Arc::new(TestClock::new(NOW)))
+    .with_mail_port(inbox.clone());
+
+    let request = BoundaryRequest::post("/auth/email/verification")
+        .with_field("tenant", "acme")
+        .with_field("connector", "local")
+        .with_field("username", "alice");
+    runtime.request_email_verification(&request).unwrap();
+    let token = inbox.messages().pop().unwrap().variables["token"].clone();
+    let verify = BoundaryRequest::post("/auth/email/verification").with_field("token", token);
+    runtime.verify_email(&verify).unwrap();
+    assert_eq!(
+        directory
+            .account_attribute("alice", "email_verified")
+            .as_deref(),
+        Some("true")
+    );
+    assert!(runtime.verify_email(&verify).is_err());
 }

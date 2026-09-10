@@ -10,7 +10,7 @@ pub mod parser;
 pub use model::{
     stable_hash, AuthConfig, AuthConfigError, AuthExperience, AuthExperienceCapability,
     AuthUiConfig, AuthUiMode, AuthenticationAssurance, AuthenticationMethod, ClaimDef, ClaimKind,
-    ExperienceRenderer, ExperienceState, IsolationMode, PasswordPolicy, UiScreen, UiScreenOverride,
-    UiTheme,
+    ExperienceRenderer, ExperienceState, IsolationMode, MailConfig, PasswordPolicy, UiScreen,
+    UiScreenOverride, UiTheme,
 };
 pub use parser::{parse_auth_block, AuthDslError};

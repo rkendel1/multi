@@ -18,7 +18,7 @@ use appport_auth_mesh_surface::{AuthMethod, AuthOperation, AuthRoute};
 
 use crate::http::{escape, HttpRequest, HttpResponse};
 use crate::router::{ApplicationBinding, RouteOutcome};
-use crate::ui::{render_sign_in, serves_default_screen, CLIENT_JS};
+use crate::ui::{render_password_reset, render_sign_in, serves_default_screen, CLIENT_JS};
 
 /// Repository-scoped Studio operations supplied by the CLI host. Keeping this
 /// behind a narrow interface prevents the generic authority server from
@@ -152,6 +152,15 @@ impl AuthPortServer {
                 Ok(()) => HttpResponse::json(200, "{\"changed\": true}"),
                 Err(err) => denial(&err),
             },
+            AuthOperation::PasswordForgot => {
+                // Recovery requests deliberately have one public result. Neither
+                // account existence nor downstream delivery state crosses this boundary.
+                let _ = self.runtime.forgot_password(request);
+                HttpResponse::json(202, "{\"accepted\": true}")
+            }
+            AuthOperation::PasswordReset if request.method == Method::Get => {
+                HttpResponse::html(200, render_password_reset())
+            }
             AuthOperation::PasswordReset => match self.runtime.reset_password(request) {
                 Ok(()) => HttpResponse::json(200, "{\"reset\": true}"),
                 Err(err) => denial(&err),
@@ -212,8 +221,18 @@ impl AuthPortServer {
                 ),
                 Err(err) => denial(&err),
             },
-            AuthOperation::EmailVerification
-            | AuthOperation::Mfa
+            AuthOperation::EmailVerification => {
+                let outcome = if request.field("token").is_some() {
+                    self.runtime.verify_email(request)
+                } else {
+                    self.runtime.request_email_verification(request)
+                };
+                match outcome {
+                    Ok(()) => HttpResponse::json(202, "{\"accepted\": true}"),
+                    Err(err) => denial(&err),
+                }
+            }
+            AuthOperation::Mfa
             | AuthOperation::Passkeys
             | AuthOperation::Recovery => HttpResponse::denied(
                 501,

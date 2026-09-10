@@ -10,14 +10,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appport_auth_mesh_authz::{Condition, Policy, Rule};
-use appport_auth_mesh_boundary::{AuthPortRuntime, BindingMode, Method, Requirement};
+use appport_auth_mesh_boundary::{AuthPortRuntime, BindingMode, MailPort, Method, Requirement};
 use appport_auth_mesh_contract::{Capability, ClaimValue, TenantContext};
 use appport_auth_mesh_dsl::AuthConfig;
 use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{MemoryStores, Registration};
 use appport_auth_mesh_server::{
-    serve, ApplicationUpstream, AuthPortServer, PathPattern, RoutePolicy, ServerHandle,
-    UpstreamProxy,
+    serve, ApplicationUpstream, AuthPortServer, PathPattern, RemoteMailPort, RoutePolicy,
+    ServerHandle, UpstreamProxy,
 };
 use appport_auth_mesh_storage::TenantRootStore;
 
@@ -38,6 +38,7 @@ pub struct ServeOptions {
     pub studio_page: Option<String>,
     pub studio_controller: Option<Arc<dyn appport_auth_mesh_server::StudioController>>,
     pub application_binding: Option<Arc<dyn appport_auth_mesh_server::ApplicationBinding>>,
+    pub mail_port: Option<Arc<dyn MailPort>>,
 }
 
 impl Default for ServeOptions {
@@ -56,6 +57,7 @@ impl Default for ServeOptions {
             studio_page: None,
             studio_controller: None,
             application_binding: None,
+            mail_port: None,
         }
     }
 }
@@ -148,11 +150,15 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
 
     let mut directory = LocalConnector::new();
     for account in &options.accounts {
+        let mut local = LocalAccount::new(account.username.clone(), account.password.clone());
+        for (name, value) in &account.claims {
+            local = local.with_attribute(name, value);
+        }
+        if account.username.contains('@') && !account.claims.contains_key("email") {
+            local = local.with_attribute("email", &account.username);
+        }
         directory
-            .register(LocalAccount::new(
-                account.username.clone(),
-                account.password.clone(),
-            ))
+            .register(local)
             .map_err(|err| error(err.to_string()))?;
     }
 
@@ -172,13 +178,24 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
             .map_err(|err| error(err.message))?;
     }
 
-    let runtime = AuthPortRuntime::new(
+    let mut runtime = AuthPortRuntime::new(
         config,
         registry,
         stores.mesh_stores(),
         BindingMode::Standalone,
     )
     .map_err(|err| error(err.message))?;
+    let mail_port = match (&options.mail_port, std::env::var("MAILPORT_URL")) {
+        (Some(mail), _) => Some(mail.clone()),
+        (None, Ok(url)) => Some(Arc::new(
+            RemoteMailPort::new(&url, std::env::var("MAILPORT_API_KEY").ok())
+                .map_err(|err| error(format!("invalid MAILPORT_URL: {err}")))?,
+        ) as Arc<dyn MailPort>),
+        (None, Err(_)) => None,
+    };
+    if let Some(mail_port) = mail_port {
+        runtime = runtime.with_mail_port(mail_port);
+    }
 
     // Accounts become principals up front: registration stays closed, so
     // nobody can grant themselves claims over HTTP.

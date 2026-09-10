@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// The declarative auth contract for an application.
 ///
@@ -16,6 +16,7 @@ pub struct AuthConfig {
     pub experience: AuthExperience,
     pub password_policy: PasswordPolicy,
     pub storage: StorageConfig,
+    pub mail: Option<MailConfig>,
 }
 
 impl Default for AuthConfig {
@@ -31,6 +32,7 @@ impl Default for AuthConfig {
             experience: AuthExperience::default(),
             password_policy: PasswordPolicy::default(),
             storage: StorageConfig::default(),
+            mail: None,
         }
     }
 }
@@ -62,6 +64,7 @@ impl AuthConfig {
             experience: self.experience.clone(),
             password_policy: self.password_policy.clone(),
             storage: self.storage.clone(),
+            mail: self.mail.clone(),
         }
     }
 
@@ -138,6 +141,10 @@ impl AuthConfig {
         self.password_policy.validate()?;
         self.storage.validate()?;
 
+        if let Some(mail) = &self.mail {
+            mail.validate()?;
+        }
+
         Ok(())
     }
 
@@ -195,6 +202,46 @@ impl AuthConfig {
         self.experience.write_canonical(out);
         self.password_policy.write_canonical(out);
         self.storage.write_canonical(out);
+        if let Some(mail) = &self.mail {
+            mail.write_canonical(out);
+        }
+    }
+}
+
+/// The MailPort capability contract consumed by authentication ceremonies.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MailConfig {
+    pub identities: BTreeMap<String, String>,
+    pub templates: BTreeMap<String, String>,
+}
+
+impl MailConfig {
+    fn validate(&self) -> Result<(), AuthConfigError> {
+        for required in ["auth"] {
+            if !self.identities.contains_key(required) {
+                return Err(AuthConfigError {
+                    message: format!("mail identities must declare `{required}`"),
+                });
+            }
+        }
+        for required in ["password_reset", "email_verification"] {
+            if !self.templates.contains_key(required) {
+                return Err(AuthConfigError {
+                    message: format!("mail templates must declare `{required}`"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"mail=");
+        for (name, address) in &self.identities {
+            out.extend_from_slice(format!("identity:{name}={address};").as_bytes());
+        }
+        for (name, template) in &self.templates {
+            out.extend_from_slice(format!("template:{name}={template};").as_bytes());
+        }
     }
 }
 

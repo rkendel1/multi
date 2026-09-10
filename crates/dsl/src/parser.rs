@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::model::{
     AuthConfig, AuthExperience, AuthExperienceCapability, AuthUiConfig, AuthUiMode, ClaimDef,
-    ClaimKind, ExperienceRenderer, ExperienceState, IsolationMode, PasswordPolicy,
+    ClaimKind, ExperienceRenderer, ExperienceState, IsolationMode, MailConfig, PasswordPolicy,
     PolicyClaimCondition, PolicyDef, StorageConfig, UiScreen, UiScreenOverride, UiTheme,
 };
 
@@ -102,11 +102,80 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
         config.providers.push("local".to_string());
     }
 
+    if src
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|part| part == ["use", "mail"])
+    {
+        config.mail = Some(parse_mail_contract(src)?);
+    }
+
     config
         .validate()
         .map_err(|err| AuthDslError::new(err.message))?;
 
     Ok(config)
+}
+
+fn parse_mail_contract(src: &str) -> Result<MailConfig, AuthDslError> {
+    let open = src
+        .match_indices("mail")
+        .filter_map(|(index, _)| {
+            let before = src[..index].chars().next_back();
+            let after = src[index + 4..].chars().next();
+            let bounded = before.is_none_or(|ch| !is_ident_char(ch))
+                && after.is_none_or(|ch| !is_ident_char(ch));
+            let open = index + 4 + src[index + 4..].find(|ch: char| !ch.is_whitespace())?;
+            (bounded && src.as_bytes().get(open) == Some(&b'{')).then_some((index, open))
+        })
+        .last()
+        .map(|(_, open)| open)
+        .ok_or_else(|| AuthDslError::new("missing `mail` block"))?;
+    let body = extract_braced_body(src, open, "mail")?;
+    let entries = Parser::new(&body).parse_entries(false)?;
+    let mut identities = None;
+    let mut templates = None;
+    for (name, value) in entries {
+        match name.as_str() {
+            "identities" => identities = Some(expect_string_map("identities", &value)?),
+            "templates" => templates = Some(expect_string_map("templates", &value)?),
+            _ => return Err(AuthDslError::new(format!("unknown mail field `{name}`"))),
+        }
+    }
+    Ok(MailConfig {
+        identities: identities.unwrap_or_default(),
+        templates: templates.unwrap_or_default(),
+    })
+}
+
+fn expect_string_map(name: &str, value: &Value) -> Result<BTreeMap<String, String>, AuthDslError> {
+    let Value::Block(entries) = value else {
+        return Err(AuthDslError::new(format!("mail `{name}` must be a block")));
+    };
+    entries
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), expect_scalar(key, value)?.to_string())))
+        .collect()
+}
+
+fn extract_braced_body(src: &str, open: usize, name: &str) -> Result<String, AuthDslError> {
+    let mut depth = 0usize;
+    for (offset, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(src[open + 1..open + offset].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(AuthDslError::new(format!(
+        "missing closing `}}` in {name} block"
+    )))
 }
 
 fn extract_auth_block(src: &str) -> Result<String, AuthDslError> {
@@ -1124,6 +1193,30 @@ use auth {
             .unwrap_err()
             .message,
             "ui surface `login` must be \"default\" or \"custom\", found `fancy`"
+        );
+    }
+
+    #[test]
+    fn mailport_contract_uses_the_existing_mail_dsl_shape() {
+        let parsed = parse_auth_block(
+            r#"
+use auth { providers = [local] }
+use mail
+mail {
+  identities { auth = "auth@example.com" }
+  templates {
+    password_reset = "./emails/password-reset.html"
+    email_verification = "./emails/email-verification.html"
+  }
+}
+"#,
+        )
+        .unwrap();
+        let mail = parsed.mail.unwrap();
+        assert_eq!(mail.identities["auth"], "auth@example.com");
+        assert_eq!(
+            mail.templates["password_reset"],
+            "./emails/password-reset.html"
         );
     }
 }

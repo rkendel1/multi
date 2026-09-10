@@ -10,6 +10,7 @@
 //! server, run it in front of the application when you do not.
 
 pub mod boundary;
+pub mod ceremony;
 pub mod clock;
 pub mod context;
 pub mod control;
@@ -18,6 +19,7 @@ pub mod request;
 pub mod runtime;
 
 pub use boundary::{AuthBoundary, Requirement};
+pub use ceremony::{CeremonyKind, MailMessage, MailPort, MemoryMailPort};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use context::{AuthContext, ClientAuthContext, ClientDelegation, DelegationContext};
 pub use control::{

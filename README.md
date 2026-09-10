@@ -46,12 +46,27 @@ use auth {
   }
   agents = true
 }
+
+use mail
+mail {
+  identities { auth = "auth@example.com" }
+  templates {
+    password_reset = "./emails/password-reset.html"
+    email_verification = "./emails/email-verification.html"
+  }
+}
 ```
 
 This declares the application's authority model. AuthBoundry derives its
 identity and tenant models, claims, sessions, delegation, agent principals,
 authorization and HTTP surfaces, client projection and default UI. A declared
 connector is available only when its implementation exists.
+
+Password recovery and email verification cross the MailPort boundary. Configure
+the MailPort origin with `MAILPORT_URL` and, when required, its bearer credential
+with `MAILPORT_API_KEY`. Recovery requests always return the same accepted
+response; reset and verification links use short-lived, opaque, hashed-at-rest,
+single-use challenges.
 
 ```text
 declare authority -> inspect authority -> run AuthBoundry -> connect application
@@ -261,8 +276,8 @@ cross-product runtime dependency and does not claim to be an AppPort protocol.
 ## Production status
 
 This release does not provide production implementations for Google OAuth,
-GitHub OAuth, Microsoft, Apple, SAML, SCIM, MFA, passkeys, password reset,
-production email delivery, production key infrastructure, PostgreSQL, Redis,
+GitHub OAuth, Microsoft, Apple, SAML, SCIM, MFA, passkeys, production key
+infrastructure, PostgreSQL, Redis,
 distributed sessions, a polished component library, TLS termination or
 production-grade proxy features. Local identity, storage, session-id and proxy
 signature mechanisms are for development. The packaged native CLI currently

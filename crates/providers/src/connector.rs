@@ -24,6 +24,17 @@ pub trait AuthConnector: Send + Sync {
         false
     }
 
+    /// Resolve a recovery address without exposing it to an unauthenticated caller.
+    fn recovery_address(&self, _username: &str) -> Option<String> {
+        None
+    }
+
+    fn mark_email_verified(&self, _username: &str) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Unsupported {
+            connector: self.id().to_string(),
+        })
+    }
+
     fn change_password(
         &self,
         _tenant_id: &str,

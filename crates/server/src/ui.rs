@@ -5,6 +5,14 @@ use appport_auth_mesh_surface::AuthSurface;
 /// package ships, so there is one client implementation.
 pub const CLIENT_JS: &str = include_str!("../../../clients/js/authboundry.js");
 
+pub fn render_password_reset() -> String {
+    r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reset password · AuthBoundry</title><style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh}main{width:min(26rem,92vw);padding:2rem}label{display:block;font-weight:600}input,button{width:100%;padding:.65rem;margin-top:.4rem;box-sizing:border-box;font:inherit}button{margin-top:1rem}</style></head>
+<body><main><h1>Reset password</h1><form id="reset"><label>New password<input name="new_password" type="password" autocomplete="new-password" required minlength="12"></label><button>Reset password</button></form><p id="status"></p></main>
+<script>const token=new URLSearchParams(location.search).get('token')||'';document.getElementById('reset').addEventListener('submit',async(e)=>{e.preventDefault();const status=document.getElementById('status');const new_password=new FormData(e.target).get('new_password');const response=await fetch('/auth/password/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,new_password})});if(response.ok){status.textContent='Password reset. Opening sign in…';location.assign('/auth/login')}else{const body=await response.json().catch(()=>({}));status.textContent=body.message||'This reset link is invalid or expired.'}});</script></body></html>"#.to_string()
+}
+
 /// The default sign-in page, generated from the auth contract.
 ///
 /// The provider buttons come from the same `AuthSurface` the runtime

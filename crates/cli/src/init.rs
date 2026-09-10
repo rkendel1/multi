@@ -11,7 +11,7 @@ use appport_auth_mesh_server::ApplicationUpstream;
 
 use crate::{error, CliError, Output};
 
-const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n}\n";
+const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n}\n\nuse mail\nmail {\n  identities {\n    auth = \"auth@example.com\"\n  }\n  templates {\n    password_reset = \"./emails/password-reset.html\"\n    email_verification = \"./emails/email-verification.html\"\n  }\n}\n";
 const MANIFEST_DIR: &str = ".authboundry";
 const MANIFEST_FILE: &str = ".authboundry/adoption.json";
 const DEVELOPMENT_FILE: &str = ".authboundry/development.json";
@@ -1011,18 +1011,24 @@ fn config_upgrade_change(root: &Path) -> Option<FileChange> {
         .map(|name| root.join(name))
         .find(|path| path.exists())?;
     let before = fs::read_to_string(&path).ok()?;
-    if before.contains("role = enum[") {
-        return None;
-    }
+    let mut after = before.clone();
     let marker = "  providers = [local]\n";
-    if !before.contains(marker) {
+    if !after.contains("role = enum[") {
+        if !after.contains(marker) {
+            return None;
+        }
+        after = after.replacen(
+            marker,
+            "  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n",
+            1,
+        );
+    }
+    if !after.contains("use mail") {
+        after.push_str("\nuse mail\nmail {\n  identities {\n    auth = \"auth@example.com\"\n  }\n  templates {\n    password_reset = \"./emails/password-reset.html\"\n    email_verification = \"./emails/email-verification.html\"\n  }\n}\n");
+    }
+    if after == before {
         return None;
     }
-    let after = before.replacen(
-        marker,
-        "  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n",
-        1,
-    );
     Some(FileChange {
         path,
         before: Some(before),

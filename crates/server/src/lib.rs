@@ -12,6 +12,7 @@ pub mod client;
 pub mod control_routes;
 pub mod control_types;
 pub mod http;
+pub mod mailport;
 pub mod proxy;
 pub mod router;
 pub mod server;
@@ -21,6 +22,7 @@ pub mod upstream;
 pub use client::{cookie_value, send, send_upstream, ClientRequest};
 pub use control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 pub use http::{HttpError, HttpRequest, HttpResponse, JsonValue};
+pub use mailport::RemoteMailPort;
 pub use proxy::UpstreamProxy;
 pub use router::{
     AppHandler, AppRequest, ApplicationBinding, PathPattern, RouteOutcome, RoutePolicy, RouteRule,
