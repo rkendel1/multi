@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use appport_auth_mesh_authz::{
     evaluate_authorization_request, evaluate_capability, evaluate_with_delegations,
-    AuthorizationDecision, AuthorizationRequest, CapabilityEnvelope, DenialReason, Policy,
-    ResourceAttributes,
+    AuthorizationDecision, AuthorizationEvidence, AuthorizationOutcome, AuthorizationRequest,
+    CapabilityEnvelope, DenialReason, Policy, ResourceAttributes,
 };
 use appport_auth_mesh_authz::{Action, Condition, Effect, ResourceSelector, Rule};
 use appport_auth_mesh_contract::{
@@ -59,7 +59,7 @@ pub struct AuthMesh {
     stores: MeshStores,
     session_ttl: i64,
     audit_sequence: AtomicU64,
-    decisions: Mutex<Vec<AuthorizationDecision>>,
+    decisions: Mutex<Vec<AuthorizationEvidence>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -660,6 +660,16 @@ impl AuthMesh {
         capability: &Capability,
         now: i64,
     ) -> AuthorizationDecision {
+        self.authorize_with_authority_revision(context, capability, now, 0)
+    }
+
+    pub fn authorize_with_authority_revision(
+        &self,
+        context: &RuntimeContext,
+        capability: &Capability,
+        now: i64,
+        authority_revision: u64,
+    ) -> AuthorizationDecision {
         let policy = match self.policy(&context.tenant) {
             Ok(policy) => policy,
             Err(_) => return deny(DenialReason::PolicyNotFound),
@@ -683,9 +693,13 @@ impl AuthMesh {
         );
 
         match self.record_decision(context, capability, &decision, now) {
-            Ok(audit_event_id) => {
-                self.remember_decision(attach_audit_event(decision, audit_event_id))
-            }
+            Ok(audit_event_id) => self.remember_decision(
+                context,
+                capability,
+                attach_audit_event(decision, audit_event_id),
+                now,
+                authority_revision,
+            ),
             // An authorization that cannot be recorded is not an authorization.
             Err(_) => deny(DenialReason::AuditUnavailable),
         }
@@ -697,6 +711,23 @@ impl AuthMesh {
         request: &AuthorizationRequest,
         resource_attributes: Option<&ResourceAttributes>,
         now: i64,
+    ) -> AuthorizationDecision {
+        self.authorize_request_with_authority_revision(
+            context,
+            request,
+            resource_attributes,
+            now,
+            0,
+        )
+    }
+
+    pub fn authorize_request_with_authority_revision(
+        &self,
+        context: &RuntimeContext,
+        request: &AuthorizationRequest,
+        resource_attributes: Option<&ResourceAttributes>,
+        now: i64,
+        authority_revision: u64,
     ) -> AuthorizationDecision {
         let policy = match self.policy(&context.tenant) {
             Ok(policy) => policy,
@@ -717,14 +748,18 @@ impl AuthMesh {
             now,
         );
         match self.record_decision(context, &request.capability, &decision, now) {
-            Ok(audit_event_id) => {
-                self.remember_decision(attach_audit_event(decision, audit_event_id))
-            }
+            Ok(audit_event_id) => self.remember_decision(
+                context,
+                &request.capability,
+                attach_audit_event(decision, audit_event_id),
+                now,
+                authority_revision,
+            ),
             Err(_) => deny(DenialReason::AuditUnavailable),
         }
     }
 
-    pub fn recent_decisions(&self) -> Vec<AuthorizationDecision> {
+    pub fn recent_decisions(&self) -> Vec<AuthorizationEvidence> {
         self.decisions
             .lock()
             .map(|decisions| decisions.clone())
@@ -1073,9 +1108,24 @@ impl AuthMesh {
         audit_event_id(tenant, sequence)
     }
 
-    fn remember_decision(&self, decision: AuthorizationDecision) -> AuthorizationDecision {
+    fn remember_decision(
+        &self,
+        context: &RuntimeContext,
+        capability: &Capability,
+        decision: AuthorizationDecision,
+        now: i64,
+        authority_revision: u64,
+    ) -> AuthorizationDecision {
+        let evidence = decision_evidence(
+            context,
+            capability,
+            &decision,
+            now,
+            authority_revision,
+            self.config.fingerprint(),
+        );
         if let Ok(mut decisions) = self.decisions.lock() {
-            decisions.push(decision.clone());
+            decisions.push(evidence);
             if decisions.len() > 100 {
                 decisions.remove(0);
             }
@@ -1118,12 +1168,14 @@ fn attach_audit_event(
             resource,
             action,
             matched_rules,
+            conditions,
             ..
         } => AuthorizationDecision::Allow {
             grant,
             resource,
             action,
             matched_rules,
+            conditions,
             audit_event_id: Some(audit_event_id),
         },
         AuthorizationDecision::Deny {
@@ -1133,6 +1185,7 @@ fn attach_audit_event(
             action,
             policy_id,
             matched_rules,
+            conditions,
             ..
         } => AuthorizationDecision::Deny {
             reason,
@@ -1141,9 +1194,90 @@ fn attach_audit_event(
             action,
             policy_id,
             matched_rules,
+            conditions,
             audit_event_id: Some(audit_event_id),
         },
     }
+}
+
+fn decision_evidence(
+    context: &RuntimeContext,
+    capability: &Capability,
+    decision: &AuthorizationDecision,
+    now: i64,
+    authority_revision: u64,
+    contract_fingerprint: String,
+) -> AuthorizationEvidence {
+    match decision {
+        AuthorizationDecision::Allow {
+            grant,
+            resource,
+            action,
+            matched_rules,
+            conditions,
+            audit_event_id,
+        } => AuthorizationEvidence {
+            decision_id: audit_event_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| fallback_decision_id(context, capability, now)),
+            timestamp: now,
+            principal: context.principal.id.clone(),
+            tenant: context.tenant.tenant_id.clone(),
+            capability: grant.capability.clone(),
+            action: action.clone(),
+            resource: resource.clone(),
+            policy_id: Some(grant.policy_id.clone()),
+            matched_rules: matched_rules.clone(),
+            conditions: conditions.clone(),
+            authority: Some(grant.authority),
+            authority_revision,
+            contract_fingerprint,
+            decision: AuthorizationOutcome::Allow,
+            reason: decision.reason(),
+            audit_event_id: audit_event_id.clone(),
+        },
+        AuthorizationDecision::Deny {
+            capability: denied_capability,
+            resource,
+            action,
+            policy_id,
+            matched_rules,
+            conditions,
+            audit_event_id,
+            ..
+        } => AuthorizationEvidence {
+            decision_id: audit_event_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| fallback_decision_id(context, capability, now)),
+            timestamp: now,
+            principal: context.principal.id.clone(),
+            tenant: context.tenant.tenant_id.clone(),
+            capability: denied_capability
+                .clone()
+                .unwrap_or_else(|| capability.clone()),
+            action: action.clone(),
+            resource: resource.clone(),
+            policy_id: policy_id.clone(),
+            matched_rules: matched_rules.clone(),
+            conditions: conditions.clone(),
+            authority: None,
+            authority_revision,
+            contract_fingerprint,
+            decision: AuthorizationOutcome::Deny,
+            reason: decision.reason(),
+            audit_event_id: audit_event_id.clone(),
+        },
+    }
+}
+
+fn fallback_decision_id(context: &RuntimeContext, capability: &Capability, now: i64) -> String {
+    let material = format!(
+        "{}|{}|{}|{}",
+        context.tenant.tenant_id, context.principal.id, capability, now
+    );
+    format!("decision_{:016x}", stable_hash(material.as_bytes()))
 }
 
 fn deny(reason: DenialReason) -> AuthorizationDecision {
@@ -1154,6 +1288,7 @@ fn deny(reason: DenialReason) -> AuthorizationDecision {
         action: None,
         policy_id: None,
         matched_rules: Vec::new(),
+        conditions: Vec::new(),
         audit_event_id: None,
     }
 }

@@ -4,8 +4,8 @@ use appport_auth_mesh_contract::{
 
 use crate::policy::{
     Action, AuthorityBasis, AuthorizationDecision, AuthorizationRequest, CapabilityEnvelope,
-    Condition, DenialReason, Effect, GrantedCapability, Policy, PrincipalAttribute,
-    ResourceAttributes,
+    Condition, ConditionEvidence, ConditionResult, DenialReason, Effect, GrantedCapability, Policy,
+    PrincipalAttribute, ResourceAttributes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +159,11 @@ pub fn evaluate_capability(
     }
 
     for rule in &policy.rules {
-        if &rule.capability == capability && condition_matches(&rule.condition, principal) {
+        if &rule.capability == capability {
+            let (matches, conditions) = evaluate_condition(&rule.condition, principal, None);
+            if !matches {
+                continue;
+            }
             return allow(
                 GrantedCapability {
                     capability: capability.clone(),
@@ -175,6 +179,7 @@ pub fn evaluate_capability(
                 None,
                 None,
                 claim_basis(&rule.condition),
+                conditions,
             );
         }
     }
@@ -201,6 +206,7 @@ pub fn evaluate_capability(
             None,
             None,
             vec!["delegation".to_string()],
+            Vec::new(),
         );
     }
 
@@ -261,6 +267,7 @@ pub fn evaluate_authorization_request(
         }
     }
 
+    let mut failed_conditions = None;
     for (index, rule) in policy.rules.iter().enumerate() {
         if rule.capability != request.capability {
             continue;
@@ -280,18 +287,22 @@ pub fn evaluate_authorization_request(
                 continue;
             }
         }
-        if !condition_matches_with_resource(&rule.condition, principal, resource_attributes) {
+        let (conditions_match, conditions) =
+            evaluate_condition(&rule.condition, principal, resource_attributes);
+        if !conditions_match {
+            failed_conditions = Some(conditions);
             continue;
         }
         let matched = vec![format!("rule:{}", index)];
         if rule.effect == Effect::Deny {
             return AuthorizationDecision::Deny {
-                reason: DenialReason::CapabilityNotGranted,
+                reason: DenialReason::PolicyDenied,
                 capability: Some(request.capability.clone()),
                 resource: request.resource.clone(),
                 action: Some(request.action.clone()),
                 policy_id: Some(policy.id.clone()),
                 matched_rules: matched,
+                conditions,
                 audit_event_id: None,
             };
         }
@@ -310,6 +321,7 @@ pub fn evaluate_authorization_request(
             request.resource.clone(),
             Some(request.action.clone()),
             matched,
+            conditions,
         );
     }
 
@@ -339,10 +351,20 @@ pub fn evaluate_authorization_request(
             request.resource.clone(),
             Some(request.action.clone()),
             vec!["delegation".to_string()],
+            Vec::new(),
         );
     }
 
-    deny_for(request, DenialReason::CapabilityNotGranted, Some(policy))
+    if let Some(conditions) = failed_conditions {
+        deny_for_with_conditions(
+            request,
+            DenialReason::ConditionFailed,
+            Some(policy),
+            conditions,
+        )
+    } else {
+        deny_for(request, DenialReason::CapabilityNotGranted, Some(policy))
+    }
 }
 
 fn deny(reason: DenialReason) -> AuthorizationDecision {
@@ -353,6 +375,7 @@ fn deny(reason: DenialReason) -> AuthorizationDecision {
         action: None,
         policy_id: None,
         matched_rules: Vec::new(),
+        conditions: Vec::new(),
         audit_event_id: None,
     }
 }
@@ -362,6 +385,15 @@ fn deny_for(
     reason: DenialReason,
     policy: Option<&Policy>,
 ) -> AuthorizationDecision {
+    deny_for_with_conditions(request, reason, policy, Vec::new())
+}
+
+fn deny_for_with_conditions(
+    request: &AuthorizationRequest,
+    reason: DenialReason,
+    policy: Option<&Policy>,
+    conditions: Vec<ConditionEvidence>,
+) -> AuthorizationDecision {
     AuthorizationDecision::Deny {
         reason,
         capability: Some(request.capability.clone()),
@@ -369,6 +401,7 @@ fn deny_for(
         action: Some(request.action.clone()),
         policy_id: policy.map(|policy| policy.id.clone()),
         matched_rules: Vec::new(),
+        conditions,
         audit_event_id: None,
     }
 }
@@ -378,68 +411,234 @@ fn allow(
     resource: Option<crate::policy::ResourceRef>,
     action: Option<Action>,
     matched_rules: Vec<String>,
+    conditions: Vec<ConditionEvidence>,
 ) -> AuthorizationDecision {
     AuthorizationDecision::Allow {
         grant,
         resource,
         action,
         matched_rules,
+        conditions,
         audit_event_id: None,
     }
 }
 
 fn condition_matches(condition: &Condition, principal: &Principal) -> bool {
-    condition_matches_with_resource(condition, principal, None)
+    evaluate_condition(condition, principal, None).0
 }
 
-fn condition_matches_with_resource(
+fn evaluate_condition(
     condition: &Condition,
     principal: &Principal,
     resource: Option<&ResourceAttributes>,
-) -> bool {
+) -> (bool, Vec<ConditionEvidence>) {
     match condition {
-        Condition::Always => true,
-        Condition::All(conditions) => conditions
-            .iter()
-            .all(|condition| condition_matches_with_resource(condition, principal, resource)),
-        Condition::ClaimEquals { key, value } => principal.claims.values.get(key) == Some(value),
-        Condition::ClaimIn { key, values } => principal
-            .claims
-            .values
-            .get(key)
-            .map(|v| values.contains(v))
-            .unwrap_or(false),
+        Condition::Always => (true, vec![condition_evidence("always", true, None)]),
+        Condition::All(conditions) => {
+            let mut all_match = true;
+            let mut evidence = Vec::new();
+            for condition in conditions {
+                let (matches, mut condition_evidence) =
+                    evaluate_condition(condition, principal, resource);
+                all_match &= matches;
+                evidence.append(&mut condition_evidence);
+            }
+            (all_match, evidence)
+        }
+        Condition::ClaimEquals { key, value } => {
+            let matches = principal.claims.values.get(key) == Some(value);
+            (
+                matches,
+                vec![condition_evidence(
+                    format!("claim.{} == {}", key, claim_value_text(value)),
+                    matches,
+                    Some(claim_fact(key, principal.claims.values.contains_key(key))),
+                )],
+            )
+        }
+        Condition::ClaimIn { key, values } => {
+            let present = principal.claims.values.get(key);
+            let matches = present.map(|v| values.contains(v)).unwrap_or(false);
+            (
+                matches,
+                vec![condition_evidence(
+                    format!(
+                        "claim.{} in [{}]",
+                        key,
+                        values
+                            .iter()
+                            .map(claim_value_text)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    matches,
+                    Some(claim_fact(key, present.is_some())),
+                )],
+            )
+        }
         Condition::TimeBound { start, end } => {
             let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 Ok(v) => v.as_secs() as i64,
-                Err(_) => return false,
+                Err(_) => {
+                    return (
+                        false,
+                        vec![condition_evidence(
+                            format!("time between {} and {}", start, end),
+                            false,
+                            Some("time unavailable".to_string()),
+                        )],
+                    )
+                }
             };
-            now >= *start && now <= *end
+            let matches = now >= *start && now <= *end;
+            (
+                matches,
+                vec![condition_evidence(
+                    format!("time between {} and {}", start, end),
+                    matches,
+                    Some("system time evaluated".to_string()),
+                )],
+            )
         }
-        Condition::TenantCurrent => resource
-            .and_then(|resource| resource.tenant_id.as_ref())
-            .map(|tenant| tenant == &principal.tenant_id)
-            .unwrap_or(false),
-        Condition::ResourceAttributeEquals { key, value } => resource
-            .and_then(|resource| resource.values.get(key))
-            .map(|actual| actual == value)
-            .unwrap_or(false),
-        Condition::ResourceAttributeIn { key, values } => resource
-            .and_then(|resource| resource.values.get(key))
-            .map(|actual| values.contains(actual))
-            .unwrap_or(false),
+        Condition::TenantCurrent => {
+            let resource_tenant = resource.and_then(|resource| resource.tenant_id.as_ref());
+            let matches = resource_tenant
+                .map(|tenant| tenant == &principal.tenant_id)
+                .unwrap_or(false);
+            (
+                matches,
+                vec![condition_evidence(
+                    "tenant=current",
+                    matches,
+                    Some(match resource_tenant {
+                        Some(_) if matches => "resource tenant matched current tenant".to_string(),
+                        Some(_) => "resource tenant did not match current tenant".to_string(),
+                        None => "resource tenant unavailable".to_string(),
+                    }),
+                )],
+            )
+        }
+        Condition::ResourceAttributeEquals { key, value } => {
+            let actual = resource.and_then(|resource| resource.values.get(key));
+            let matches = actual.map(|actual| actual == value).unwrap_or(false);
+            (
+                matches,
+                vec![condition_evidence(
+                    format!("resource.{} == {}", key, claim_value_text(value)),
+                    matches,
+                    Some(resource_fact(key, actual.is_some())),
+                )],
+            )
+        }
+        Condition::ResourceAttributeIn { key, values } => {
+            let actual = resource.and_then(|resource| resource.values.get(key));
+            let matches = actual
+                .map(|actual| values.contains(actual))
+                .unwrap_or(false);
+            (
+                matches,
+                vec![condition_evidence(
+                    format!(
+                        "resource.{} in [{}]",
+                        key,
+                        values
+                            .iter()
+                            .map(claim_value_text)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    matches,
+                    Some(resource_fact(key, actual.is_some())),
+                )],
+            )
+        }
         Condition::RelationshipEquals {
             resource_attribute,
             principal: principal_attribute,
         } => {
             let Some(left) = resource.and_then(|resource| resource.values.get(resource_attribute))
             else {
-                return false;
+                return (
+                    false,
+                    vec![condition_evidence(
+                        format!(
+                            "resource.{} == principal.{}",
+                            resource_attribute,
+                            principal_attribute_name(principal_attribute)
+                        ),
+                        false,
+                        Some(resource_fact(resource_attribute, false)),
+                    )],
+                );
             };
-            principal_attribute_value(principal, principal_attribute)
-                .map(|right| left == &right)
-                .unwrap_or(false)
+            let right = principal_attribute_value(principal, principal_attribute);
+            let matches = right.map(|right| left == &right).unwrap_or(false);
+            (
+                matches,
+                vec![condition_evidence(
+                    format!(
+                        "resource.{} == principal.{}",
+                        resource_attribute,
+                        principal_attribute_name(principal_attribute)
+                    ),
+                    matches,
+                    Some(if matches {
+                        "relationship matched".to_string()
+                    } else {
+                        "relationship did not match".to_string()
+                    }),
+                )],
+            )
         }
+    }
+}
+
+fn condition_evidence(
+    condition: impl Into<String>,
+    passed: bool,
+    fact: Option<String>,
+) -> ConditionEvidence {
+    ConditionEvidence {
+        condition: condition.into(),
+        result: if passed {
+            ConditionResult::Pass
+        } else {
+            ConditionResult::Fail
+        },
+        fact,
+    }
+}
+
+fn claim_fact(key: &str, present: bool) -> String {
+    if present {
+        format!("claim.{} present", key)
+    } else {
+        format!("claim.{} missing", key)
+    }
+}
+
+fn resource_fact(key: &str, present: bool) -> String {
+    if present {
+        format!("resource.{} present", key)
+    } else {
+        format!("resource.{} missing", key)
+    }
+}
+
+fn principal_attribute_name(attribute: &PrincipalAttribute) -> String {
+    match attribute {
+        PrincipalAttribute::Id => "id".to_string(),
+        PrincipalAttribute::Tenant => "tenant".to_string(),
+        PrincipalAttribute::Claim(key) => format!("claim.{}", key),
+    }
+}
+
+fn claim_value_text(value: &appport_auth_mesh_contract::ClaimValue) -> String {
+    match value {
+        appport_auth_mesh_contract::ClaimValue::Enum(value)
+        | appport_auth_mesh_contract::ClaimValue::String(value) => value.clone(),
+        appport_auth_mesh_contract::ClaimValue::Integer(value) => value.to_string(),
+        appport_auth_mesh_contract::ClaimValue::Boolean(value) => value.to_string(),
     }
 }
 
@@ -486,8 +685,9 @@ mod tests {
     use crate::{
         evaluator::{evaluate, evaluate_authorization_request},
         policy::{
-            Action, AuthorizationContext, AuthorizationRequest, Condition, DenialReason, Effect,
-            Policy, PrincipalAttribute, ResourceAttributes, ResourceRef, ResourceSelector, Rule,
+            Action, AuthorizationContext, AuthorizationRequest, Condition, ConditionResult,
+            DenialReason, Effect, Policy, PrincipalAttribute, ResourceAttributes, ResourceRef,
+            ResourceSelector, Rule,
         },
     };
 
@@ -641,5 +841,31 @@ mod tests {
             0,
         );
         assert_eq!(denied.denial_reason(), Some(DenialReason::TenantMismatch));
+
+        let mismatch_attributes = ResourceAttributes::new()
+            .with_tenant("acme")
+            .with_value("department", ClaimValue::String("legal".to_string()));
+        let condition_denied = evaluate_authorization_request(
+            Some(&policy),
+            Some(&principal),
+            Some(&tenant),
+            None,
+            &request,
+            Some(&mismatch_attributes),
+            0,
+        );
+        assert_eq!(
+            condition_denied.denial_reason(),
+            Some(DenialReason::ConditionFailed)
+        );
+        let conditions = condition_denied.conditions();
+        assert_eq!(conditions.len(), 3);
+        assert_eq!(conditions[0].result, ConditionResult::Pass);
+        assert_eq!(conditions[1].result, ConditionResult::Pass);
+        assert_eq!(conditions[2].result, ConditionResult::Fail);
+        assert_eq!(
+            conditions[2].condition,
+            "resource.department == principal.claim.department"
+        );
     }
 }

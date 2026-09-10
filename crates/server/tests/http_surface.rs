@@ -1,21 +1,30 @@
 //! The HTTP layer: it carries requests to the boundary and answers, and it
 //! decides nothing on its own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use appport_auth_mesh_authz::DenialReason;
+use appport_auth_mesh_authz::{
+    Action, AuthorizationContext, AuthorizationRequest, CapabilityEnvelope, Condition,
+    DenialReason, Policy, PrincipalAttribute, ResourceAttributes, ResourceRef, ResourceSelector,
+    Rule,
+};
 use appport_auth_mesh_boundary::{
     AuthPortRuntime, AuthorityChange, BindingMode, BoundaryRequest, Method, Requirement,
     RESERVED_HEADER_PREFIX,
 };
+use appport_auth_mesh_contract::{
+    Capability, ClaimValue, Claims, ContractVersion, Principal, PrincipalId, PrincipalKind,
+    TenantContext,
+};
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
-use appport_auth_mesh_runtime::MemoryStores;
+use appport_auth_mesh_runtime::{MemoryStores, RuntimeContext};
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
     render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy, RouterApp,
 };
+use appport_auth_mesh_storage::TenantRootStore;
 use appport_auth_mesh_surface::{AuthSurface, BoundarySurface};
 
 fn request(method: Method, target: &str, headers: &[(&str, &str)], body: &str) -> HttpRequest {
@@ -155,6 +164,134 @@ fn denials_carry_a_status_and_a_reason() {
         .headers
         .iter()
         .any(|(_, value)| value.contains("Max-Age=0")));
+}
+
+#[test]
+fn authorization_explain_endpoints_return_decision_evidence_by_id() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let stores = MemoryStores::new();
+    let tenant = TenantContext {
+        tenant_id: "acme".into(),
+        namespace: "acme".to_string(),
+        policy_id: "acme-policy".into(),
+        storage_root_id: "acme-root".into(),
+    };
+    stores.tenants.put_tenant(tenant.clone()).unwrap();
+    stores
+        .policies
+        .put(Policy {
+            id: tenant.policy_id.clone(),
+            rules: vec![Rule {
+                capability: "invoice.update".into(),
+                condition: Condition::All(vec![
+                    Condition::TenantCurrent,
+                    Condition::ClaimIn {
+                        key: "role".to_string(),
+                        values: vec![
+                            ClaimValue::Enum("owner".to_string()),
+                            ClaimValue::Enum("admin".to_string()),
+                        ],
+                    },
+                    Condition::RelationshipEquals {
+                        resource_attribute: "owner".to_string(),
+                        principal: PrincipalAttribute::Id,
+                    },
+                ]),
+                resource: Some(ResourceSelector::any("invoice")),
+                action: Some(Action("update".to_string())),
+                effect: appport_auth_mesh_authz::Effect::Allow,
+            }],
+        })
+        .unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            stores.mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let mut claims = HashMap::new();
+    claims.insert("role".to_string(), ClaimValue::Enum("admin".to_string()));
+    let principal = Principal {
+        id: PrincipalId("user:alice".to_string()),
+        kind: PrincipalKind::Human,
+        tenant_id: "acme".into(),
+        claims: Claims {
+            values: claims.clone(),
+        },
+        version: ContractVersion { major: 1, minor: 0 },
+        agent_state: None,
+    };
+    let context = RuntimeContext {
+        principal: principal.clone(),
+        tenant: tenant.clone(),
+        session_id: None,
+        delegation: None,
+        claims: Claims { values: claims },
+        capabilities: CapabilityEnvelope::empty(),
+    };
+    let auth_request = AuthorizationRequest {
+        principal: principal.id,
+        tenant: tenant.tenant_id,
+        capability: Capability("invoice.update".to_string()),
+        action: Action("update".to_string()),
+        resource: Some(ResourceRef::new("invoice", "8472", "acme")),
+        context: AuthorizationContext::default(),
+    };
+    let attributes = ResourceAttributes::new()
+        .with_tenant("acme")
+        .with_value("owner", ClaimValue::String("user:bob".to_string()));
+    let decision = runtime.mesh().authorize_request_with_authority_revision(
+        &context,
+        &auth_request,
+        Some(&attributes),
+        1234,
+        runtime.live_authority().revision,
+    );
+    assert_eq!(
+        decision.denial_reason(),
+        Some(DenialReason::ConditionFailed)
+    );
+
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+    let listed = server.handle(&request(
+        Method::Get,
+        "/_authport/authorization/decisions",
+        &[],
+        "",
+    ));
+    assert_eq!(listed.status, 200);
+    let body = listed.body_string();
+    assert!(body.contains("\"decision\": \"deny\""));
+    assert!(body.contains("\"reason\": \"condition_failed\""));
+    assert!(body.contains("\"condition\": \"resource.owner == principal.id\""));
+    assert!(body.contains("\"result\": \"fail\""));
+    assert!(body.contains("\"authority_revision\": 0"));
+    assert!(body.contains("\"contract_fingerprint\""));
+    let decision_id = json_string_field(&body, "decision_id").expect("decision id");
+
+    let by_id = server.handle(&request(
+        Method::Get,
+        &format!("/_authport/authorization/decisions/{}", decision_id),
+        &[],
+        "",
+    ));
+    assert_eq!(by_id.status, 200);
+    assert!(by_id
+        .body_string()
+        .contains("\"principal\": \"user:alice\""));
+
+    let explained = server.handle(&request(
+        Method::Get,
+        &format!("/_authport/authorization/decisions/{}/explain", decision_id),
+        &[],
+        "",
+    ));
+    assert_eq!(explained.status, 200);
+    assert!(explained.body_string().contains("\"summary\""));
 }
 
 #[test]

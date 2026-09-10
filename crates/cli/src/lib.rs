@@ -39,6 +39,7 @@ USAGE:
     authport reject [--proposal-id ID] [--reason TEXT] [--server URL]
     authport policies [--server URL]
     authport policy show ID [--server URL]
+    authport explain [DECISION_ID] [--server URL]
 
 SERVE OPTIONS:
     --addr ADDRESS              listen address (default 127.0.0.1:8787)
@@ -92,7 +93,7 @@ where
     let args: Vec<String> = args.into_iter().collect();
     if matches!(
         args.first().map(String::as_str),
-        Some("connect" | "approve" | "apply" | "reject" | "policies" | "policy")
+        Some("connect" | "approve" | "apply" | "reject" | "policies" | "policy" | "explain")
     ) || is_control_propose(&args)
     {
         return control::run(&args);

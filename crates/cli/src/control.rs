@@ -16,6 +16,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("reject") => reject(&args[1..]),
         Some("policies") => policies(&args[1..]),
         Some("policy") => policy(&args[1..]),
+        Some("explain") => explain(&args[1..]),
         _ => Err(error("unknown control command")),
     }
 }
@@ -210,6 +211,7 @@ fn policy(args: &[String]) -> Result<Output, CliError> {
     if filtered.first().map(String::as_str) != Some("show") {
         return Err(error("policy command supports `show ID`"));
     }
+
     let id = filtered
         .get(1)
         .ok_or_else(|| error("policy show needs an id"))?;
@@ -217,6 +219,23 @@ fn policy(args: &[String]) -> Result<Output, CliError> {
     Ok(Output {
         text: format!("policy {} from {}\n{}\n", id, server, response),
     })
+}
+
+fn explain(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    let path = explain_path(&filtered);
+    let response = http_get(&server, &path)?;
+    Ok(Output {
+        text: format!("authorization explanation from {}\n{}\n", server, response),
+    })
+}
+
+fn explain_path(args: &[String]) -> String {
+    match args.first() {
+        Some(id) => format!("/_authport/authorization/decisions/{}/explain", id),
+        None => "/_authport/authorization/explain".to_string(),
+    }
 }
 
 fn common_options(args: &[String]) -> Result<(String, bool, bool), CliError> {
@@ -528,5 +547,17 @@ mod tests {
             ("localhost".to_string(), 8787)
         );
         assert!(parse_http_url("https://localhost:8787").is_err());
+    }
+
+    #[test]
+    fn explain_uses_latest_or_specific_decision_endpoint() {
+        assert_eq!(
+            explain_path(&[]),
+            "/_authport/authorization/explain".to_string()
+        );
+        assert_eq!(
+            explain_path(&strings(&["evt_1"])),
+            "/_authport/authorization/decisions/evt_1/explain".to_string()
+        );
     }
 }
