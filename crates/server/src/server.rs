@@ -638,6 +638,10 @@ pub fn serve(
 }
 
 fn handle_connection(server: Arc<dyn HttpHandler>, stream: TcpStream) {
+    if let Err(err) = stream.set_nonblocking(false) {
+        eprintln!("AuthBoundry could not configure client connection: {}", err);
+        return;
+    }
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let Ok(write_half) = stream.try_clone() else {
@@ -674,5 +678,31 @@ fn handle_connection(server: Arc<dyn HttpHandler>, stream: TcpStream) {
         }
         Err(err) => HttpResponse::denied(400, "bad_request", &err.message),
     };
-    let _ = response.write_to(&mut writer);
+    if let Err(err) = response.write_to(&mut writer) {
+        eprintln!("AuthBoundry response write failed: {}", err);
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use crate::client::{send, ClientRequest};
+
+    struct LargeResponse;
+
+    impl HttpHandler for LargeResponse {
+        fn handle(&self, _request: &HttpRequest) -> HttpResponse {
+            HttpResponse::new(200, "text/javascript", vec![b'x'; 1_048_576])
+        }
+    }
+
+    #[test]
+    fn accepted_connections_deliver_responses_larger_than_the_socket_buffer() {
+        let running = serve(Arc::new(LargeResponse), "127.0.0.1:0").unwrap();
+        let response = send(running.address(), &ClientRequest::get("/large.js")).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.len(), 1_048_576);
+        assert!(response.body.iter().all(|byte| *byte == b'x'));
+        running.shutdown();
+    }
 }

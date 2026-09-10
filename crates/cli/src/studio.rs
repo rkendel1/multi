@@ -346,15 +346,12 @@ impl StudioController for RepositoryStudio {
                 }
             }
             (Method::Post, "/_authboundry/application/attachment/test") => {
-                let crossed = self
-                    .binding
-                    .forwarded
-                    .lock()
-                    .map(|count| *count > 0)
-                    .unwrap_or(false);
+                let probe = BoundaryRequest::get("/__authboundry_attachment_probe");
+                let upstream_response = self.binding.handle(&probe, None);
+                let crossed = upstream_response.status < 500;
                 HttpResponse::json(
                     200,
-                    format!("{{\"ok\":true,\"authboundry_reachable\":true,\"request_forwarded\":{},\"application_responded\":{},\"protected_routes_verified\":false}}", crossed, crossed),
+                    format!("{{\"ok\":{},\"authboundry_reachable\":true,\"request_forwarded\":{},\"application_responded\":{},\"upstream_status\":{},\"protected_routes_verified\":false}}", crossed, crossed, crossed, upstream_response.status),
                 )
             }
             (Method::Post, "/_authboundry/application/attachment/detach") => {
@@ -666,9 +663,9 @@ document.getElementById('discover').onclick=async()=>{{status.textContent='Disco
 document.getElementById('test-connection').onclick=async()=>{{status.textContent='Testing connection…';try{{const data=await post('/_authboundry/application/discover',{{upstream:input.value}});if(!data.reachable)throw new Error('Application not reachable. Start the application or change the upstream.');status.textContent='✓ Application reachable (not attached yet)';status.className='ok'}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
 document.getElementById('preview').onclick=async()=>{{status.textContent='Validating attachment…';try{{proposal=await post('/_authboundry/application/attachment/preview',{{upstream:input.value}});document.getElementById('preview-text').textContent=proposal.preview;document.getElementById('attach-step').hidden=true;document.getElementById('approval').hidden=false}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
 document.getElementById('cancel').onclick=()=>{{proposal=null;document.getElementById('approval').hidden=true;document.getElementById('attach-step').hidden=false;status.textContent='Attachment cancelled. No changes were made.'}};
-document.getElementById('approve').onclick=async()=>{{try{{await post('/_authboundry/application/attachment/apply',{{proposal_id:proposal.proposal_id}});await fetch('/__authboundry_attachment_probe').catch(()=>{{}});const result=await post('/_authboundry/application/attachment/test');status.textContent=result.request_forwarded?'✓ Attachment configured\n✓ Request crossed AuthBoundry\nBasic attachment verified.\nProtected-route verification unavailable until routes are discovered.':'Attachment configured; boundary request was not verified.';setTimeout(()=>location.reload(),900)}}catch(error){{document.getElementById('approval').hidden=true;document.getElementById('attach-step').hidden=false;status.textContent='Attachment failed. No partial attachment was recorded.\n'+error.message;status.className='warn'}}}};
+document.getElementById('approve').onclick=async()=>{{try{{await post('/_authboundry/application/attachment/apply',{{proposal_id:proposal.proposal_id}});const result=await post('/_authboundry/application/attachment/test');status.textContent=result.request_forwarded?'✓ Attachment configured\n✓ Request crossed AuthBoundry\nBasic attachment verified.\nProtected-route verification unavailable until routes are discovered.':`Attachment saved, but the upstream did not respond through AuthBoundry (status ${{result.upstream_status}}).`;status.className=result.request_forwarded?'ok':'warn';setTimeout(()=>location.reload(),900)}}catch(error){{document.getElementById('approval').hidden=true;document.getElementById('attach-step').hidden=false;status.textContent='Attachment failed. No partial attachment was recorded.\n'+error.message;status.className='warn'}}}};
 document.getElementById('detach')?.addEventListener('click',async()=>{{if(confirm('Detach this application?')){{await post('/_authboundry/application/attachment/detach');location.reload()}}}});
-document.getElementById('test-boundary')?.addEventListener('click',async()=>{{await fetch('/__authboundry_attachment_probe').catch(()=>{{}});const result=await post('/_authboundry/application/attachment/test');alert(result.request_forwarded?'Basic attachment verified. Request crossed AuthBoundry.':'Boundary request was not verified.')}});
+document.getElementById('test-boundary')?.addEventListener('click',async()=>{{const result=await post('/_authboundry/application/attachment/test');alert(result.request_forwarded?'Basic attachment verified. Request crossed AuthBoundry.':`Boundary request failed with upstream status ${{result.upstream_status}}.`)}});
 </script></body></html>"#,
         name = esc(name),
         attach_class = if configured { "ok" } else { "warn" },
@@ -755,6 +752,7 @@ mod tests {
     #[test]
     fn studio_preview_apply_and_detach_use_the_canonical_attachment_plan() {
         use std::collections::BTreeMap;
+        use std::io::Write;
         use std::net::TcpListener;
 
         let root = std::env::temp_dir().join(format!(
@@ -773,9 +771,15 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let upstream = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || loop {
-            if listener.accept().is_err() {
-                break;
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    );
+                } else {
+                    break;
+                }
             }
         });
         let surface =
@@ -817,6 +821,17 @@ mod tests {
             init::adoption_upstream(&root).as_deref(),
             Some(upstream.as_str())
         );
+        let tested = controller
+            .handle(&request(
+                "/_authboundry/application/attachment/test",
+                "{}".to_string(),
+            ))
+            .unwrap();
+        assert_eq!(tested.status, 200);
+        let tested = String::from_utf8(tested.body).unwrap();
+        assert!(tested.contains("\"ok\":true"));
+        assert!(tested.contains("\"request_forwarded\":true"));
+        assert!(tested.contains("\"upstream_status\":200"));
         assert!(controller.page().unwrap().contains("✓ Attached"));
 
         let detached = controller

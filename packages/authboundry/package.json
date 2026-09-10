@@ -1,6 +1,6 @@
 {
   "name": "authboundry",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Compatibility redirect to @authboundry/core.",
   "type": "module",
   "exports": {
@@ -28,7 +28,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@authboundry/core": "1.9.0"
+    "@authboundry/core": "1.10.0"
   },
   "homepage": "https://authboundry.com",
   "license": "UNLICENSED",
