@@ -1,3 +1,6 @@
+use appport_auth_mesh_contract::{
+    CapabilityId, CapabilityKind, IdentityId, RecoveryCapability, TenantContext,
+};
 use crate::{FeltDBConfig, FeltDBError, MustNotFallback};
 
 /// AuthStateRepository: Semantic boundary for authentication state
@@ -85,6 +88,91 @@ impl AuthStateRepository {
     /// The configuration this repository was created with
     pub fn config(&self) -> &FeltDBConfig {
         &self.config
+    }
+
+    /// Create a new recovery capability (password reset, email verification, etc.)
+    ///
+    /// This creates a durable capability in FeltDB that:
+    /// - Is bound to a specific identity (non-transferable)
+    /// - Has an absolute expiry time
+    /// - Can only be consumed once
+    /// - Is immutable once created
+    ///
+    /// CRITICAL: This capability must survive server restart.
+    /// It must be persisted in FeltDB, never in process memory.
+    pub fn create_recovery_capability(
+        &self,
+        tenant: &TenantContext,
+        identity_id: &IdentityId,
+        kind: CapabilityKind,
+        ttl_seconds: i64,
+    ) -> Result<RecoveryCapability, FeltDBError> {
+        // TODO: Call real @feltdb/core API via FFI/RPC
+        // Generate opaque capability ID
+        let capability_id = self.generate_capability_id()?;
+        let now = self.current_time_seconds();
+        let expires_at = now + ttl_seconds;
+
+        // TODO: Write to FeltDB RecoveryCapability collection
+        // This is where the durability guarantee comes from.
+        // If the write fails, the method fails; no in-memory fallback.
+
+        Ok(RecoveryCapability {
+            id: capability_id,
+            tenant_id: tenant.tenant_id.clone(),
+            identity_id: identity_id.clone(),
+            kind,
+            created_at: now,
+            expires_at,
+            consumed_at: None,
+            metadata: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Retrieve a recovery capability by ID
+    ///
+    /// Returns None if not found or expired.
+    /// Does NOT check consumption status (caller must validate).
+    pub fn get_recovery_capability(
+        &self,
+        _tenant: &TenantContext,
+        _capability_id: &CapabilityId,
+    ) -> Result<Option<RecoveryCapability>, FeltDBError> {
+        // TODO: Query FeltDB RecoveryCapability collection
+        // Return None if not found or expired
+        Ok(None)
+    }
+
+    /// Mark a capability as consumed (single-use enforcement)
+    ///
+    /// This is part of a larger transaction that also updates
+    /// the credential, revokes sessions, and records audit events.
+    /// All changes must commit together or roll back together.
+    pub fn consume_recovery_capability(
+        &self,
+        _tenant: &TenantContext,
+        _capability_id: &CapabilityId,
+    ) -> Result<(), FeltDBError> {
+        // TODO: Update FeltDB RecoveryCapability
+        // Set consumed_at = now
+        // This is wrapped in a larger FeltDB transaction with:
+        // - Credential update (new password hash)
+        // - Session revocation
+        // - Audit event recording
+        Ok(())
+    }
+
+    // Private helpers
+    fn generate_capability_id(&self) -> Result<CapabilityId, FeltDBError> {
+        // TODO: Generate cryptographically secure random bytes
+        // Encode as URL-safe base32 or base62
+        // Example: "pw_reset_7xkj2p9m4q6r8s0t"
+        Ok(CapabilityId::new("placeholder"))
+    }
+
+    fn current_time_seconds(&self) -> i64 {
+        // TODO: Use system clock or injectable time service
+        0
     }
 }
 

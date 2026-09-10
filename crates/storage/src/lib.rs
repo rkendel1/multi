@@ -17,8 +17,8 @@ pub use principal_store::{ExternalBinding, PrincipalStore};
 pub use run_store::RunStore;
 pub use session_store::{Session, SessionStore};
 pub use storage_boundary::{
-    AgentStore, CredentialStore, ReportingProjection, StorageCapability, StorageTopology,
-    StoreClass, StoreDescriptor, StoreRole,
+    AgentStore, CredentialStore, RecoveryCapabilityStore, ReportingProjection, StorageCapability,
+    StorageTopology, StoreClass, StoreDescriptor, StoreRole,
 };
 pub use tenant_root::TenantRootStore;
 
