@@ -220,6 +220,32 @@ pub trait ReportingProjection {
     fn project(&self, event: &crate::AuditEvent) -> Result<(), StorageError>;
 }
 
+pub trait RecoveryCapabilityStore {
+    /// Create a new recovery capability (e.g., for password reset or email verification)
+    fn create_capability(
+        &self,
+        tenant: &TenantContext,
+        identity_id: &appport_auth_mesh_contract::IdentityId,
+        kind: appport_auth_mesh_contract::CapabilityKind,
+        expires_at: i64,
+    ) -> Result<appport_auth_mesh_contract::RecoveryCapability, StorageError>;
+
+    /// Retrieve a capability by ID
+    fn get_capability(
+        &self,
+        tenant: &TenantContext,
+        capability_id: &appport_auth_mesh_contract::CapabilityId,
+    ) -> Result<Option<appport_auth_mesh_contract::RecoveryCapability>, StorageError>;
+
+    /// Mark a capability as consumed (one-time use)
+    fn consume_capability(
+        &self,
+        tenant: &TenantContext,
+        capability_id: &appport_auth_mesh_contract::CapabilityId,
+        consumed_at: i64,
+    ) -> Result<(), StorageError>;
+}
+
 fn feltdb_capabilities(class: StoreClass) -> Vec<StorageCapability> {
     let mut capabilities = vec![
         StorageCapability::Transactions,

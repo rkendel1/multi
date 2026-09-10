@@ -42,7 +42,7 @@
   ],
   "scripts": {
     "build": "sh scripts/build-npm-package.sh",
-    "test": "node --test clients/js/authboundry.test.js test/npm-package.test.js && sh scripts/check-public-naming.sh",
+    "test": "node test/verify-feltdb-version.js && node test/felt-db-integration.test.js && node --test clients/js/authboundry.test.js test/npm-package.test.js && sh scripts/check-public-naming.sh",
     "prepack": "npm run build",
     "verify:package": "sh scripts/verify-npm-package.sh",
     "publish:packages": "sh scripts/publish-packages.sh"
@@ -75,6 +75,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@feltdb/core": "0.10.0",
     "@mailerport/sdk": "^0.1.0"
   }
 }

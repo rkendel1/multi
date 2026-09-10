@@ -1,4 +1,5 @@
 pub mod authentication;
+pub mod capability;
 pub mod claims;
 pub mod delegation;
 pub mod identity;
@@ -14,6 +15,7 @@ pub use authentication::{
     AuthenticationResult, Device, DeviceId, DeviceStatus, DeviceType, RecoveryCeremony,
     RecoveryMethod,
 };
+pub use capability::{CapabilityId, CapabilityKind, RecoveryCapability};
 pub use claims::ClaimValue;
 pub use delegation::{Delegation, DelegationStatus, ResourceScope};
 pub use identity::{Claims, Identity};
