@@ -254,7 +254,7 @@ impl AuthPortServer {
     /// Application routes: the boundary resolves authority first, and the
     /// handler only ever runs on a request that already satisfied it.
     fn handle_application(&self, request: &BoundaryRequest) -> HttpResponse {
-        let requirement = match self.app.resolve(request.method, &request.path) {
+        let mut requirement = match self.app.resolve(request.method, &request.path) {
             RouteOutcome::Matched(requirement) => requirement,
             RouteOutcome::MethodNotAllowed => {
                 return HttpResponse::denied(405, "method_not_allowed", "unsupported method")
@@ -271,6 +271,12 @@ impl AuthPortServer {
                 )
             }
         };
+        if let Some(capability) = self
+            .runtime
+            .get_route_protection(&request.method, &request.path)
+        {
+            requirement = appport_auth_mesh_boundary::Requirement::capability(capability);
+        }
 
         match self.runtime.enforce(request, &requirement) {
             Ok(context) => self.app.handle(request, context.as_ref()),

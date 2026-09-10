@@ -21,8 +21,8 @@ use crate::control::{
     LiveAuthorityState, Preview, PreviewState, RouteId,
 };
 use crate::proposal_store::{
-    ChangeRecord, MemoryProposalStore, ProposalMetadata, ProposalStatus, ProposalStore,
-    StoredProposal,
+    ChangeRecord, MemoryProposalStore, ProposalMetadata, ProposalSource, ProposalStatus,
+    ProposalStore, StoredProposal,
 };
 use crate::request::{BoundaryRequest, Method, SessionCredential};
 
@@ -325,9 +325,19 @@ impl AuthPortRuntime {
 
     /// Propose a change to authority state
     pub fn propose_change(&self, change: AuthorityChange) -> Result<ChangeProposal, String> {
+        self.propose_change_with_metadata(change, ProposalSource::Explicit, 0)
+    }
+
+    pub fn propose_change_with_metadata(
+        &self,
+        change: AuthorityChange,
+        source: ProposalSource,
+        discovery_revision: u64,
+    ) -> Result<ChangeProposal, String> {
         let current = self.authority.read().unwrap().clone();
         let after = self.preview_authority_change(&current, &change)?;
         let id = self.proposals.allocate_proposal_id();
+        let contract_fingerprint = self.contract.fingerprint();
 
         let proposal = ChangeProposal {
             id: id.clone(),
@@ -344,6 +354,9 @@ impl AuthPortRuntime {
             change: proposal.change.clone(),
             preview: proposal.preview.clone(),
             revision: proposal.revision,
+            contract_fingerprint,
+            discovery_revision,
+            source,
             status: ProposalStatus::Pending,
             created_at: SystemTime::now(),
             applied_at: None,
@@ -352,6 +365,51 @@ impl AuthPortRuntime {
         })?;
 
         Ok(proposal)
+    }
+
+    pub fn ensure_proposal(
+        &self,
+        change: AuthorityChange,
+        source: ProposalSource,
+        discovery_revision: u64,
+    ) -> Result<StoredProposal, String> {
+        let contract_fingerprint = self.contract.fingerprint();
+        if let Some(existing) =
+            self.proposals
+                .find_proposal(&change, &contract_fingerprint, discovery_revision)?
+        {
+            return Ok(existing);
+        }
+        let proposal = self.propose_change_with_metadata(change, source, discovery_revision)?;
+        self.proposals.retrieve_proposal(&proposal.id)
+    }
+
+    pub fn approve_stored_proposal(&self, proposal_id: &str) -> Result<(), String> {
+        let stored = self.proposals.retrieve_proposal(proposal_id)?;
+        match stored.status {
+            ProposalStatus::Pending => {}
+            ProposalStatus::Approved => return Ok(()),
+            ProposalStatus::Applied => {
+                return Err(format!("proposal `{}` is already applied", proposal_id));
+            }
+            ProposalStatus::Rejected => {
+                return Err(format!("proposal `{}` is rejected", proposal_id));
+            }
+        }
+        self.verify_stored_proposal_is_current(&stored)?;
+        self.proposals.mark_approved(proposal_id)
+    }
+
+    pub fn reject_stored_proposal(&self, proposal_id: &str, reason: String) -> Result<(), String> {
+        let stored = self.proposals.retrieve_proposal(proposal_id)?;
+        match stored.status {
+            ProposalStatus::Applied => {
+                return Err(format!("proposal `{}` is already applied", proposal_id));
+            }
+            ProposalStatus::Rejected => return Ok(()),
+            ProposalStatus::Pending | ProposalStatus::Approved => {}
+        }
+        self.proposals.mark_rejected(proposal_id, reason)
     }
 
     /// Apply a proposed change with approval
@@ -423,9 +481,10 @@ impl AuthPortRuntime {
         approval: Approval,
     ) -> Result<(String, u64), String> {
         let stored = self.proposals.retrieve_proposal(proposal_id)?;
-        if stored.status != ProposalStatus::Pending {
-            return Err(format!("proposal `{}` is not pending", proposal_id));
+        if stored.status != ProposalStatus::Approved {
+            return Err(format!("proposal `{}` is not approved", proposal_id));
         }
+        self.verify_stored_proposal_is_current(&stored)?;
         let proposal = ChangeProposal {
             id: stored.id,
             change: stored.change,
@@ -435,6 +494,96 @@ impl AuthPortRuntime {
         let change_id = self.apply_change(proposal, approval)?;
         let revision = self.live_authority().revision;
         Ok((change_id, revision))
+    }
+
+    pub fn apply_approved_stored_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> Result<(String, u64), String> {
+        let stored = self.proposals.retrieve_proposal(proposal_id)?;
+        let approval = Approval::for_proposal(&ChangeProposal {
+            id: stored.id.clone(),
+            change: stored.change.clone(),
+            preview: stored.preview.clone(),
+            revision: stored.revision,
+        });
+        self.apply_stored_proposal(proposal_id, approval)
+    }
+
+    pub fn apply_approved_stored_proposals(
+        &self,
+        proposal_ids: &[String],
+    ) -> Result<Vec<(String, String, u64)>, String> {
+        if proposal_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stored = proposal_ids
+            .iter()
+            .map(|id| self.proposals.retrieve_proposal(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        for proposal in &stored {
+            if proposal.status != ProposalStatus::Approved {
+                return Err(format!("proposal `{}` is not approved", proposal.id));
+            }
+        }
+
+        let mut authority = self.authority.write().unwrap();
+        let contract_fingerprint = self.contract.fingerprint();
+        let base_revision = authority.revision;
+        let mut next = authority.clone();
+        let mut records = Vec::new();
+        for (index, proposal) in stored.iter().enumerate() {
+            if proposal.contract_fingerprint != contract_fingerprint {
+                return Err("STALE_AUTHORITY_PROPOSAL: contract fingerprint changed".to_string());
+            }
+            if proposal.revision != base_revision {
+                return Err(format!(
+                    "STALE_AUTHORITY_PROPOSAL: expected authority revision {}, current authority revision {}",
+                    proposal.revision, base_revision
+                ));
+            }
+            let before = next.clone();
+            next = self.preview_authority_change(&next, &proposal.change)?;
+            let change_id = format!(
+                "change-{}-{}-rev{}",
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                index,
+                next.revision
+            );
+            records.push(ChangeRecord {
+                change_id: change_id.clone(),
+                proposal_id: proposal.id.clone(),
+                reverted_change_id: match &proposal.change {
+                    AuthorityChange::Revert { change_id } => Some(change_id.clone()),
+                    _ => None,
+                },
+                change: proposal.change.clone(),
+                previous_state: before,
+                resulting_state: next.clone(),
+                applied_at: SystemTime::now(),
+                applied_by: None,
+            });
+        }
+
+        *authority = next;
+        let mut outcomes = Vec::new();
+        for record in records {
+            self.proposals.mark_applied(
+                &record.proposal_id,
+                record.change_id.clone(),
+                record.resulting_state.revision,
+            )?;
+            self.proposals.store_change_record(record.clone())?;
+            outcomes.push((
+                record.proposal_id,
+                record.change_id,
+                record.resulting_state.revision,
+            ));
+        }
+        Ok(outcomes)
     }
 
     pub fn history(&self, limit: usize, offset: usize) -> Result<Vec<ChangeRecord>, String> {
@@ -453,6 +602,21 @@ impl AuthPortRuntime {
             }
             _ => apply_change(current, change),
         }
+    }
+
+    fn verify_stored_proposal_is_current(&self, proposal: &StoredProposal) -> Result<(), String> {
+        let authority = self.authority.read().unwrap();
+        if proposal.contract_fingerprint != self.contract.fingerprint() {
+            return Err("STALE_AUTHORITY_PROPOSAL: contract fingerprint changed".to_string());
+        }
+        if proposal.revision != authority.revision {
+            return Err(format!(
+                "STALE_AUTHORITY_PROPOSAL: expected authority revision {}, current authority revision {}",
+                proposal.revision, authority.revision
+            ));
+        }
+        let _next = self.preview_authority_change(&authority, &proposal.change)?;
+        Ok(())
     }
 
     /// Is a route currently protected?

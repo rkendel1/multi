@@ -7,6 +7,7 @@ use crate::control::{AuthorityChange, LiveAuthorityState, Preview};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProposalStatus {
     Pending,
+    Approved,
     Applied,
     Rejected,
 }
@@ -15,10 +16,34 @@ impl ProposalStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Approved => "approved",
             Self::Applied => "applied",
             Self::Rejected => "rejected",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalSource {
+    Explicit,
+    Inferred,
+    Imported,
+}
+
+impl ProposalSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Inferred => "inferred",
+            Self::Imported => "imported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalDecision {
+    Approve,
+    Reject,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +52,9 @@ pub struct StoredProposal {
     pub change: AuthorityChange,
     pub preview: Preview,
     pub revision: u64,
+    pub contract_fingerprint: String,
+    pub discovery_revision: u64,
+    pub source: ProposalSource,
     pub status: ProposalStatus,
     pub created_at: SystemTime,
     pub applied_at: Option<SystemTime>,
@@ -39,6 +67,8 @@ pub struct ProposalMetadata {
     pub id: String,
     pub change_type: String,
     pub status: ProposalStatus,
+    pub revision: u64,
+    pub source: ProposalSource,
     pub created_at: SystemTime,
     pub applied_at: Option<SystemTime>,
 }
@@ -60,12 +90,19 @@ pub trait ProposalStore: Send + Sync {
     fn store_proposal(&self, proposal: StoredProposal) -> Result<(), String>;
     fn retrieve_proposal(&self, proposal_id: &str) -> Result<StoredProposal, String>;
     fn list_proposals(&self, limit: usize, offset: usize) -> Result<Vec<ProposalMetadata>, String>;
+    fn find_proposal(
+        &self,
+        change: &AuthorityChange,
+        contract_fingerprint: &str,
+        discovery_revision: u64,
+    ) -> Result<Option<StoredProposal>, String>;
     fn mark_applied(
         &self,
         proposal_id: &str,
         change_id: String,
         new_revision: u64,
     ) -> Result<(), String>;
+    fn mark_approved(&self, proposal_id: &str) -> Result<(), String>;
     fn mark_rejected(&self, proposal_id: &str, reason: String) -> Result<(), String>;
     fn store_change_record(&self, record: ChangeRecord) -> Result<(), String>;
     fn retrieve_change_record(&self, change_id: &str) -> Result<ChangeRecord, String>;
@@ -140,10 +177,31 @@ impl ProposalStore for MemoryProposalStore {
                 id: proposal.id,
                 change_type: proposal.change.change_type().to_string(),
                 status: proposal.status,
+                revision: proposal.revision,
+                source: proposal.source,
                 created_at: proposal.created_at,
                 applied_at: proposal.applied_at,
             })
             .collect())
+    }
+
+    fn find_proposal(
+        &self,
+        change: &AuthorityChange,
+        contract_fingerprint: &str,
+        discovery_revision: u64,
+    ) -> Result<Option<StoredProposal>, String> {
+        Ok(self
+            .proposals
+            .lock()
+            .unwrap()
+            .values()
+            .find(|proposal| {
+                &proposal.change == change
+                    && proposal.contract_fingerprint == contract_fingerprint
+                    && proposal.discovery_revision == discovery_revision
+            })
+            .cloned())
     }
 
     fn mark_applied(
@@ -159,6 +217,15 @@ impl ProposalStore for MemoryProposalStore {
         proposal.status = ProposalStatus::Applied;
         proposal.applied_at = Some(SystemTime::now());
         proposal.change_id = Some(change_id);
+        Ok(())
+    }
+
+    fn mark_approved(&self, proposal_id: &str) -> Result<(), String> {
+        let mut proposals = self.proposals.lock().unwrap();
+        let proposal = proposals
+            .get_mut(proposal_id)
+            .ok_or_else(|| format!("proposal `{}` was not found", proposal_id))?;
+        proposal.status = ProposalStatus::Approved;
         Ok(())
     }
 

@@ -239,6 +239,15 @@ fn control_plane_http_routes_store_apply_and_list_history() {
     assert_eq!(listed.status, 200);
     assert!(listed.body_string().contains(&proposal_id));
 
+    let approved = server.handle(&request(
+        Method::Post,
+        &format!("/_authport/authority-proposal/{}/approve", proposal_id),
+        &[],
+        "",
+    ));
+    assert_eq!(approved.status, 200);
+    assert!(approved.body_string().contains("\"status\": \"approved\""));
+
     let applied = server.handle(&request(
         Method::Post,
         "/_authport/apply",
@@ -299,6 +308,223 @@ fn control_plane_exposes_same_authority_proposal_without_applying_it() {
             .get_route_protection(&Method::Post, "/invoices")
             .is_none(),
         "inference must not silently become authorization policy"
+    );
+}
+
+#[test]
+fn inferred_authority_proposals_can_be_rejected_or_approved_and_applied() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let app = RouterApp::new()
+        .public(
+            Method::Post,
+            "/invoices",
+            Box::new(|_| HttpResponse::text(200, "created")),
+        )
+        .public(
+            Method::Post,
+            "/billing/charge",
+            Box::new(|_| HttpResponse::text(200, "charged")),
+        );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    let proposed = server.handle(&request(
+        Method::Get,
+        "/_authport/authority-proposal",
+        &[],
+        "",
+    ));
+    assert_eq!(proposed.status, 200);
+    let body = proposed.body_string();
+    assert!(body.contains("\"source\": \"inferred\""));
+    assert!(body.contains("\"status\": \"recommended\""));
+    assert!(body.contains("\"current_authority_state\": \"unprotected\""));
+    assert!(body.contains("\"proposed_authority_state\": \"protected\""));
+    assert!(body.contains("\"discovery_revision\""));
+    let first_id = "proposal-1".to_string();
+
+    let rejected = server.handle(&request(
+        Method::Post,
+        "/_authport/reject",
+        &[("content-type", "application/json")],
+        &format!(
+            "{{\"proposal_id\": \"{}\", \"reason\": \"not this route\"}}",
+            first_id
+        ),
+    ));
+    assert_eq!(rejected.status, 200);
+
+    let proposed_again = server.handle(&request(
+        Method::Get,
+        "/_authport/authority-proposal",
+        &[],
+        "",
+    ));
+    let body = proposed_again.body_string();
+    assert!(body.contains("\"status\": \"rejected\""));
+
+    let protected_id = "proposal-2".to_string();
+    let approved = server.handle(&request(
+        Method::Post,
+        &format!("/_authport/authority-proposal/{}/approve", protected_id),
+        &[],
+        "",
+    ));
+    assert_eq!(approved.status, 200);
+    let applied = server.handle(&request(
+        Method::Post,
+        &format!("/_authport/authority-proposal/{}/apply", protected_id),
+        &[],
+        "",
+    ));
+    assert_eq!(applied.status, 200);
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/invoices"),
+        Some("invoice.create".to_string())
+    );
+
+    let denied = server.handle(&request(Method::Post, "/invoices", &[], ""));
+    assert_ne!(
+        denied.status, 200,
+        "live authority affects enforcement immediately"
+    );
+}
+
+#[test]
+fn approving_stale_proposals_returns_machine_readable_revision_error() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+
+    let stale = server.handle(&request(
+        Method::Post,
+        "/_authport/propose",
+        &[("content-type", "application/json")],
+        "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/stale\", \"capability\": \"stale.write\"}",
+    ));
+    let stale_id = json_string_field(&stale.body_string(), "proposal_id").expect("stale id");
+
+    let current = server.handle(&request(
+        Method::Post,
+        "/_authport/propose",
+        &[("content-type", "application/json")],
+        "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/current\", \"capability\": \"current.write\"}",
+    ));
+    let current_id = json_string_field(&current.body_string(), "proposal_id").expect("current id");
+    assert_eq!(
+        server
+            .handle(&request(
+                Method::Post,
+                &format!("/_authport/authority-proposal/{}/approve", current_id),
+                &[],
+                "",
+            ))
+            .status,
+        200
+    );
+    assert_eq!(
+        server
+            .handle(&request(
+                Method::Post,
+                &format!("/_authport/authority-proposal/{}/apply", current_id),
+                &[],
+                "",
+            ))
+            .status,
+        200
+    );
+
+    let stale_approval = server.handle(&request(
+        Method::Post,
+        &format!("/_authport/authority-proposal/{}/approve", stale_id),
+        &[],
+        "",
+    ));
+    assert_eq!(stale_approval.status, 400);
+    let body = stale_approval.body_string();
+    assert!(body.contains("\"error\": \"STALE_AUTHORITY_PROPOSAL\""));
+    assert!(body.contains("\"current_authority_revision\": 1"));
+}
+
+#[test]
+fn bulk_apply_adopts_compatible_approved_proposals_together() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let app = RouterApp::new()
+        .public(
+            Method::Post,
+            "/invoices",
+            Box::new(|_| HttpResponse::text(200, "created")),
+        )
+        .public(
+            Method::Post,
+            "/billing/charge",
+            Box::new(|_| HttpResponse::text(200, "charged")),
+        );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    assert_eq!(
+        server
+            .handle(&request(
+                Method::Get,
+                "/_authport/authority-proposal",
+                &[],
+                "",
+            ))
+            .status,
+        200
+    );
+    let approved = server.handle(&request(
+        Method::Post,
+        "/_authport/authority-proposals/approve",
+        &[("content-type", "application/json")],
+        "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
+    ));
+    assert_eq!(approved.status, 200);
+    let applied = server.handle(&request(
+        Method::Post,
+        "/_authport/authority-proposals/apply",
+        &[("content-type", "application/json")],
+        "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
+    ));
+    assert_eq!(applied.status, 200);
+    let body = applied.body_string();
+    assert!(body.contains("\"new_revision\": 1"));
+    assert!(body.contains("\"new_revision\": 2"));
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/billing/charge"),
+        Some("billing.charge".to_string())
+    );
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/invoices"),
+        Some("invoice.create".to_string())
     );
 }
 

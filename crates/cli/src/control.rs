@@ -11,7 +11,9 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     match args.first().map(String::as_str) {
         Some("connect") => connect(&args[1..]),
         Some("propose") => propose(&args[1..]),
+        Some("approve") => approve(&args[1..]),
         Some("apply") => apply(&args[1..]),
+        Some("reject") => reject(&args[1..]),
         _ => Err(error("unknown control command")),
     }
 }
@@ -55,6 +57,7 @@ fn propose(args: &[String]) -> Result<Output, CliError> {
 fn apply(args: &[String]) -> Result<Output, CliError> {
     let (server, _output_token, _) = common_options(args)?;
     let mut proposal_id = None;
+    let mut all = false;
     let mut yes = false;
     let mut index = 0usize;
     while index < args.len() {
@@ -63,6 +66,7 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
                 index += 1;
                 proposal_id = args.get(index).cloned();
             }
+            "--all" => all = true,
             "--yes" => yes = true,
             "--server" => index += 1,
             _ => {}
@@ -73,6 +77,15 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
         return Err(error(
             "apply needs --yes to confirm in non-interactive mode",
         ));
+    }
+
+    if all {
+        let proposal_ids = inferred_proposal_ids(&server)?;
+        let body = proposal_ids_body(&proposal_ids);
+        let response = http_post(&server, "/_authport/authority-proposals/apply", &body)?;
+        return Ok(Output {
+            text: format!("apply response from {}\n{}\n", server, response),
+        });
     }
 
     let proposal_id = match proposal_id {
@@ -93,6 +106,90 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
     let response = http_post(&server, "/_authport/apply", &body)?;
     Ok(Output {
         text: format!("apply response from {}\n{}\n", server, response),
+    })
+}
+
+fn approve(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let mut proposal_id = None;
+    let mut all = false;
+    let mut yes = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--proposal-id" => {
+                index += 1;
+                proposal_id = args.get(index).cloned();
+            }
+            "--all" => all = true,
+            "--yes" => yes = true,
+            "--server" => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    if !yes {
+        return Err(error(
+            "approve needs --yes to confirm in non-interactive mode",
+        ));
+    }
+    let (path, body) = if all {
+        let proposal_ids = inferred_proposal_ids(&server)?;
+        (
+            "/_authport/authority-proposals/approve".to_string(),
+            proposal_ids_body(&proposal_ids),
+        )
+    } else {
+        let proposal_id = match proposal_id {
+            Some(id) => id,
+            None => latest_proposal_id()?,
+        };
+        (
+            "/_authport/approve".to_string(),
+            format!("{{\"proposal_id\": \"{}\"}}", escape(&proposal_id)),
+        )
+    };
+    let response = http_post(&server, &path, &body)?;
+    Ok(Output {
+        text: format!("approve response from {}\n{}\n", server, response),
+    })
+}
+
+fn reject(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let mut proposal_id = None;
+    let mut reason = "rejected".to_string();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--proposal-id" => {
+                index += 1;
+                proposal_id = args.get(index).cloned();
+            }
+            "--reason" => {
+                index += 1;
+                reason = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| error("--reason needs a value"))?;
+            }
+            "--server" => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    let proposal_id = match proposal_id {
+        Some(id) => id,
+        None => latest_proposal_id()?,
+    };
+    let body = format!(
+        "{{\"proposal_id\": \"{}\", \"reason\": \"{}\"}}",
+        escape(&proposal_id),
+        escape(&reason)
+    );
+    let response = http_post(&server, "/_authport/reject", &body)?;
+    Ok(Output {
+        text: format!("reject response from {}\n{}\n", server, response),
     })
 }
 
@@ -180,6 +277,23 @@ fn load_server_url() -> String {
 
 fn http_get(server: &str, path: &str) -> Result<String, CliError> {
     http_request(server, "GET", path, "")
+}
+
+fn inferred_proposal_ids(server: &str) -> Result<Vec<String>, CliError> {
+    let _ = http_get(server, "/_authport/authority-proposal")?;
+    let proposals = http_get(server, "/_authport/proposals?source=inferred")?;
+    let ids = extract_all_quoted_fields(&proposals, "id");
+    if ids.is_empty() {
+        return Err(error("no inferred proposals to approve or apply"));
+    }
+    Ok(ids)
+}
+
+fn proposal_ids_body(proposal_ids: &[String]) -> String {
+    format!(
+        "{{\"proposal_ids\": \"{}\"}}",
+        escape(&proposal_ids.join(","))
+    )
 }
 
 fn http_post(server: &str, path: &str, body: &str) -> Result<String, CliError> {
@@ -326,6 +440,26 @@ fn extract_quoted_field(json: &str, field: &str) -> Option<String> {
     let value = rest.strip_prefix('"')?;
     let end = value.find('"')?;
     Some(value[..end].to_string())
+}
+
+fn extract_all_quoted_fields(json: &str, field: &str) -> Vec<String> {
+    let pattern = format!("\"{}\":", field);
+    let mut rest = json;
+    let mut values = Vec::new();
+    while let Some(start) = rest.find(&pattern) {
+        rest = &rest[start + pattern.len()..];
+        let value = match rest.trim_start().strip_prefix('"') {
+            Some(value) => value,
+            None => continue,
+        };
+        if let Some(end) = value.find('"') {
+            values.push(value[..end].to_string());
+            rest = &value[end + 1..];
+        } else {
+            break;
+        }
+    }
+    values
 }
 
 fn escape(value: &str) -> String {
