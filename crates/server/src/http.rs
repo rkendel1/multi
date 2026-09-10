@@ -255,6 +255,17 @@ impl HttpResponse {
             reason_phrase(self.status)
         );
         for (name, value) in &self.headers {
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "content-length"
+                    | "connection"
+                    | "transfer-encoding"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "upgrade"
+            ) {
+                continue;
+            }
             head.push_str(&format!("{}: {}\r\n", name, value));
         }
         head.push_str(&format!("content-length: {}\r\n", self.body.len()));

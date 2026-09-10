@@ -132,7 +132,21 @@ impl ApplicationBinding for UpstreamProxy {
     }
 
     fn handle(&self, request: &BoundaryRequest, context: Option<&AuthContext>) -> HttpResponse {
-        let mut forwarded = ClientRequest::new(request.method, request.path.clone());
+        let mut target = request.path.clone();
+        if !request.query.is_empty() {
+            target.push('?');
+            target.push_str(
+                &request
+                    .query
+                    .iter()
+                    .map(|(name, value)| {
+                        format!("{}={}", percent_encode(name), percent_encode(value))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&"),
+            );
+        }
+        let mut forwarded = ClientRequest::new(request.method, target);
 
         // Rebuild the header set: everything the client sent except AuthPort's
         // own vocabulary, plus the context the boundary derived.
@@ -158,6 +172,18 @@ impl ApplicationBinding for UpstreamProxy {
             Err(err) => HttpResponse::denied(502, "upstream_unavailable", &err.message),
         }
     }
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 fn encode_body(body: &BTreeMap<String, String>) -> Vec<u8> {

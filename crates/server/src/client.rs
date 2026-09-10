@@ -275,4 +275,25 @@ mod tests {
             .iter()
             .any(|(name, _)| name == "transfer-encoding"));
     }
+
+    #[test]
+    fn downstream_writer_replaces_upstream_framing_headers() {
+        let response = HttpResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "text/javascript".to_string()),
+                ("content-length".to_string(), "999".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("transfer-encoding".to_string(), "chunked".to_string()),
+            ],
+            body: b"module".to_vec(),
+        };
+        let mut wire = Vec::new();
+        response.write_to(&mut wire).unwrap();
+        let wire = String::from_utf8(wire).unwrap().to_ascii_lowercase();
+        assert_eq!(wire.matches("content-length:").count(), 1);
+        assert_eq!(wire.matches("connection:").count(), 1);
+        assert!(!wire.contains("transfer-encoding:"));
+        assert!(wire.contains("content-length: 6"));
+    }
 }

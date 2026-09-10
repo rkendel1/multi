@@ -808,13 +808,13 @@ fn package_dependency_change(root: &Path) -> Result<Option<FileChange>, CliError
     let after = if before.contains("\"dependencies\": {") {
         before.replacen(
             "\"dependencies\": {",
-            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.6.0\",",
+            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.7.0\",",
             1,
         )
     } else {
         before.replacen(
             '{',
-            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.6.0\"},",
+            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.7.0\"},",
             1,
         )
     };
