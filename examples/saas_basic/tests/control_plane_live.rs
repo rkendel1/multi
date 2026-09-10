@@ -3,24 +3,8 @@
 //! The killer test case for PR5: proves that changes to live authority take
 //! effect immediately without application restart.
 
-use appport_auth_mesh_boundary::{
-    Approval, AuthPortRuntime, AuthorityChange, BindingMode, Method, RegistrationPolicy,
-};
-use appport_auth_mesh_dsl::parse_auth_block;
-use appport_auth_mesh_providers::ConnectorRegistry;
-use appport_auth_mesh_runtime::MemoryStores;
+use appport_auth_mesh_boundary::{Approval, AuthorityChange, BindingMode, Method};
 use saas_basic::bootstrap::bootstrap;
-use std::sync::Arc;
-
-const DECLARATION: &str = r#"
-use auth {
-  providers = [local]
-  tenant = true
-  claims = {
-    role = enum["owner", "member"]
-  }
-}
-"#;
 
 #[test]
 fn killer_test_route_protection_without_restart() {
