@@ -17,6 +17,7 @@ pub struct ApplicationUpstream {
 
 impl ApplicationUpstream {
     pub fn parse(value: &str) -> Result<Self, String> {
+        let value = value.strip_suffix('/').unwrap_or(value);
         let (scheme, authority) = if let Some(value) = value.strip_prefix("http://") {
             (UpstreamScheme::Http, value)
         } else if let Some(value) = value.strip_prefix("https://") {
@@ -132,10 +133,11 @@ mod tests {
             "http://[::1]:3000",
             "https://localhost:3000",
             "https://127.0.0.1:8443",
+            "http://127.0.0.1:5173/",
         ] {
             assert_eq!(
                 ApplicationUpstream::parse(origin).unwrap().to_string(),
-                origin
+                origin.trim_end_matches('/')
             );
         }
         for invalid in [

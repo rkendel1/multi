@@ -19,6 +19,7 @@ pub mod headers {
     pub const DELEGATED_BY: &str = "x-authboundry-delegated-by";
     pub const CONTEXT: &str = "x-authboundry-context";
     pub const SIGNATURE: &str = "x-authboundry-signature";
+    pub const PROXY_SIGNATURE: &str = "x-authboundry-proxy-signature";
 }
 
 /// The standalone placement: AuthPort owns the socket and the application sits
@@ -73,13 +74,17 @@ impl UpstreamProxy {
     }
 
     fn injected_headers(&self, context: Option<&AuthContext>) -> Vec<(String, String)> {
+        let mut headers = vec![(
+            headers::PROXY_SIGNATURE.to_string(),
+            Self::sign(&self.secret, "proxy"),
+        )];
         let Some(context) = context else {
-            return Vec::new();
+            return headers;
         };
 
         let projection = context.project();
         let serialized = projection.to_json();
-        let mut headers = vec![
+        headers.extend([
             (
                 headers::PRINCIPAL.to_string(),
                 projection.principal_id.clone(),
@@ -107,7 +112,7 @@ impl UpstreamProxy {
                 Self::sign(&self.secret, &serialized),
             ),
             (headers::CONTEXT.to_string(), serialized),
-        ];
+        ]);
 
         if let Some(delegation) = &projection.delegation {
             headers.push((headers::DELEGATION.to_string(), delegation.id.clone()));

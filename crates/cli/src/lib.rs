@@ -25,6 +25,10 @@ authboundry — the application authority boundary
 USAGE:
     authboundry inspect [FILE] [--json] [--mode embedded|standalone]
     authboundry init [PATH] [--dry-run] [--json] [--yes] [--standalone]
+    authboundry dev [PATH] [--upstream URL] [--addr ADDRESS]
+    authboundry rollback [PATH] --yes
+    authboundry cutover [PATH] [--server URL] --yes
+    authboundry offboard-auth [PATH] --yes
     authboundry attach [PATH] --upstream URL [--yes]
     authboundry status [PATH] [--server URL]
     authboundry studio [PATH] [--no-open] [--addr ADDRESS]
@@ -142,6 +146,18 @@ where
     }
     if matches!(args.first().map(String::as_str), Some("attach")) {
         return init::attach(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("dev")) {
+        return init::dev(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("rollback")) {
+        return init::rollback_integration(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("cutover")) {
+        return init::cutover(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("offboard-auth")) {
+        return init::offboard_auth(&args[1..]);
     }
     if matches!(args.first().map(String::as_str), Some("status")) {
         return init::status(&args[1..]);
@@ -276,6 +292,21 @@ where
             .and_then(|path| path.parent())
             .unwrap_or_else(|| std::path::Path::new("."));
         serve_options.upstream = init::adoption_upstream(root);
+        if serve_options.upstream.is_some() {
+            if let Some(routes) = init::discovered_routes(root) {
+                serve_options.public_exact.extend(
+                    routes
+                        .into_iter()
+                        .filter(|route| init::is_public_entry_path(&route.path))
+                        .map(|route| route.path),
+                );
+            }
+            serve_options.public_paths.extend(
+                ["/assets/", "/@vite/", "/src/", "/node_modules/", "/favicon"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
     }
 
     let text = match command.as_str() {
@@ -988,6 +1019,7 @@ use auth {
         assert!(preview.contains("Google OAuth configuration"));
         assert!(!preview.contains("hidden"));
         assert!(preview.contains("Files to modify:"));
+        assert!(preview.contains("<generated after approval>"));
         assert!(preview.contains("src/server.js"));
         assert_no_deprecated_public_name(&preview);
         assert!(!dir.join("authboundry.toml").exists());
@@ -1007,11 +1039,28 @@ use auth {
         assert!(applied.contains("✓ 3 application routes discovered"));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
         assert_eq!(server.matches("app.use(authboundry());").count(), 0);
+        assert!(server.contains("app.use(authBoundryContext())"));
+        assert!(dir.join("src/authboundry/context.cjs").exists());
         assert!(server.contains("app.get('/health'"));
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
         assert!(!package_json.contains("@authboundry/core"));
         assert!(dir.join("authboundry.toml").exists());
         assert!(dir.join(".authboundry/adoption.json").exists());
+        let development =
+            std::fs::read_to_string(dir.join(".authboundry/development.json")).unwrap();
+        assert!(development.contains("\"username\": \"admin\""));
+        assert!(development.contains("\"username\": \"user\""));
+        let accounts = init::development_accounts(&dir);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].username, "admin");
+        assert_eq!(
+            accounts[0].claims.get("role").map(String::as_str),
+            Some("admin")
+        );
+        assert!(applied.contains("Development identities created"));
+        assert!(std::fs::read_to_string(dir.join(".gitignore"))
+            .unwrap()
+            .contains(".authboundry/development.json"));
         assert_no_deprecated_public_name(
             &std::fs::read_to_string(dir.join("authboundry.toml")).unwrap(),
         );
@@ -1022,7 +1071,8 @@ use auth {
         assert!(adoption.contains("\"authority\": \"configured\""));
         assert!(adoption.contains("\"attachment\": \"none\""));
         assert!(adoption.contains("\"protection\": \"inactive\""));
-        assert!(applied.contains("Application integration not established"));
+        assert!(applied.contains("Application coexistence bridge installed"));
+        assert!(applied.contains("Cutover pending runtime verification"));
 
         let second = run_with(&["init", dir.to_str().unwrap(), "--yes"])
             .unwrap()
@@ -1044,6 +1094,94 @@ use auth {
         assert!(verify.contains("\"ok\": true"));
         assert!(verify.contains("\"contract_fingerprint_stable\": true"));
         assert!(verify.contains("\"authority_state_available\": true"));
+    }
+
+    #[test]
+    fn integration_rollback_restores_incumbent_application_exactly() {
+        let dir = temp_dir("integration-rollback");
+        write_express_app(&dir);
+        let original_server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+        let original_package = std::fs::read_to_string(dir.join("package.json")).unwrap();
+
+        run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap();
+        assert_ne!(
+            std::fs::read_to_string(dir.join("src/server.js")).unwrap(),
+            original_server
+        );
+        assert!(dir.join(".authboundry/rollback/manifest.tsv").exists());
+
+        let rolled_back = run_with(&["rollback", dir.to_str().unwrap(), "--yes"])
+            .unwrap()
+            .text;
+        assert!(rolled_back.contains("Incumbent authentication remains available"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/server.js")).unwrap(),
+            original_server
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("package.json")).unwrap(),
+            original_package
+        );
+        assert!(!dir.join("src/authboundry/context.cjs").exists());
+        assert!(!dir.join("authboundry.toml").exists());
+        assert!(!dir.join(".authboundry/development.json").exists());
+        assert!(!dir.join(".authboundry/rollback/manifest.tsv").exists());
+    }
+
+    #[test]
+    fn cutover_requires_and_records_end_to_end_runtime_verification() {
+        let dir = temp_dir("verified-cutover");
+        write_express_app(&dir);
+        run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap();
+        let config =
+            parse_auth_block(&std::fs::read_to_string(dir.join("authboundry.toml")).unwrap())
+                .unwrap();
+        let app = appport_auth_mesh_server::RouterApp::new()
+            .public(
+                appport_auth_mesh_boundary::Method::Get,
+                "/",
+                Box::new(|_| appport_auth_mesh_server::HttpResponse::html(200, "public")),
+            )
+            .authenticated(
+                appport_auth_mesh_boundary::Method::Get,
+                "/health",
+                Box::new(|_| appport_auth_mesh_server::HttpResponse::html(200, "protected")),
+            );
+        let options = serve::ServeOptions {
+            address: "127.0.0.1:0".to_string(),
+            tenants: vec!["development".to_string()],
+            accounts: init::development_accounts(&dir),
+            application_binding: Some(std::sync::Arc::new(app)),
+            proxy_secret: init::development_proxy_secret(&dir).unwrap(),
+            ..Default::default()
+        };
+        let running = serve::start(config, &options).unwrap();
+        let server = format!("http://{}", running.authport.address());
+
+        let result = run_with(&[
+            "cutover",
+            dir.to_str().unwrap(),
+            "--server",
+            &server,
+            "--yes",
+        ])
+        .unwrap()
+        .text;
+        assert!(result.contains("AuthBoundry cutover verified"));
+        assert!(
+            std::fs::read_to_string(dir.join(".authboundry/integration.json"))
+                .unwrap()
+                .contains("\"status\": \"verified\"")
+        );
+        let offboarded = run_with(&["offboard-auth", dir.to_str().unwrap(), "--yes"])
+            .unwrap()
+            .text;
+        assert!(offboarded.contains("offboarded from the authority path"));
+        assert!(
+            std::fs::read_to_string(dir.join(".authboundry/integration.json"))
+                .unwrap()
+                .contains("\"status\": \"offboarded\"")
+        );
     }
 
     #[test]

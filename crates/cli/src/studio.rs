@@ -46,7 +46,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     let surface = AuthSurface::derive(&config);
     let live_upstream =
         init::adoption_upstream(&root).filter(|upstream| init::upstream_reachable(upstream));
-    let binding = Arc::new(StudioApplication::new(live_upstream.as_deref())?);
+    let binding = Arc::new(StudioApplication::new(&root, live_upstream.as_deref())?);
     let controller = Arc::new(RepositoryStudio::new(
         root.clone(),
         binding.clone(),
@@ -54,6 +54,9 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     ));
     let options = serve::ServeOptions {
         address: address.clone(),
+        accounts: init::development_accounts(&root),
+        tenants: vec!["development".to_string()],
+        proxy_secret: init::development_proxy_secret(&root).unwrap_or_default(),
         studio_page: None,
         upstream: live_upstream,
         application_binding: Some(binding),
@@ -61,7 +64,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         ..Default::default()
     };
     let running = serve::start(config, &options)?;
-    let url = format!("http://{}", running.authport.address());
+    let url = format!("http://{}/_authboundry/studio", running.authport.address());
     println!("✓ Studio listening on {}", url);
     if !no_open {
         if open_browser(&url) {
@@ -77,14 +80,23 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
 }
 
 struct StudioApplication {
+    root: PathBuf,
+    secret: String,
     proxy: RwLock<Option<UpstreamProxy>>,
     forwarded: Mutex<usize>,
 }
 
 impl StudioApplication {
-    fn new(upstream: Option<&str>) -> Result<Self, CliError> {
+    fn new(root: &std::path::Path, upstream: Option<&str>) -> Result<Self, CliError> {
+        let secret = init::development_proxy_secret(root).unwrap_or_default();
         Ok(Self {
-            proxy: RwLock::new(upstream.map(build_proxy).transpose()?),
+            root: root.to_path_buf(),
+            proxy: RwLock::new(
+                upstream
+                    .map(|value| build_proxy(root, value, &secret))
+                    .transpose()?,
+            ),
+            secret,
             forwarded: Mutex::new(0),
         })
     }
@@ -93,7 +105,8 @@ impl StudioApplication {
         *self
             .proxy
             .write()
-            .map_err(|_| error("attachment lock poisoned"))? = Some(build_proxy(upstream)?);
+            .map_err(|_| error("attachment lock poisoned"))? =
+            Some(build_proxy(&self.root, upstream, &self.secret)?);
         Ok(())
     }
 
@@ -106,7 +119,7 @@ impl StudioApplication {
     fn sync(&self, upstream: Option<&str>) {
         match upstream {
             Some(value) if init::upstream_reachable(value) => {
-                if let Ok(proxy) = build_proxy(value) {
+                if let Ok(proxy) = build_proxy(&self.root, value, &self.secret) {
                     if let Ok(mut current) = self.proxy.write() {
                         *current = Some(proxy);
                     }
@@ -117,16 +130,33 @@ impl StudioApplication {
     }
 }
 
-fn build_proxy(upstream: &str) -> Result<UpstreamProxy, CliError> {
+fn build_proxy(
+    root: &std::path::Path,
+    upstream: &str,
+    secret: &str,
+) -> Result<UpstreamProxy, CliError> {
     let origin = ApplicationUpstream::parse(upstream).map_err(error)?;
     let mut options = serve::ServeOptions::default();
     options
         .public_paths
         .push("/__authboundry_attachment_probe".to_string());
+    options.public_paths.extend(
+        ["/assets/", "/@vite/", "/src/", "/node_modules/", "/favicon"]
+            .into_iter()
+            .map(str::to_string),
+    );
+    if let Some(routes) = init::discovered_routes(root) {
+        options.public_exact.extend(
+            routes
+                .into_iter()
+                .filter(|route| init::is_public_entry_path(&route.path))
+                .map(|route| route.path),
+        );
+    }
     Ok(UpstreamProxy::new(
         origin,
         serve::application_policy(&options),
-        options.proxy_secret,
+        secret.to_string(),
     ))
 }
 
@@ -328,7 +358,7 @@ fn json_escape(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn open_browser(url: &str) -> bool {
+pub(crate) fn open_browser(url: &str) -> bool {
     let mut command = if cfg!(target_os = "macos") {
         let mut c = Command::new("open");
         c.arg(url);
@@ -387,6 +417,28 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
         .map(|p| esc(&p.display_name))
         .collect::<Vec<_>>()
         .join(", ");
+    let development_accounts = init::development_accounts(root);
+    let account_rows = if development_accounts.is_empty() {
+        "<tr><td colspan=3>No local development users configured.</td></tr>".to_string()
+    } else {
+        development_accounts
+            .iter()
+            .map(|account| {
+                let role = account
+                    .claims
+                    .get("role")
+                    .map(String::as_str)
+                    .unwrap_or("user");
+                format!(
+                    "<tr><td><strong>{}</strong></td><td>{}</td><td><code>{}</code></td></tr>",
+                    esc(&account.username),
+                    esc(role),
+                    esc(&account.password)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
     let detail = |value: Option<&str>| esc(value.unwrap_or("Unknown"));
     let language = detail(app.as_ref().and_then(|value| value.language.as_deref()));
     let framework = detail(app.as_ref().and_then(|value| value.framework.as_deref()));
@@ -407,10 +459,11 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AuthBoundry Studio</title><style>
 :root{{color-scheme:dark;background:#0b0d10;color:#edf0f4;font:15px/1.5 system-ui,sans-serif}}body{{margin:0}}header{{padding:24px 32px;border-bottom:1px solid #292d35}}header b{{font-size:20px}}header span,.muted{{color:#99a1ad}}main{{max-width:920px;margin:auto;padding:36px 24px}}h1{{font-size:30px;margin:0 0 4px}}h2{{font-size:16px;margin:32px 0 12px}}.card{{background:#13171d;border:1px solid #292d35;border-radius:12px;padding:24px;margin:16px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}}dt{{color:#99a1ad}}dd{{margin:4px 0;font-weight:650}}.ok{{color:#55d187}}.warn{{color:#f4bd61}}.off{{color:#99a1ad}}button{{background:#edf0f4;color:#101318;border:0;border-radius:7px;padding:10px 16px;font-weight:700;margin-right:8px;cursor:pointer}}button.secondary{{background:#292d35;color:#edf0f4}}input{{padding:10px;border:1px solid #3b414c;border-radius:7px;background:#0b0d10;color:#edf0f4;width:min(420px,90%);margin:8px 0}}pre{{white-space:pre-wrap}}dialog{{background:#13171d;color:#edf0f4;border:1px solid #3b414c;border-radius:12px;width:min(620px,90vw)}}table{{width:100%;border-collapse:collapse}}td{{padding:9px;border-bottom:1px solid #292d35}}</style></head><body>
-<header><b>AuthBoundry</b><br><span>Authority Boundary · Studio</span><nav>Overview · Application · Authority · Routes · Providers · Sessions · Policies · Audit · Attachment</nav></header><main><h1>{name}</h1><p class="muted">What AuthBoundry currently knows and protects.</p>
+<header><b>AuthBoundry</b><br><span>Authority Boundary · Studio</span><nav>Overview · Application · Authority · Users · Routes · Providers · Sessions · Policies · Audit · Attachment</nav></header><main><h1>{name}</h1><p class="muted">What AuthBoundry currently knows and protects.</p><p><a href="/auth/login">Open generated login</a> · <a href="/" target="_blank">Open protected application</a></p>
 <section class="card grid"><dl><dt>Authority</dt><dd class="ok">✓ Configured</dd></dl><dl><dt>Application</dt><dd class="{attach_class}">{application}</dd></dl><dl><dt>Protection</dt><dd class="{protect_class}">{protection}</dd></dl><dl><dt>Mode</dt><dd>Standalone</dd></dl></section>
 {attach_callout}<h2>Topology</h2><section class="card grid"><dl><dt>Studio + runtime</dt><dd id="studio-origin"></dd></dl><dl><dt>Protected application upstream</dt><dd>{upstream}</dd></dl></section><h2>Application</h2><section class="card grid"><dl><dt>Language</dt><dd>{language}</dd></dl><dl><dt>Framework</dt><dd>{framework}</dd></dl><dl><dt>Package manager</dt><dd>{package_manager}</dd></dl><dl><dt>Entrypoint</dt><dd>{entrypoint}</dd></dl><dl><dt>Run command</dt><dd>{run_command}</dd></dl><dl><dt>Upstream</dt><dd>{upstream}</dd></dl></section>
 <h2>Authority</h2><section class="card grid"><dl><dt>Providers</dt><dd>{providers}</dd></dl><dl><dt>Principals</dt><dd>Human · Service</dd></dl><dl><dt>Agents / Delegation</dt><dd>Disabled</dd></dl><dl><dt>Sessions · Policies · Audit</dt><dd>Runtime authority</dd></dl></section>
+<h2>Development users</h2><section class="card"><p class="muted">Local-only accounts generated for this repository. Credentials are stored in <code>.authboundry/development.json</code> and excluded from git.</p><table><thead><tr><td>User</td><td>Role</td><td>Password</td></tr></thead><tbody>{account_rows}</tbody></table></section>
 <h2>Routes</h2><section class="card"><table>{route_rows}</table></section><h2>Contract</h2><p class="muted">{fingerprint}</p></main>
 <dialog id="attach-dialog"><h2>Attach Application</h2><div id="attach-step"><p>Find a reachable application runtime. Reachability will not attach it.</p><label>Application upstream<br><input id="upstream" value="{upstream_input}" placeholder="http://127.0.0.1:3000"></label><p id="attach-status" class="muted"></p><button id="discover">Discover</button><button id="test-connection" class="secondary">Test Connection</button><button id="preview">Preview Attachment</button></div><div id="approval" hidden><h2>Attachment Preview</h2><pre id="preview-text"></pre><button id="cancel" class="secondary">Cancel</button><button id="approve">Approve Attachment</button></div></dialog>
 <script>
@@ -453,6 +506,7 @@ document.getElementById('test-boundary')?.addEventListener('click',async()=>{{aw
         } else {
             providers
         },
+        account_rows = account_rows,
         route_rows = route_rows,
         fingerprint = esc(&surface.contract_fingerprint),
         language = language,
@@ -487,6 +541,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join(".authboundry/adoption.json"), r#"{"application":"sample-app","mode":"standalone","attachment":"none","upstream":"","routes":0}"#).unwrap();
+        std::fs::write(root.join(".authboundry/development.json"), r#"{"tenant":"development","proxy_secret":"proxy","accounts":[{"username":"admin","password":"admin-secret","claims":"role=admin"},{"username":"user","password":"user-secret","claims":"role=user"}]}"#).unwrap();
         let config = parse_auth_block("use auth { providers = [local] }\n").unwrap();
         let html = render(&root, &AuthSurface::derive(&config));
         assert!(html.contains("sample-app"));
@@ -497,6 +552,10 @@ mod tests {
         assert!(html.contains("id=\"open-attachment\""));
         assert!(html.contains("/_authboundry/application/attachment/preview"));
         assert!(html.contains("Approve Attachment"));
+        assert!(html.contains("Development users"));
+        assert!(html.contains("admin-secret"));
+        assert!(html.contains("user-secret"));
+        assert!(html.contains("<strong>admin</strong>"));
         assert!(!html.contains("authboundry attach --upstream"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -529,7 +588,7 @@ mod tests {
         });
         let surface =
             AuthSurface::derive(&parse_auth_block("use auth { providers = [local] }\n").unwrap());
-        let binding = Arc::new(StudioApplication::new(None).unwrap());
+        let binding = Arc::new(StudioApplication::new(&root, None).unwrap());
         let controller = RepositoryStudio::new(root.clone(), binding.clone(), surface);
         let request = |path: &str, body: String| {
             HttpRequest::assemble(

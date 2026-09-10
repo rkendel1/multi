@@ -174,6 +174,7 @@ fn authority_proposal(
         servers: Vec::new(),
         routes: app.observed_routes(),
         providers: Vec::new(),
+        existing_auth: Vec::new(),
         existing_authport: ExistingAuthPort::default(),
         confidence: DiscoveryConfidence::High,
     };
@@ -251,6 +252,7 @@ fn live_application(app: &dyn ApplicationBinding) -> ApplicationCandidate {
         servers: Vec::new(),
         routes: app.observed_routes(),
         providers: Vec::new(),
+        existing_auth: Vec::new(),
         existing_authport: ExistingAuthPort::default(),
         confidence: DiscoveryConfidence::High,
     }

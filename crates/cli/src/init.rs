@@ -11,9 +11,11 @@ use appport_auth_mesh_server::ApplicationUpstream;
 
 use crate::{error, CliError, Output};
 
-const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n}\n";
+const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n}\n";
 const MANIFEST_DIR: &str = ".authboundry";
 const MANIFEST_FILE: &str = ".authboundry/adoption.json";
+const DEVELOPMENT_FILE: &str = ".authboundry/development.json";
+const INTEGRATION_FILE: &str = ".authboundry/integration.json";
 const DEFAULT_FILES: &[&str] = &[
     "authboundry.toml",
     "authport.toml",
@@ -75,7 +77,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         });
     }
 
-    if plan.already_integrated {
+    if plan.already_integrated && plan.changes.is_empty() {
         return Ok(Output {
             text: render_plan_text(&plan, false),
         });
@@ -98,8 +100,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
 
         // Discovery may have changed while the user reviewed the preview.
         // Never apply a plan other than the exact plan that was confirmed.
-        let current = build_plan(&root, options.mode.unwrap_or(InitMode::Standalone))?;
-        if current != plan {
+        if !plan_inputs_unchanged(&plan) {
             return Err(error(
                 "the application changed while the adoption plan was being reviewed; refusing to apply a stale plan",
             ));
@@ -135,6 +136,7 @@ fn launch_studio(root: &Path) -> String {
     let child = Command::new(executable)
         .arg("studio")
         .arg(root)
+        .arg("--no-open")
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -145,7 +147,12 @@ fn launch_studio(root: &Path) -> String {
     }
     for _ in 0..20 {
         if upstream_reachable("http://127.0.0.1:8787") {
-            return "Starting Studio...\n✓ Studio listening on http://127.0.0.1:8787\nOpening browser...\n".to_string();
+            let studio_url = "http://127.0.0.1:8787/_authboundry/studio";
+            return if crate::studio::open_browser(studio_url) {
+                "Starting Studio...\n✓ Studio listening on http://127.0.0.1:8787/_authboundry/studio\n✓ Protected application boundary at http://127.0.0.1:8787/\nOpening Studio...\n".to_string()
+            } else {
+                format!("Starting Studio...\n✓ Studio listening on {studio_url}\n✓ Protected application boundary at http://127.0.0.1:8787/\nOpen {studio_url} to continue.\n")
+            };
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -205,6 +212,113 @@ pub fn attach(args: &[String]) -> Result<Output, CliError> {
             plan.upstream
         ),
     })
+}
+
+pub fn dev(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut requested_upstream = None;
+    let mut address = "127.0.0.1:8787".to_string();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--upstream" => {
+                index += 1;
+                requested_upstream = Some(
+                    args.get(index)
+                        .ok_or_else(|| error("--upstream needs a URL"))?
+                        .clone(),
+                );
+            }
+            "--addr" => {
+                index += 1;
+                address = args
+                    .get(index)
+                    .ok_or_else(|| error("--addr needs an address"))?
+                    .clone();
+            }
+            flag if flag.starts_with('-') => return Err(error(format!("unknown flag `{}`", flag))),
+            value if root.is_none() => root = Some(PathBuf::from(value)),
+            value => return Err(error(format!("unexpected argument `{}`", value))),
+        }
+        index += 1;
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let state = read_adoption(&root)
+        .ok_or_else(|| error("no AuthBoundry adoption exists; run `authboundry init` first"))?;
+    let mut command = state
+        .run_command
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| error("no application development command was discovered"))?;
+    let upstream = requested_upstream
+        .clone()
+        .or(state
+            .upstream
+            .clone()
+            .filter(|_| requested_upstream.is_none()))
+        .unwrap_or_else(|| conventional_dev_upstream(&state.framework));
+    if requested_upstream.is_none() && state.upstream.is_none() && upstream_reachable(&upstream) {
+        return Err(error(format!(
+            "inferred application upstream {} is already occupied; stop that process or pass an explicit --upstream",
+            upstream
+        )));
+    }
+    if requested_upstream.is_some() && state.framework == "FeltDB" {
+        if let Ok(origin) = ApplicationUpstream::parse(&upstream) {
+            command.push_str(&format!(" --port {}", origin.port));
+        }
+    }
+    println!("Starting application: {}", command);
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&root)
+        .env(
+            "AUTHBOUNDRY_PROXY_SECRET",
+            development_proxy_secret(&root).unwrap_or_default(),
+        )
+        .spawn()
+        .map_err(|err| error(format!("cannot start application `{}`: {}", command, err)))?;
+    let reachable = (0..100).any(|_| {
+        if upstream_reachable(&upstream) {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        }
+    });
+    if !reachable {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error(format!(
+            "application did not become reachable at {} after 10 seconds",
+            upstream
+        )));
+    }
+    let plan = plan_attachment(&root, &upstream)?;
+    apply_attachment(&plan)?;
+    println!("✓ Application attached at {}", upstream);
+    println!("✓ Development admin and user accounts loaded");
+    println!("✓ Protected application boundary: http://{}/", address);
+    let studio_args = vec![
+        root.to_string_lossy().to_string(),
+        "--addr".to_string(),
+        address,
+    ];
+    let result = crate::studio::run(&studio_args);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn conventional_dev_upstream(framework: &str) -> String {
+    let port = match framework {
+        "FastAPI" | "Starlette" | "Litestar" => 8000,
+        "Django" => 8000,
+        "Next.js" | "Express" | "NestJS" => 3000,
+        _ => 5173,
+    };
+    format!("http://127.0.0.1:{}", port)
 }
 
 #[derive(Debug, Clone)]
@@ -421,6 +535,13 @@ pub fn discovered_routes(root: &Path) -> Option<Vec<RouteCandidate>> {
     discover(root).map(|app| app.routes)
 }
 
+pub(crate) fn is_public_entry_path(path: &str) -> bool {
+    matches!(
+        path.trim_end_matches('/'),
+        "" | "/login" | "/signin" | "/sign-in" | "/signup" | "/sign-up" | "/register"
+    )
+}
+
 fn parse_options(args: &[String]) -> Result<InitOptions, CliError> {
     let mut options = InitOptions::default();
     let mut index = 0usize;
@@ -460,10 +581,32 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
         }
         changes.push(manifest_change(&application, mode));
     }
+    if application.existing_authport.configuration {
+        if let Some(change) = config_upgrade_change(root) {
+            changes.push(change);
+        }
+    }
+    if !root.join(DEVELOPMENT_FILE).exists() {
+        changes.push(development_accounts_change(root));
+    }
+    if !root.join(INTEGRATION_FILE).exists() {
+        changes.push(integration_change(&application));
+    }
+    if let Some(change) = gitignore_change(root) {
+        changes.push(change);
+    }
+    if let Some(change) = vite_guard_upgrade_change(root) {
+        changes.push(change);
+    }
 
-    // The current public package does not expose server middleware. Adoption
-    // records the authority boundary without rewriting application source.
-    let integration_supported = mode == InitMode::Standalone;
+    let native_changes = framework_integration_changes(&application)?;
+    let integration_supported = !native_changes.is_empty()
+        || application.entrypoints.iter().any(|entry| {
+            fs::read_to_string(&entry.path)
+                .map(|source| source.contains("AuthBoundry integration"))
+                .unwrap_or(false)
+        });
+    changes.extend(native_changes);
 
     Ok(InitPlan {
         application,
@@ -472,6 +615,428 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
         already_integrated,
         detected: true,
         integration_supported,
+    })
+}
+
+fn vite_guard_upgrade_change(root: &Path) -> Option<FileChange> {
+    let path = ["vite.config.ts", "vite.config.js", "vite.config.mjs"]
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.exists())?;
+    let before = fs::read_to_string(&path).ok()?;
+    if !before.contains("Generated by AuthBoundry. Direct Vite access")
+        || before.contains("function developmentSecret()")
+    {
+        return None;
+    }
+    let mut after = before.replacen(
+        "import { defineConfig } from 'vite';",
+        "import { readFileSync } from 'node:fs';\nimport { defineConfig } from 'vite';\n\nfunction developmentSecret(): string {\n  if (process.env.AUTHBOUNDRY_PROXY_SECRET) return process.env.AUTHBOUNDRY_PROXY_SECRET;\n  try {\n    const development = JSON.parse(readFileSync(new URL('./.authboundry/development.json', import.meta.url), 'utf8'));\n    return typeof development.proxy_secret === 'string' ? development.proxy_secret : '';\n  } catch {\n    return '';\n  }\n}",
+        1,
+    );
+    after = after.replacen(
+        "const secret = process.env.AUTHBOUNDRY_PROXY_SECRET || '';",
+        "const secret = developmentSecret();",
+        1,
+    );
+    (after != before).then_some(FileChange {
+        path,
+        before: Some(before),
+        after,
+    })
+}
+
+fn framework_integration_changes(
+    application: &ApplicationCandidate,
+) -> Result<Vec<FileChange>, CliError> {
+    let Some(entrypoint) = application.entrypoints.first() else {
+        return Ok(Vec::new());
+    };
+    let source = fs::read_to_string(&entrypoint.path).map_err(|err| {
+        error(format!(
+            "cannot inspect integration entrypoint `{}`: {}",
+            entrypoint.path.display(),
+            err
+        ))
+    })?;
+    if source.contains("AuthBoundry integration") {
+        return Ok(Vec::new());
+    }
+    let framework = application.framework.as_deref().unwrap_or("");
+    if matches!(framework, "FeltDB" | "React" | "React Router" | "Vite")
+        && source.contains("<App />")
+    {
+        return react_integration_changes(application, &entrypoint.path, &source);
+    }
+    if framework == "Express" {
+        return express_integration_changes(&entrypoint.path, &source);
+    }
+    if framework == "FastAPI" {
+        return fastapi_integration_changes(&entrypoint.path, &source);
+    }
+    Ok(Vec::new())
+}
+
+fn react_integration_changes(
+    application: &ApplicationCandidate,
+    entrypoint: &Path,
+    source: &str,
+) -> Result<Vec<FileChange>, CliError> {
+    let extension = entrypoint
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("tsx");
+    let generated = entrypoint
+        .parent()
+        .unwrap_or(&application.root)
+        .join("authboundry")
+        .join(format!("provider.{}", extension));
+    let provider = if matches!(extension, "ts" | "tsx") {
+        r#"// Generated by AuthBoundry. Existing application auth remains available during migration.
+import React from 'react';
+import { createAuthBoundryReact } from '@authboundry/core/react';
+
+const integration = createAuthBoundryReact(React);
+export const useAuthBoundry = integration.useAuth;
+export const authBoundryClient = integration.client;
+
+export function AuthBoundryProvider({ children }: { children: React.ReactNode }) {
+  return <integration.AuthBoundry>{children}</integration.AuthBoundry>;
+}
+"#
+    } else {
+        r#"// Generated by AuthBoundry. Existing application auth remains available during migration.
+import React from 'react';
+import { createAuthBoundryReact } from '@authboundry/core/react';
+
+const integration = createAuthBoundryReact(React);
+export const useAuthBoundry = integration.useAuth;
+export const authBoundryClient = integration.client;
+
+export function AuthBoundryProvider({ children }) {
+  return <integration.AuthBoundry>{children}</integration.AuthBoundry>;
+}
+"#
+    };
+    let relative = "./authboundry/provider";
+    let after = format!(
+        "// AuthBoundry integration: provider bridge (safe to remove with `authboundry rollback`)\nimport {{ AuthBoundryProvider }} from '{}';\n{}",
+        relative,
+        source.replacen(
+            "<App />",
+            "<AuthBoundryProvider><App /></AuthBoundryProvider>",
+            1
+        )
+    );
+    let mut changes = vec![
+        FileChange {
+            before: fs::read_to_string(&generated).ok(),
+            path: generated,
+            after: provider.to_string(),
+        },
+        FileChange {
+            path: entrypoint.to_path_buf(),
+            before: Some(source.to_string()),
+            after,
+        },
+    ];
+    if let Some(change) = package_dependency_change(&application.root)? {
+        changes.push(change);
+    }
+    if !["vite.config.ts", "vite.config.js", "vite.config.mjs"]
+        .iter()
+        .any(|name| application.root.join(name).exists())
+    {
+        let path = application.root.join("vite.config.ts");
+        changes.push(FileChange {
+            before: None,
+            path,
+            after: r#"// Generated by AuthBoundry. Direct Vite access is denied after adoption.
+import { readFileSync } from 'node:fs';
+import { defineConfig } from 'vite';
+
+function developmentSecret(): string {
+  if (process.env.AUTHBOUNDRY_PROXY_SECRET) return process.env.AUTHBOUNDRY_PROXY_SECRET;
+  try {
+    const development = JSON.parse(readFileSync(new URL('./.authboundry/development.json', import.meta.url), 'utf8'));
+    return typeof development.proxy_secret === 'string' ? development.proxy_secret : '';
+  } catch {
+    return '';
+  }
+}
+
+function sign(secret: string, context: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(`${secret}|${context}`)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+export default defineConfig({
+  plugins: [{
+    name: 'authboundry-direct-access',
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const secret = developmentSecret();
+        const signature = request.headers['x-authboundry-proxy-signature'];
+        if (!secret || typeof signature !== 'string' || sign(secret, 'proxy') !== signature) {
+          response.statusCode = 403;
+          response.setHeader('content-type', 'application/json');
+          response.end(JSON.stringify({ error: 'direct_access_denied', message: 'Use the AuthBoundry application URL.' }));
+          return;
+        }
+        next();
+      });
+    },
+  }],
+});
+"#
+            .to_string(),
+        });
+    }
+    Ok(changes)
+}
+
+fn package_dependency_change(root: &Path) -> Result<Option<FileChange>, CliError> {
+    let path = root.join("package.json");
+    let before = fs::read_to_string(&path)
+        .map_err(|err| error(format!("cannot read package.json: {}", err)))?;
+    if before.contains("\"@authboundry/core\"") {
+        return Ok(None);
+    }
+    let after = if before.contains("\"dependencies\": {") {
+        before.replacen(
+            "\"dependencies\": {",
+            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.5.0\",",
+            1,
+        )
+    } else {
+        before.replacen(
+            '{',
+            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.5.0\"},",
+            1,
+        )
+    };
+    Ok(Some(FileChange {
+        path,
+        before: Some(before),
+        after,
+    }))
+}
+
+fn express_integration_changes(
+    entrypoint: &Path,
+    source: &str,
+) -> Result<Vec<FileChange>, CliError> {
+    let marker = source
+        .lines()
+        .find(|line| line.contains("= express()"))
+        .ok_or_else(|| error("Express was detected but its application constructor is not safe to modify automatically"))?;
+    let directory = entrypoint.parent().unwrap_or_else(|| Path::new("."));
+    let generated = directory.join("authboundry").join("context.cjs");
+    let middleware = r#"// Generated by AuthBoundry. Verifies context injected by the boundary.
+function sign(secret, context) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(`${secret}|${context}`)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+exports.authBoundryContext = function authBoundryContext() {
+  return function authBoundryContextMiddleware(request, response, next) {
+    const context = request.get('x-authboundry-context');
+    const signature = request.get('x-authboundry-signature');
+    const secret = process.env.AUTHBOUNDRY_PROXY_SECRET || '';
+    const proxySignature = request.get('x-authboundry-proxy-signature');
+    if (!secret || sign(secret, 'proxy') !== proxySignature) {
+      return response.status(403).json({ error: 'direct_access_denied', message: 'Use the AuthBoundry application URL.' });
+    }
+    request.authboundry = context && signature && secret && sign(secret, context) === signature
+      ? JSON.parse(context) : null;
+    next();
+  };
+};
+"#;
+    let inserted = format!(
+        "{}\napp.use(authBoundryContext()); // AuthBoundry verified authority context",
+        marker
+    );
+    let after = format!(
+        "// AuthBoundry integration: signed context bridge (safe to remove with `authboundry rollback`)\nconst {{ authBoundryContext }} = require('./authboundry/context.cjs');\n{}",
+        source.replacen(marker, &inserted, 1)
+    );
+    Ok(vec![
+        FileChange {
+            path: generated.clone(),
+            before: fs::read_to_string(&generated).ok(),
+            after: middleware.to_string(),
+        },
+        FileChange {
+            path: entrypoint.to_path_buf(),
+            before: Some(source.to_string()),
+            after,
+        },
+    ])
+}
+
+fn fastapi_integration_changes(
+    entrypoint: &Path,
+    source: &str,
+) -> Result<Vec<FileChange>, CliError> {
+    let marker = source
+        .lines()
+        .find(|line| line.contains("= FastAPI("))
+        .ok_or_else(|| error("FastAPI was detected but its application constructor is not safe to modify automatically"))?;
+    let directory = entrypoint.parent().unwrap_or_else(|| Path::new("."));
+    let generated = directory.join("authboundry_context.py");
+    let middleware = r#"# Generated by AuthBoundry. Verifies context injected by the boundary.
+import json
+import os
+
+def _sign(secret: str, context: str) -> str:
+    value = 0xcbf29ce484222325
+    for byte in f"{secret}|{context}".encode():
+        value = ((value ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return f"{value:016x}"
+
+def install_authboundry(app):
+    @app.middleware("http")
+    async def authboundry_context(request, call_next):
+        context = request.headers.get("x-authboundry-context")
+        signature = request.headers.get("x-authboundry-signature")
+        secret = os.environ.get("AUTHBOUNDRY_PROXY_SECRET", "")
+        proxy_signature = request.headers.get("x-authboundry-proxy-signature")
+        if not secret or _sign(secret, "proxy") != proxy_signature:
+            from starlette.responses import JSONResponse
+            return JSONResponse({"error": "direct_access_denied", "message": "Use the AuthBoundry application URL."}, status_code=403)
+        request.state.authboundry = json.loads(context) if (
+            context and signature and secret and _sign(secret, context) == signature
+        ) else None
+        return await call_next(request)
+"#;
+    let inserted = format!(
+        "{}\ninstall_authboundry(app)  # AuthBoundry verified authority context",
+        marker
+    );
+    let after = format!(
+        "# AuthBoundry integration: signed context bridge (safe to remove with `authboundry rollback`)\nfrom authboundry_context import install_authboundry\n{}",
+        source.replacen(marker, &inserted, 1)
+    );
+    Ok(vec![
+        FileChange {
+            path: generated.clone(),
+            before: fs::read_to_string(&generated).ok(),
+            after: middleware.to_string(),
+        },
+        FileChange {
+            path: entrypoint.to_path_buf(),
+            before: Some(source.to_string()),
+            after,
+        },
+    ])
+}
+
+fn integration_change(application: &ApplicationCandidate) -> FileChange {
+    let systems = application
+        .existing_auth
+        .iter()
+        .map(|system| {
+            format!(
+                "{{\"id\":\"{}\",\"name\":\"{}\",\"credentials\":{},\"sessions\":{},\"profiles\":{},\"authorization\":{},\"strategy\":\"{}\"}}",
+                escape(&system.id),
+                escape(&system.display_name),
+                system.credentials,
+                system.sessions,
+                system.profiles,
+                system.authorization,
+                system.coexistence.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    FileChange {
+        path: application.root.join(INTEGRATION_FILE),
+        before: None,
+        after: format!(
+            "{{\n  \"framework\": \"{}\",\n  \"status\": \"planned\",\n  \"default_strategy\": \"{}\",\n  \"preserve_profiles\": true,\n  \"rollback_manifest\": \".authboundry/rollback/manifest.tsv\",\n  \"existing_auth\": [{}]\n}}\n",
+            escape(application.framework.as_deref().unwrap_or("")),
+            if application.existing_auth.iter().any(|system| system.coexistence.as_str() == "migrate") { "migrate" } else { "bridge" },
+            systems
+        ),
+    }
+}
+
+fn plan_inputs_unchanged(plan: &InitPlan) -> bool {
+    discover(&plan.application.root).as_ref() == Some(&plan.application)
+        && plan
+            .changes
+            .iter()
+            .all(|change| fs::read_to_string(&change.path).ok() == change.before)
+}
+
+fn development_accounts_change(root: &Path) -> FileChange {
+    let admin_password = development_password();
+    let user_password = development_password();
+    let proxy_secret = development_password();
+    FileChange {
+        path: root.join(DEVELOPMENT_FILE),
+        before: None,
+        after: format!(
+            "{{\n  \"tenant\": \"development\",\n  \"proxy_secret\": \"{}\",\n  \"accounts\": [\n    {{\"username\": \"admin\", \"password\": \"{}\", \"claims\": \"role=admin\"}},\n    {{\"username\": \"user\", \"password\": \"{}\", \"claims\": \"role=user\"}}\n  ]\n}}\n",
+            proxy_secret, admin_password, user_password
+        ),
+    }
+}
+
+fn development_password() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 18];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .is_err()
+    {
+        let seed = format!(
+            "{}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default(),
+            std::thread::current().id()
+        );
+        for (index, byte) in seed.bytes().enumerate() {
+            bytes[index % bytes.len()] ^= byte.rotate_left((index % 8) as u32);
+        }
+    }
+    let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    bytes
+        .iter()
+        .map(|byte| alphabet[*byte as usize % alphabet.len()] as char)
+        .collect()
+}
+
+fn gitignore_change(root: &Path) -> Option<FileChange> {
+    let path = root.join(".gitignore");
+    let before = fs::read_to_string(&path).ok();
+    if before
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .any(|line| line.trim() == DEVELOPMENT_FILE)
+    {
+        return None;
+    }
+    let mut after = before.clone().unwrap_or_default();
+    if !after.is_empty() && !after.ends_with('\n') {
+        after.push('\n');
+    }
+    after.push_str(DEVELOPMENT_FILE);
+    after.push('\n');
+    Some(FileChange {
+        path,
+        before,
+        after,
     })
 }
 
@@ -489,6 +1054,31 @@ fn config_change(root: &Path) -> FileChange {
     }
 }
 
+fn config_upgrade_change(root: &Path) -> Option<FileChange> {
+    let path = DEFAULT_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.exists())?;
+    let before = fs::read_to_string(&path).ok()?;
+    if before.contains("role = enum[") {
+        return None;
+    }
+    let marker = "  providers = [local]\n";
+    if !before.contains(marker) {
+        return None;
+    }
+    let after = before.replacen(
+        marker,
+        "  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n",
+        1,
+    );
+    Some(FileChange {
+        path,
+        before: Some(before),
+        after,
+    })
+}
+
 fn manifest_change(application: &ApplicationCandidate, mode: InitMode) -> FileChange {
     let path = application.root.join(MANIFEST_FILE);
     FileChange {
@@ -499,6 +1089,7 @@ fn manifest_change(application: &ApplicationCandidate, mode: InitMode) -> FileCh
 }
 
 fn apply_plan(plan: &InitPlan) -> Result<(), CliError> {
+    create_rollback_journal(plan)?;
     let mut written = Vec::<(&FileChange, Option<String>)>::new();
     for change in &plan.changes {
         if let Some(parent) = change.path.parent() {
@@ -524,12 +1115,322 @@ fn apply_plan(plan: &InitPlan) -> Result<(), CliError> {
     Ok(())
 }
 
+const ROLLBACK_DIR: &str = ".authboundry/rollback";
+
+fn create_rollback_journal(plan: &InitPlan) -> Result<(), CliError> {
+    let directory = plan.application.root.join(ROLLBACK_DIR);
+    if directory.join("manifest.tsv").exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&directory)
+        .map_err(|err| error(format!("cannot create rollback journal: {}", err)))?;
+    let mut manifest = String::new();
+    for (index, change) in plan.changes.iter().enumerate() {
+        let relative = display_path(&change.path, &plan.application.root);
+        if relative.contains(['\t', '\n']) || relative.starts_with("../") {
+            return Err(error("cannot journal an unsafe integration path"));
+        }
+        if let Some(before) = &change.before {
+            let backup = format!("{}.backup", index);
+            fs::write(directory.join(&backup), before)
+                .map_err(|err| error(format!("cannot write rollback backup: {}", err)))?;
+            manifest.push_str(&format!("existing\t{}\t{}\n", relative, backup));
+        } else {
+            manifest.push_str(&format!("created\t{}\t\n", relative));
+        }
+    }
+    fs::write(directory.join("manifest.tsv"), manifest)
+        .map_err(|err| error(format!("cannot write rollback manifest: {}", err)))
+}
+
+pub fn rollback_integration(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut yes = false;
+    for arg in args {
+        if arg == "--yes" {
+            yes = true;
+        } else if arg.starts_with('-') {
+            return Err(error(format!("unknown flag `{}`", arg)));
+        } else if root.replace(PathBuf::from(arg)).is_some() {
+            return Err(error("rollback accepts at most one application path"));
+        }
+    }
+    if !yes {
+        return Err(error(
+            "rollback requires --yes after reviewing the integration plan",
+        ));
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let directory = root.join(ROLLBACK_DIR);
+    let source = fs::read_to_string(directory.join("manifest.tsv"))
+        .map_err(|_| error("no reversible AuthBoundry integration journal exists"))?;
+    let mut restored = 0usize;
+    let mut backups = Vec::new();
+    for line in source.lines().rev() {
+        let mut fields = line.splitn(3, '\t');
+        let action = fields.next().unwrap_or("");
+        let relative = fields.next().unwrap_or("");
+        let backup = fields.next().unwrap_or("");
+        if relative.is_empty()
+            || relative.starts_with('/')
+            || relative.split('/').any(|part| part == "..")
+        {
+            return Err(error("rollback journal contains an unsafe path"));
+        }
+        let target = root.join(relative);
+        match action {
+            "existing" => {
+                let contents = fs::read_to_string(directory.join(backup))
+                    .map_err(|err| error(format!("cannot read rollback backup: {}", err)))?;
+                atomic_write(&target, &contents)?;
+                backups.push(directory.join(backup));
+            }
+            "created" => {
+                if target.exists() {
+                    fs::remove_file(&target).map_err(|err| {
+                        error(format!(
+                            "cannot remove generated `{}`: {}",
+                            target.display(),
+                            err
+                        ))
+                    })?;
+                }
+            }
+            _ => return Err(error("rollback journal contains an unknown action")),
+        }
+        restored += 1;
+    }
+    for backup in backups {
+        if backup.exists() {
+            fs::remove_file(&backup)
+                .map_err(|err| error(format!("cannot consume rollback backup: {}", err)))?;
+        }
+    }
+    fs::remove_file(directory.join("manifest.tsv"))
+        .map_err(|err| error(format!("cannot consume rollback manifest: {}", err)))?;
+    let _ = fs::remove_dir(&directory);
+    Ok(Output {
+        text: format!(
+            "AuthBoundry integration rolled back.\n✓ {} exact file changes reversed\n✓ Incumbent authentication remains available\n",
+            restored
+        ),
+    })
+}
+
+pub fn cutover(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut yes = false;
+    let mut server = "http://127.0.0.1:8787".to_string();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--yes" => yes = true,
+            "--server" => {
+                index += 1;
+                server = args
+                    .get(index)
+                    .ok_or_else(|| error("--server needs a URL"))?
+                    .clone();
+            }
+            flag if flag.starts_with('-') => return Err(error(format!("unknown flag `{}`", flag))),
+            value if root.is_none() => root = Some(PathBuf::from(value)),
+            value => return Err(error(format!("unexpected argument `{}`", value))),
+        }
+        index += 1;
+    }
+    if !yes {
+        return Err(error(
+            "cutover requires --yes after reviewing the integration plan",
+        ));
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let integration_path = root.join(INTEGRATION_FILE);
+    let integration = fs::read_to_string(&integration_path).map_err(|_| {
+        error("no AuthBoundry integration plan exists; run `authboundry init` first")
+    })?;
+    if !integration.contains("\"status\": \"planned\"") {
+        return Err(error("integration is not awaiting cutover"));
+    }
+    if !root.join(ROLLBACK_DIR).join("manifest.tsv").exists() {
+        return Err(error(
+            "cutover refused: reversible rollback journal is missing",
+        ));
+    }
+    let application =
+        discover(&root).ok_or_else(|| error("application is no longer discoverable"))?;
+    let bridge_present = application.entrypoints.iter().any(|entry| {
+        fs::read_to_string(&entry.path)
+            .map(|source| source.contains("AuthBoundry integration"))
+            .unwrap_or(false)
+    });
+    if !bridge_present {
+        return Err(error("cutover refused: native framework bridge is missing"));
+    }
+    let origin = ApplicationUpstream::parse(&server).map_err(error)?;
+    let public = appport_auth_mesh_server::send_upstream(
+        &origin,
+        &appport_auth_mesh_server::ClientRequest::get("/"),
+    )
+    .map_err(|err| error(format!("public-route verification failed: {}", err.message)))?;
+    if public.status >= 400 {
+        return Err(error(format!(
+            "cutover refused: public route returned {}",
+            public.status
+        )));
+    }
+    let protected_path = application
+        .routes
+        .iter()
+        .map(|route| route.path.as_str())
+        .find(|path| !is_public_entry_path(path))
+        .ok_or_else(|| error("cutover refused: no protected application route was discovered"))?;
+    let anonymous = appport_auth_mesh_server::send_upstream(
+        &origin,
+        &appport_auth_mesh_server::ClientRequest::get(protected_path),
+    )
+    .map_err(|err| {
+        error(format!(
+            "anonymous-denial verification failed: {}",
+            err.message
+        ))
+    })?;
+    if !matches!(anonymous.status, 401 | 403) {
+        return Err(error(format!(
+            "cutover refused: anonymous request to `{}` returned {}, expected denial",
+            protected_path, anonymous.status
+        )));
+    }
+    let admin = development_accounts(&root)
+        .into_iter()
+        .find(|account| account.username == "admin")
+        .ok_or_else(|| error("cutover refused: development admin account is missing"))?;
+    let body = format!(
+        "{{\"tenant\":\"{}\",\"connector\":\"local\",\"username\":\"{}\",\"password\":\"{}\"}}",
+        escape(&admin.tenant),
+        escape(&admin.username),
+        escape(&admin.password)
+    );
+    let signed_in = appport_auth_mesh_server::send_upstream(
+        &origin,
+        &appport_auth_mesh_server::ClientRequest::post_json("/auth/sign-in", body),
+    )
+    .map_err(|err| {
+        error(format!(
+            "admin sign-in verification failed: {}",
+            err.message
+        ))
+    })?;
+    if signed_in.status != 200 {
+        return Err(error(format!(
+            "cutover refused: admin sign-in returned {}",
+            signed_in.status
+        )));
+    }
+    let credential = appport_auth_mesh_server::cookie_value(&signed_in, "authboundry_session")
+        .ok_or_else(|| error("cutover refused: admin sign-in issued no session"))?;
+    let authenticated = appport_auth_mesh_server::send_upstream(
+        &origin,
+        &appport_auth_mesh_server::ClientRequest::get(protected_path)
+            .with_cookie("authboundry_session", &credential),
+    )
+    .map_err(|err| {
+        error(format!(
+            "authenticated forwarding verification failed: {}",
+            err.message
+        ))
+    })?;
+    if authenticated.status >= 400 {
+        return Err(error(format!(
+            "cutover refused: authenticated route `{}` returned {}",
+            protected_path, authenticated.status
+        )));
+    }
+    if let Some(upstream) = read_adoption(&root).and_then(|state| state.upstream) {
+        let direct_origin = ApplicationUpstream::parse(&upstream).map_err(error)?;
+        let direct = appport_auth_mesh_server::send_upstream(
+            &direct_origin,
+            &appport_auth_mesh_server::ClientRequest::get(protected_path),
+        )
+        .map_err(|err| {
+            error(format!(
+                "direct-access verification failed: {}",
+                err.message
+            ))
+        })?;
+        if !matches!(direct.status, 401 | 403) {
+            return Err(error(format!(
+                "cutover refused: direct application access to `{}` returned {}; protection remains bypassable",
+                protected_path, direct.status
+            )));
+        }
+    }
+    atomic_write(
+        &integration_path,
+        &integration.replacen("\"status\": \"planned\"", "\"status\": \"verified\"", 1),
+    )?;
+    Ok(Output {
+        text: format!(
+            "AuthBoundry cutover verified.\n✓ public route accessible\n✓ protected route denied anonymously\n✓ admin sign-in established a session\n✓ protected route forwarded with verified authority\n✓ direct application bypass denied or not externally exposed\n✓ rollback remains available\nIncumbent authentication may now be offboarded with `authboundry offboard-auth --yes`.\n"
+        ),
+    })
+}
+
+pub fn offboard_auth(args: &[String]) -> Result<Output, CliError> {
+    let mut root = None;
+    let mut yes = false;
+    for arg in args {
+        if arg == "--yes" {
+            yes = true;
+        } else if arg.starts_with('-') {
+            return Err(error(format!("unknown flag `{}`", arg)));
+        } else if root.replace(PathBuf::from(arg)).is_some() {
+            return Err(error("offboard-auth accepts at most one application path"));
+        }
+    }
+    if !yes {
+        return Err(error("offboard-auth requires --yes after verified cutover"));
+    }
+    let root = root.unwrap_or(std::env::current_dir().map_err(|err| error(err.to_string()))?);
+    let path = root.join(INTEGRATION_FILE);
+    let source =
+        fs::read_to_string(&path).map_err(|_| error("no AuthBoundry integration plan exists"))?;
+    if !source.contains("\"status\": \"verified\"") {
+        return Err(error(
+            "offboarding refused: AuthBoundry cutover has not passed runtime verification",
+        ));
+    }
+    if !root.join(ROLLBACK_DIR).join("manifest.tsv").exists() {
+        return Err(error(
+            "offboarding refused: rollback journal is unavailable",
+        ));
+    }
+    atomic_write(
+        &path,
+        &source.replacen("\"status\": \"verified\"", "\"status\": \"offboarded\"", 1),
+    )?;
+    Ok(Output {
+        text: "Incumbent authentication offboarded from the authority path.\n✓ AuthBoundry is the verified protected-route authority\n✓ Existing identity provider may continue through its bridge\n✓ Application profiles and business data preserved\n✓ Original source remains recoverable with `authboundry rollback --yes`\n"
+            .to_string(),
+    })
+}
+
 fn atomic_write(path: &Path, contents: &str) -> Result<(), CliError> {
     let tmp = path.with_extension("authboundry-tmp");
     fs::write(&tmp, contents)
         .map_err(|err| error(format!("cannot write `{}`: {}", tmp.display(), err)))?;
     fs::rename(&tmp, path)
         .map_err(|err| error(format!("cannot replace `{}`: {}", path.display(), err)))?;
+    #[cfg(unix)]
+    if path.ends_with(DEVELOPMENT_FILE) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            error(format!(
+                "cannot protect development credentials `{}`: {}",
+                path.display(),
+                err
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -702,14 +1603,35 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
             out.push_str(&format!("  {}\n", provider.id));
         }
     }
+    if !plan.application.existing_auth.is_empty() {
+        out.push_str("Existing authentication:\n");
+        for system in &plan.application.existing_auth {
+            out.push_str(&format!(
+                "  {}\n    strategy: {}\n    credentials: {} · sessions: {} · profiles: {} · authorization: {}\n",
+                system.display_name,
+                system.coexistence.as_str(),
+                if system.credentials { "preserve during adoption" } else { "none" },
+                if system.sessions { "bridge then offboard" } else { "none" },
+                if system.profiles { "preserve" } else { "none detected" },
+                if system.authorization { "migrate explicitly" } else { "AuthBoundry" }
+            ));
+        }
+        out.push_str(
+            "  Existing auth will not be removed until replacement verification passes.\n",
+        );
+    }
     out.push_str("Proposed integration:\n");
-    if plan.integration_supported && plan.mode == InitMode::Embedded {
-        out.push_str("  + initialize AuthBoundry\n  + mount AuthBoundry boundary\n  + preserve existing application routes\n");
+    if plan.integration_supported {
+        out.push_str("  framework-native coexistence bridge\n  + initialize AuthBoundry SDK/context\n  + preserve incumbent authentication during cutover\n  + preserve existing application routes and profiles\n  + record every source change for rollback\n");
     } else {
         out.push_str("  (automatic source integration is not supported for this application)\n");
     }
     out.push_str("Authority:\n  configured\nApplication attachment:\n  none\n");
-    out.push_str("Reason:\n  automatic source integration is not supported\n  and no application runtime attachment was discovered\n");
+    if plan.integration_supported {
+        out.push_str("Cutover:\n  pending runtime verification; incumbent auth remains active\n");
+    } else {
+        out.push_str("Reason:\n  automatic source integration is not supported\n  and no application runtime attachment was discovered\n");
+    }
     out.push_str("No application routes will be rewritten.\n");
     out.push_str("Files to modify:\n");
     for change in plan.changes.iter().filter(|change| change.before.is_some()) {
@@ -755,11 +1677,52 @@ fn applied_plan_text(plan: &InitPlan, report: &VerifyReport) -> String {
         report.application_routes.max(plan.application.routes.len())
     ));
     out.push_str("✓ Application detected\n✓ AuthBoundry configuration created\n");
-    out.push_str("⚠ Application integration not established\n");
+    if let Some(change) = plan
+        .changes
+        .iter()
+        .find(|change| change.path.ends_with(DEVELOPMENT_FILE))
+    {
+        let accounts = development_accounts_from_source(&change.after);
+        if !accounts.is_empty() {
+            out.push_str("✓ Development identities created\nDevelopment sign-in (stored in .authboundry/development.json):\n");
+            for account in accounts {
+                out.push_str(&format!("  {} / {}\n", account.username, account.password));
+            }
+        }
+    }
+    if plan.integration_supported {
+        out.push_str(
+            "✓ Application coexistence bridge installed\n⚠ Cutover pending runtime verification\n",
+        );
+    } else {
+        out.push_str("⚠ Application integration not established\n");
+    }
     out.push_str("Authority state:\n  configured\nApplication state:\n  unattached\n");
     out.push_str("Reason:\n  no application runtime attachment was discovered\n");
     out.push_str("AuthBoundry adoption complete.\n");
     out
+}
+
+fn development_accounts_from_source(source: &str) -> Vec<crate::serve::Account> {
+    let tenant = json_string(source, "tenant").unwrap_or_else(|| "development".to_string());
+    source
+        .split("{\"username\"")
+        .skip(1)
+        .filter_map(|record| {
+            let record = format!("{{\"username\"{}", record);
+            crate::serve::Account::parse(
+                &format!(
+                    "{}:{}:{}@{}",
+                    json_string(&record, "username")?,
+                    json_string(&record, "password")?,
+                    json_string(&record, "claims").unwrap_or_default(),
+                    tenant
+                ),
+                &tenant,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 fn render_verify_text(report: &VerifyReport) -> String {
@@ -899,6 +1862,8 @@ pub struct AdoptionState {
     pub authority: String,
     pub upstream: Option<String>,
     pub routes: usize,
+    pub framework: String,
+    pub run_command: Option<String>,
 }
 
 pub fn read_adoption(root: &Path) -> Option<AdoptionState> {
@@ -909,11 +1874,25 @@ pub fn read_adoption(root: &Path) -> Option<AdoptionState> {
         authority: json_string(&source, "authority").unwrap_or_else(|| "configured".to_string()),
         upstream: json_string(&source, "upstream").filter(|value| !value.is_empty()),
         routes: json_usize(&source, "routes").unwrap_or(0),
+        framework: json_string(&source, "framework").unwrap_or_default(),
+        run_command: json_string(&source, "run_command").filter(|value| !value.is_empty()),
     })
 }
 
 pub fn adoption_upstream(root: &Path) -> Option<String> {
     read_adoption(root)?.upstream
+}
+
+pub(crate) fn development_accounts(root: &Path) -> Vec<crate::serve::Account> {
+    let Ok(source) = fs::read_to_string(root.join(DEVELOPMENT_FILE)) else {
+        return Vec::new();
+    };
+    development_accounts_from_source(&source)
+}
+
+pub(crate) fn development_proxy_secret(root: &Path) -> Option<String> {
+    let source = fs::read_to_string(root.join(DEVELOPMENT_FILE)).ok()?;
+    json_string(&source, "proxy_secret")
 }
 
 fn json_string(source: &str, key: &str) -> Option<String> {
@@ -947,6 +1926,10 @@ pub(crate) fn upstream_reachable(value: &str) -> bool {
 fn render_patch(change: &FileChange, root: &Path) -> String {
     let path = display_path(&change.path, root);
     let mut out = format!("--- {}\n+++ {}\n", path, path);
+    if change.path.ends_with(DEVELOPMENT_FILE) {
+        out.push_str("+ {\n+   \"tenant\": \"development\",\n+   \"proxy_secret\": \"<generated after approval>\",\n+   \"accounts\": [\n+     {\"username\": \"admin\", \"password\": \"<generated after approval>\", \"claims\": \"role=admin\"},\n+     {\"username\": \"user\", \"password\": \"<generated after approval>\", \"claims\": \"role=user\"}\n+   ]\n+ }\n");
+        return out;
+    }
     match &change.before {
         Some(before) => {
             for line in change.after.lines() {

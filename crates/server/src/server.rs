@@ -83,7 +83,7 @@ impl AuthPortServer {
     pub fn handle(&self, http: &HttpRequest) -> HttpResponse {
         let request = http.to_boundary();
 
-        if request.method == Method::Get && request.path == "/" {
+        if request.method == Method::Get && request.path == "/_authboundry/studio" {
             if let Some(page) = self
                 .studio_controller
                 .as_ref()
@@ -608,6 +608,15 @@ fn handle_connection(server: Arc<dyn HttpHandler>, stream: TcpStream) {
 
     let response = match HttpRequest::read_from(&mut reader) {
         Ok(request) => server.handle(&request),
+        Err(err)
+            if err.message.contains("temporarily unavailable")
+                || err.message.contains("timed out") =>
+        {
+            // Browsers routinely open speculative connections without sending
+            // a request. A read timeout is not an application request and must
+            // not become a visible 400 response.
+            return;
+        }
         Err(err) => HttpResponse::denied(400, "bad_request", &err.message),
     };
     let _ = response.write_to(&mut writer);

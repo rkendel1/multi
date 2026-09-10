@@ -162,22 +162,42 @@ fn read_response(stream: impl Read) -> Result<HttpResponse, HttpError> {
     }
 
     let mut body = Vec::new();
-    match header_map
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
+    if header_map
+        .get("transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
     {
-        Some(length) => {
-            body.resize(length, 0);
-            if length > 0 {
-                reader
-                    .read_exact(&mut body)
-                    .map_err(|err| HttpError::new(err.to_string()))?;
+        read_chunked(&mut reader, &mut body)?;
+        headers.retain(|(name, _)| name != "transfer-encoding");
+    } else {
+        match header_map
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            Some(length) => {
+                body.resize(length, 0);
+                if length > 0 {
+                    reader
+                        .read_exact(&mut body)
+                        .map_err(|err| HttpError::new(err.to_string()))?;
+                }
             }
-        }
-        None => {
-            reader
-                .read_to_end(&mut body)
-                .map_err(|err| HttpError::new(err.to_string()))?;
+            None => loop {
+                let mut chunk = [0u8; 8192];
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(length) => body.extend_from_slice(&chunk[..length]),
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break
+                    }
+                    Err(err) => return Err(HttpError::new(err.to_string())),
+                }
+            },
         }
     }
 
@@ -186,6 +206,44 @@ fn read_response(stream: impl Read) -> Result<HttpResponse, HttpError> {
         headers,
         body,
     })
+}
+
+fn read_chunked(reader: &mut impl BufRead, body: &mut Vec<u8>) -> Result<(), HttpError> {
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|err| HttpError::new(err.to_string()))?;
+        let size = line
+            .trim()
+            .split(';')
+            .next()
+            .and_then(|value| usize::from_str_radix(value, 16).ok())
+            .ok_or_else(|| HttpError::new("malformed chunked response"))?;
+        if size == 0 {
+            loop {
+                line.clear();
+                reader
+                    .read_line(&mut line)
+                    .map_err(|err| HttpError::new(err.to_string()))?;
+                if line == "\r\n" || line == "\n" || line.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader
+            .read_exact(&mut body[start..])
+            .map_err(|err| HttpError::new(err.to_string()))?;
+        let mut ending = [0u8; 2];
+        reader
+            .read_exact(&mut ending)
+            .map_err(|err| HttpError::new(err.to_string()))?;
+        if ending != *b"\r\n" {
+            return Err(HttpError::new("malformed chunk boundary"));
+        }
+    }
 }
 
 /// Read a cookie value out of a response's `set-cookie` headers.
@@ -200,4 +258,21 @@ pub fn cookie_value(response: &HttpResponse, name: &str) -> Option<String> {
             (cookie_name.trim() == name).then(|| cookie_value.trim().to_string())
         })
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_chunked_development_server_responses() {
+        let wire = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-type: text/html\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let response = read_response(std::io::Cursor::new(wire)).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"hello world");
+        assert!(!response
+            .headers
+            .iter()
+            .any(|(name, _)| name == "transfer-encoding"));
+    }
 }

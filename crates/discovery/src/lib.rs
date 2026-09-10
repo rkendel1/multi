@@ -18,6 +18,7 @@ pub struct ApplicationCandidate {
     pub servers: Vec<ServerCandidate>,
     pub routes: Vec<RouteCandidate>,
     pub providers: Vec<ProviderCandidate>,
+    pub existing_auth: Vec<ExistingAuthSystem>,
     pub existing_authport: ExistingAuthPort,
     pub confidence: DiscoveryConfidence,
 }
@@ -32,6 +33,7 @@ pub struct EntrypointCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntrypointKind {
     NodeScript,
+    PythonScript,
     RustBinary,
     Unknown,
 }
@@ -57,6 +59,8 @@ pub enum RouteSource {
     Embedded,
     Standalone,
     Rust,
+    Client,
+    Python,
     Unknown,
 }
 
@@ -67,6 +71,8 @@ impl RouteSource {
             Self::Embedded => "embedded",
             Self::Standalone => "standalone",
             Self::Rust => "rust",
+            Self::Client => "client",
+            Self::Python => "python",
             Self::Unknown => "unknown",
         }
     }
@@ -382,6 +388,33 @@ pub struct ProviderCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthCoexistence {
+    Bridge,
+    Migrate,
+}
+
+impl AuthCoexistence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bridge => "bridge",
+            Self::Migrate => "migrate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingAuthSystem {
+    pub id: String,
+    pub display_name: String,
+    pub credentials: bool,
+    pub sessions: bool,
+    pub profiles: bool,
+    pub authorization: bool,
+    pub coexistence: AuthCoexistence,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryConfidence {
     Low,
     Medium,
@@ -419,7 +452,9 @@ impl ExistingAuthPort {
 
 pub fn discover(root: impl AsRef<Path>) -> Option<ApplicationCandidate> {
     let root = root.as_ref();
-    discover_node(root).or_else(|| discover_rust(root))
+    discover_node(root)
+        .or_else(|| discover_python(root))
+        .or_else(|| discover_rust(root))
 }
 
 pub fn propose_authority(
@@ -1359,17 +1394,24 @@ fn discover_node(root: &Path) -> Option<ApplicationCandidate> {
     let package_json = fs::read_to_string(&package).ok()?;
     let entrypoints = node_entrypoints(root, &package_json);
     let files = readable_sources(root, &entrypoints);
-    let framework = if package_json.contains("\"express\"")
-        || files.iter().any(|(_, source)| source.contains("express()"))
-    {
-        Some("Express".to_string())
-    } else {
-        None
-    };
+    let framework = Some(detect_node_framework(root, &package_json, &files));
     let mut routes = files
         .iter()
         .flat_map(|(_, source)| discover_js_routes(source))
         .collect::<Vec<_>>();
+    if root.join("index.html").exists() {
+        routes.push(RouteCandidate {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            source: RouteSource::Client,
+            capability: None,
+        });
+    }
+    routes.extend(discover_filesystem_routes(
+        root,
+        framework.as_deref().unwrap_or("Node.js"),
+        &files,
+    ));
     routes.sort();
     routes.dedup();
     Some(ApplicationCandidate {
@@ -1382,9 +1424,356 @@ fn discover_node(root: &Path) -> Option<ApplicationCandidate> {
         servers: node_servers(&package_json),
         routes,
         providers: discover_providers(root, &files),
+        existing_auth: discover_existing_auth(root, &package_json, &files),
         existing_authport: existing_authport(root, &package_json, &files),
         confidence: DiscoveryConfidence::High,
     })
+}
+
+fn detect_node_framework(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> String {
+    let source_contains = |needle: &str| files.iter().any(|(_, source)| source.contains(needle));
+    let dependency = |name: &str| manifest.contains(&format!("\"{}\"", name));
+    let config = |names: &[&str]| names.iter().any(|name| root.join(name).exists());
+
+    let rules: &[(&str, &[&str], &[&str])] = &[
+        ("FeltDB", &["feltdb"], &[]),
+        (
+            "Next.js",
+            &["next"],
+            &["next.config.js", "next.config.mjs", "next.config.ts"],
+        ),
+        (
+            "Remix",
+            &["@remix-run/react", "@remix-run/node"],
+            &["remix.config.js"],
+        ),
+        ("Nuxt", &["nuxt"], &["nuxt.config.ts", "nuxt.config.js"]),
+        ("SvelteKit", &["@sveltejs/kit"], &["svelte.config.js"]),
+        ("Angular", &["@angular/core"], &["angular.json"]),
+        (
+            "Astro",
+            &["astro"],
+            &["astro.config.mjs", "astro.config.ts"],
+        ),
+        (
+            "Gatsby",
+            &["gatsby"],
+            &["gatsby-config.js", "gatsby-config.ts"],
+        ),
+        ("NestJS", &["@nestjs/core"], &["nest-cli.json"]),
+        ("RedwoodJS", &["@redwoodjs/core"], &["redwood.toml"]),
+        (
+            "SolidStart",
+            &["@solidjs/start", "solid-start"],
+            &["app.config.ts"],
+        ),
+        ("Qwik City", &["@builder.io/qwik-city"], &["vite.config.ts"]),
+        ("AdonisJS", &["@adonisjs/core"], &["adonisrc.ts"]),
+        ("Fastify", &["fastify"], &[]),
+        ("Hono", &["hono"], &[]),
+        ("Koa", &["koa"], &[]),
+        ("Hapi", &["@hapi/hapi"], &[]),
+        ("Express", &["express"], &[]),
+        ("React Router", &["react-router", "react-router-dom"], &[]),
+        ("Vue", &["vue"], &[]),
+        ("React", &["react"], &[]),
+        ("Vite", &["vite"], &["vite.config.js", "vite.config.ts"]),
+    ];
+    for (label, dependencies, configs) in rules {
+        if dependencies.iter().any(|name| dependency(name)) || config(configs) {
+            return (*label).to_string();
+        }
+    }
+    if source_contains("express()") {
+        "Express".to_string()
+    } else if source_contains("fastify(") {
+        "Fastify".to_string()
+    } else {
+        "Node.js".to_string()
+    }
+}
+
+fn discover_filesystem_routes(
+    root: &Path,
+    framework: &str,
+    files: &[(PathBuf, String)],
+) -> Vec<RouteCandidate> {
+    let mut routes = Vec::new();
+    for (path, source) in files {
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let text = relative.to_string_lossy().replace('\\', "/");
+        let route = match framework {
+            "Next.js" if text.starts_with("app/") && text.contains("/page.") => Some(
+                text.trim_start_matches("app/")
+                    .rsplit_once('/')
+                    .map(|v| v.0)
+                    .unwrap_or(""),
+            ),
+            "Next.js" if text.starts_with("pages/") && !text.starts_with("pages/api/") => text
+                .strip_prefix("pages/")
+                .and_then(|value| value.rsplit_once('.').map(|v| v.0)),
+            "Nuxt" if text.starts_with("pages/") => text
+                .strip_prefix("pages/")
+                .and_then(|value| value.rsplit_once('.').map(|v| v.0)),
+            "SvelteKit" if text.starts_with("src/routes/") && text.contains("/+page.") => Some(
+                text.trim_start_matches("src/routes/")
+                    .rsplit_once('/')
+                    .map(|v| v.0)
+                    .unwrap_or(""),
+            ),
+            "Astro" if text.starts_with("src/pages/") => text
+                .strip_prefix("src/pages/")
+                .and_then(|value| value.rsplit_once('.').map(|v| v.0)),
+            "Remix" if text.starts_with("app/routes/") => text
+                .strip_prefix("app/routes/")
+                .and_then(|value| value.rsplit_once('.').map(|v| v.0)),
+            _ => None,
+        };
+        if let Some(route) = route {
+            let route = filesystem_route_path(route);
+            routes.push(RouteCandidate {
+                method: "GET".to_string(),
+                path: route,
+                source: RouteSource::Client,
+                capability: None,
+            });
+        }
+        if framework == "NestJS" {
+            routes.extend(discover_decorator_routes(source));
+        }
+    }
+    routes
+}
+
+fn filesystem_route_path(value: &str) -> String {
+    let mut value = value
+        .replace("/index", "")
+        .replace('[', ":")
+        .replace(']', "");
+    if value.contains('.') {
+        value = value.replace('.', "/");
+    }
+    let value = value.trim_matches('/');
+    if value.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", value)
+    }
+}
+
+fn discover_decorator_routes(source: &str) -> Vec<RouteCandidate> {
+    let mut routes = Vec::new();
+    for (decorator, method) in [
+        ("@Get(", "GET"),
+        ("@Post(", "POST"),
+        ("@Put(", "PUT"),
+        ("@Patch(", "PATCH"),
+        ("@Delete(", "DELETE"),
+    ] {
+        for quote in ['\'', '"'] {
+            let needle = format!("{}{}", decorator, quote);
+            let mut rest = source;
+            while let Some(index) = rest.find(&needle) {
+                let after = &rest[index + needle.len()..];
+                if let Some(end) = after.find(quote) {
+                    routes.push(RouteCandidate {
+                        method: method.to_string(),
+                        path: filesystem_route_path(&after[..end]),
+                        source: RouteSource::Client,
+                        capability: None,
+                    });
+                    rest = &after[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    routes
+}
+
+fn discover_python(root: &Path) -> Option<ApplicationCandidate> {
+    let manifests = ["pyproject.toml", "requirements.txt", "Pipfile"];
+    let manifest_path = manifests
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.exists())?;
+    let manifest = fs::read_to_string(&manifest_path).ok()?;
+    let entrypoints = python_entrypoints(root);
+    let files = readable_sources(root, &entrypoints);
+    let framework = detect_python_framework(root, &manifest, &files);
+    let mut routes = files
+        .iter()
+        .flat_map(|(_, source)| discover_python_routes(source))
+        .collect::<Vec<_>>();
+    routes.sort();
+    routes.dedup();
+    let name =
+        if manifest_path.file_name().and_then(|value| value.to_str()) == Some("pyproject.toml") {
+            toml_name(&manifest)
+        } else {
+            root.file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        };
+    Some(ApplicationCandidate {
+        root: root.to_path_buf(),
+        name,
+        language: Some("Python".to_string()),
+        framework: Some(framework.clone()),
+        package_manager: Some(
+            if root.join("poetry.lock").exists() {
+                "poetry"
+            } else if root.join("uv.lock").exists() {
+                "uv"
+            } else if root.join("Pipfile.lock").exists() {
+                "pipenv"
+            } else {
+                "pip"
+            }
+            .to_string(),
+        ),
+        entrypoints,
+        servers: python_servers(&framework, &files),
+        routes,
+        providers: discover_providers(root, &files),
+        existing_auth: discover_existing_auth(root, &manifest, &files),
+        existing_authport: existing_authport(root, &manifest, &files),
+        confidence: DiscoveryConfidence::High,
+    })
+}
+
+fn python_entrypoints(root: &Path) -> Vec<EntrypointCandidate> {
+    [
+        "main.py",
+        "app.py",
+        "server.py",
+        "manage.py",
+        "src/main.py",
+        "src/app.py",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .filter(|path| path.exists())
+    .map(|path| {
+        entrypoint(
+            path,
+            EntrypointKind::PythonScript,
+            DiscoveryConfidence::Medium,
+        )
+    })
+    .collect()
+}
+
+fn detect_python_framework(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> String {
+    let haystack = format!(
+        "{}\n{}",
+        manifest.to_ascii_lowercase(),
+        files
+            .iter()
+            .map(|(_, source)| source.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for (needles, label) in [
+        (
+            &["fastapi", "from fastapi", "import fastapi"][..],
+            "FastAPI",
+        ),
+        (&["django", "django.urls"][..], "Django"),
+        (&["flask", "from flask"][..], "Flask"),
+        (&["starlette", "from starlette"][..], "Starlette"),
+        (&["litestar", "starlite"][..], "Litestar"),
+        (&["sanic", "from sanic"][..], "Sanic"),
+        (&["falcon", "import falcon"][..], "Falcon"),
+        (&["quart", "from quart"][..], "Quart"),
+        (&["tornado", "tornado.web"][..], "Tornado"),
+        (&["bottle", "from bottle"][..], "Bottle"),
+        (&["pyramid", "pyramid.config"][..], "Pyramid"),
+    ] {
+        if needles.iter().any(|needle| haystack.contains(needle)) {
+            return label.to_string();
+        }
+    }
+    if root.join("manage.py").exists() {
+        "Django".to_string()
+    } else {
+        "Python".to_string()
+    }
+}
+
+fn python_servers(framework: &str, files: &[(PathBuf, String)]) -> Vec<ServerCandidate> {
+    let module = files
+        .iter()
+        .find(|(_, source)| source.contains("FastAPI(") || source.contains("Flask("))
+        .and_then(|(path, _)| path.file_stem())
+        .and_then(|value| value.to_str())
+        .unwrap_or("main");
+    let command = match framework {
+        "FastAPI" | "Starlette" | "Litestar" => format!("uvicorn {}:app --reload", module),
+        "Django" => "python manage.py runserver".to_string(),
+        "Flask" | "Quart" => "flask --app app run --debug".to_string(),
+        _ => format!("python {}.py", module),
+    };
+    vec![ServerCandidate {
+        command,
+        source: "framework convention".to_string(),
+        confidence: DiscoveryConfidence::Medium,
+    }]
+}
+
+fn discover_python_routes(source: &str) -> Vec<RouteCandidate> {
+    let mut routes = Vec::new();
+    for (needle, method) in [
+        (".get(\"", "GET"),
+        (".get('", "GET"),
+        (".post(\"", "POST"),
+        (".post('", "POST"),
+        (".put(\"", "PUT"),
+        (".put('", "PUT"),
+        (".patch(\"", "PATCH"),
+        (".patch('", "PATCH"),
+        (".delete(\"", "DELETE"),
+        (".delete('", "DELETE"),
+        ("Route(\"", "GET"),
+        ("Route('", "GET"),
+        ("path(\"", "GET"),
+        ("path('", "GET"),
+        ("re_path(\"", "GET"),
+        ("re_path('", "GET"),
+        ("add_route(\"", "GET"),
+        ("add_route('", "GET"),
+    ] {
+        let quote = needle.chars().last().unwrap();
+        let mut rest = source;
+        while let Some(index) = rest.find(needle) {
+            let after = &rest[index + needle.len()..];
+            if let Some(end) = after.find(quote) {
+                let raw = &after[..end];
+                let path = if raw.starts_with('/') {
+                    raw.to_string()
+                } else if needle.starts_with("path(") {
+                    filesystem_route_path(raw)
+                } else {
+                    String::new()
+                };
+                if !path.is_empty() {
+                    routes.push(RouteCandidate {
+                        method: method.to_string(),
+                        path,
+                        source: RouteSource::Python,
+                        capability: None,
+                    });
+                }
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    routes
 }
 
 fn discover_rust(root: &Path) -> Option<ApplicationCandidate> {
@@ -1400,11 +1789,18 @@ fn discover_rust(root: &Path) -> Option<ApplicationCandidate> {
         });
     }
     let files = readable_sources(root, &entrypoints);
+    let framework = Some(detect_rust_framework(&cargo));
+    let mut routes = files
+        .iter()
+        .flat_map(|(_, source)| discover_rust_routes(source))
+        .collect::<Vec<_>>();
+    routes.sort();
+    routes.dedup();
     Some(ApplicationCandidate {
         root: root.to_path_buf(),
         name: toml_name(&cargo),
         language: Some("Rust".to_string()),
-        framework: None,
+        framework,
         package_manager: Some("cargo".to_string()),
         entrypoints,
         servers: vec![ServerCandidate {
@@ -1412,11 +1808,62 @@ fn discover_rust(root: &Path) -> Option<ApplicationCandidate> {
             source: "Cargo.toml".to_string(),
             confidence: DiscoveryConfidence::Medium,
         }],
-        routes: Vec::new(),
+        routes,
         providers: discover_providers(root, &files),
+        existing_auth: discover_existing_auth(root, &cargo, &files),
         existing_authport: existing_authport(root, &cargo, &files),
         confidence: DiscoveryConfidence::Medium,
     })
+}
+
+fn detect_rust_framework(manifest: &str) -> String {
+    for (dependency, label) in [
+        ("axum", "Axum"),
+        ("actix-web", "Actix Web"),
+        ("rocket", "Rocket"),
+        ("warp", "Warp"),
+        ("poem", "Poem"),
+        ("salvo", "Salvo"),
+        ("tide", "Tide"),
+    ] {
+        if manifest.contains(dependency) {
+            return label.to_string();
+        }
+    }
+    "Rust".to_string()
+}
+
+fn discover_rust_routes(source: &str) -> Vec<RouteCandidate> {
+    let mut routes = Vec::new();
+    for (needle, method) in [
+        ("#[get(\"", "GET"),
+        ("#[post(\"", "POST"),
+        ("#[put(\"", "PUT"),
+        ("#[patch(\"", "PATCH"),
+        ("#[delete(\"", "DELETE"),
+        (".route(\"", "GET"),
+        (".at(\"", "GET"),
+    ] {
+        let mut rest = source;
+        while let Some(index) = rest.find(needle) {
+            let after = &rest[index + needle.len()..];
+            if let Some(end) = after.find('"') {
+                let path = &after[..end];
+                if path.starts_with('/') {
+                    routes.push(RouteCandidate {
+                        method: method.to_string(),
+                        path: path.to_string(),
+                        source: RouteSource::Rust,
+                        capability: None,
+                    });
+                }
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    routes
 }
 
 fn node_entrypoints(root: &Path, package_json: &str) -> Vec<EntrypointCandidate> {
@@ -1435,6 +1882,12 @@ fn node_entrypoints(root: &Path, package_json: &str) -> Vec<EntrypointCandidate>
         "server.js",
         "src/index.ts",
         "src/index.js",
+        "src/main.tsx",
+        "src/main.ts",
+        "src/main.jsx",
+        "src/main.js",
+        "src/index.tsx",
+        "src/index.jsx",
         "index.ts",
         "index.js",
         "app.js",
@@ -1478,7 +1931,55 @@ fn readable_sources(root: &Path, entrypoints: &[EntrypointCandidate]) -> Vec<(Pa
             files.push((path, source));
         }
     }
+    collect_node_sources(root, root, &mut files, 0);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files.dedup_by(|left, right| left.0 == right.0);
     files
+}
+
+fn collect_node_sources(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<(PathBuf, String)>,
+    depth: usize,
+) {
+    if depth > 8 || files.len() >= 512 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if !matches!(
+                name,
+                "node_modules" | ".git" | "dist" | "build" | ".next" | "coverage" | ".authboundry"
+            ) {
+                collect_node_sources(root, &path, files, depth + 1);
+            }
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if !matches!(
+            extension,
+            "js" | "jsx" | "ts" | "tsx" | "html" | "vue" | "svelte" | "astro" | "py" | "rs"
+        ) {
+            continue;
+        }
+        if let Ok(source) = fs::read_to_string(&path) {
+            if source.len() <= 1_000_000 && path.starts_with(root) {
+                files.push((path, source));
+            }
+        }
+    }
 }
 
 fn node_package_manager(root: &Path) -> Option<String> {
@@ -1502,6 +2003,92 @@ fn node_servers(package_json: &str) -> Vec<ServerCandidate> {
             })
         })
         .collect()
+}
+
+fn discover_existing_auth(
+    root: &Path,
+    manifest: &str,
+    files: &[(PathBuf, String)],
+) -> Vec<ExistingAuthSystem> {
+    let manifest = manifest.to_ascii_lowercase();
+    let source = files
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    let mut systems = Vec::new();
+    let products: &[(&str, &str, &[&str])] = &[
+        ("clerk", "Clerk", &["@clerk/", "clerk_backend_api"]),
+        ("auth0", "Auth0", &["@auth0/", "authlib"]),
+        (
+            "firebase",
+            "Firebase Auth",
+            &["firebase/auth", "firebase-admin"],
+        ),
+        (
+            "supabase",
+            "Supabase Auth",
+            &["@supabase/", "supabase.auth"],
+        ),
+        (
+            "next-auth",
+            "Auth.js / NextAuth",
+            &["next-auth", "@auth/core"],
+        ),
+        ("better-auth", "Better Auth", &["better-auth"]),
+        ("lucia", "Lucia", &["\"lucia\""]),
+        ("passport", "Passport", &["passport"]),
+        (
+            "django-auth",
+            "Django authentication",
+            &["django.contrib.auth"],
+        ),
+        (
+            "fastapi-users",
+            "FastAPI Users",
+            &["fastapi-users", "fastapi_users"],
+        ),
+    ];
+    for (id, display_name, needles) in products {
+        let evidence = needles
+            .iter()
+            .filter(|needle| manifest.contains(**needle) || source.contains(**needle))
+            .map(|needle| format!("detected `{}`", needle))
+            .collect::<Vec<_>>();
+        if !evidence.is_empty() {
+            systems.push(ExistingAuthSystem {
+                id: (*id).to_string(),
+                display_name: (*display_name).to_string(),
+                credentials: true,
+                sessions: true,
+                profiles: matches!(
+                    *id,
+                    "firebase" | "supabase" | "django-auth" | "fastapi-users"
+                ),
+                authorization: matches!(*id, "clerk" | "auth0" | "supabase" | "django-auth"),
+                coexistence: AuthCoexistence::Bridge,
+                evidence,
+            });
+        }
+    }
+    let custom_provider = root.join("src/auth/provider.ts").exists()
+        || root.join("src/auth/provider.tsx").exists()
+        || source.contains("derivepasswordhash(")
+        || (source.contains("localstorage") && source.contains("signin("));
+    if custom_provider && systems.is_empty() {
+        systems.push(ExistingAuthSystem {
+            id: "application-auth".to_string(),
+            display_name: "Application-owned authentication".to_string(),
+            credentials: true,
+            sessions: true,
+            profiles: source.contains("users") || source.contains("user"),
+            authorization: source.contains("role") || source.contains("permission"),
+            coexistence: AuthCoexistence::Migrate,
+            evidence: vec!["application auth provider/session implementation detected".to_string()],
+        });
+    }
+    systems
 }
 
 fn existing_authport(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> ExistingAuthPort {
@@ -1587,6 +2174,29 @@ fn discover_js_routes(source: &str) -> Vec<RouteCandidate> {
                 } else {
                     break;
                 }
+            }
+        }
+    }
+    for needle in [
+        "path=\"", "path='", "path: \"", "path: '", "href=\"", "href='",
+    ] {
+        let quote = needle.chars().last().unwrap();
+        let mut rest = source;
+        while let Some(index) = rest.find(needle) {
+            let after = &rest[index + needle.len()..];
+            if let Some(end) = after.find(quote) {
+                let path = &after[..end];
+                if path.starts_with('/') && !path.starts_with("//") {
+                    routes.push(RouteCandidate {
+                        method: "GET".to_string(),
+                        path: path.to_string(),
+                        source: RouteSource::Client,
+                        capability: None,
+                    });
+                }
+                rest = &after[end + 1..];
+            } else {
+                break;
             }
         }
     }
@@ -1829,6 +2439,211 @@ mod tests {
     }
 
     #[test]
+    fn discovers_nested_feltdb_vite_client_routes_and_login_pages() {
+        let dir = temp_dir("feltdb-vite");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"portal","scripts":{"dev":"feltdb dev"},"dependencies":{"feltdb":"latest","vite":"latest"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("src/pages")).unwrap();
+        fs::write(
+            dir.join("src/main.tsx"),
+            r#"<Routes><Route path="/" element={<Home />} /><Route path="/login" element={<Login />} /><a href="/sign-up">Create account</a></Routes>"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/pages/Login.tsx"),
+            "export function Login() {}",
+        )
+        .unwrap();
+
+        let app = discover(&dir).expect("FeltDB Vite app discovered");
+        assert_eq!(app.framework.as_deref(), Some("FeltDB"));
+        assert_eq!(
+            app.entrypoints
+                .first()
+                .and_then(|entry| entry.path.file_name()),
+            Some(std::ffi::OsStr::new("main.tsx"))
+        );
+        for route in ["/", "/login", "/sign-up"] {
+            assert!(
+                app.routes.iter().any(|candidate| candidate.path == route),
+                "missing {route}"
+            );
+        }
+    }
+
+    #[test]
+    fn separates_application_owned_auth_from_profile_data_for_migration() {
+        let dir = temp_dir("existing-application-auth");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"portal","dependencies":{"react":"latest","vite":"latest"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("src/auth")).unwrap();
+        fs::write(
+            dir.join("src/auth/provider.ts"),
+            "const users = []; async function derivePasswordHash() {} function signIn() { localStorage.setItem('session', 'x'); } const role = 'admin';",
+        )
+        .unwrap();
+
+        let app = discover(&dir).unwrap();
+        assert_eq!(app.existing_auth.len(), 1);
+        let auth = &app.existing_auth[0];
+        assert_eq!(auth.display_name, "Application-owned authentication");
+        assert_eq!(auth.coexistence, AuthCoexistence::Migrate);
+        assert!(auth.credentials && auth.sessions && auth.profiles && auth.authorization);
+    }
+
+    #[test]
+    fn recognizes_major_node_framework_families_from_package_evidence() {
+        for (dependency, expected) in [
+            ("next", "Next.js"),
+            ("@remix-run/react", "Remix"),
+            ("nuxt", "Nuxt"),
+            ("@sveltejs/kit", "SvelteKit"),
+            ("@angular/core", "Angular"),
+            ("astro", "Astro"),
+            ("gatsby", "Gatsby"),
+            ("@nestjs/core", "NestJS"),
+            ("fastify", "Fastify"),
+            ("hono", "Hono"),
+            ("koa", "Koa"),
+            ("@hapi/hapi", "Hapi"),
+            ("express", "Express"),
+            ("react-router-dom", "React Router"),
+            ("vue", "Vue"),
+            ("react", "React"),
+            ("vite", "Vite"),
+        ] {
+            let dir = temp_dir(&format!("framework-{}", expected.replace(' ', "-")));
+            fs::write(
+                dir.join("package.json"),
+                format!(
+                    r#"{{"name":"app","dependencies":{{"{}":"latest"}}}}"#,
+                    dependency
+                ),
+            )
+            .unwrap();
+            assert_eq!(discover(&dir).unwrap().framework.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn derives_routes_from_filesystem_router_conventions() {
+        let cases = [
+            ("next", "app/invoices/[id]/page.tsx", "/invoices/:id"),
+            ("nuxt", "pages/invoices/[id].vue", "/invoices/:id"),
+            (
+                "@sveltejs/kit",
+                "src/routes/invoices/[id]/+page.svelte",
+                "/invoices/:id",
+            ),
+            ("astro", "src/pages/invoices/[id].astro", "/invoices/:id"),
+            (
+                "@remix-run/react",
+                "app/routes/invoices.$id.tsx",
+                "/invoices/$id",
+            ),
+        ];
+        for (dependency, file, expected) in cases {
+            let dir = temp_dir(&format!(
+                "filesystem-{}",
+                dependency.replace(['/', '@'], "-")
+            ));
+            fs::write(
+                dir.join("package.json"),
+                format!(
+                    r#"{{"name":"app","dependencies":{{"{}":"latest"}}}}"#,
+                    dependency
+                ),
+            )
+            .unwrap();
+            let path = dir.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "export default function Page() {};").unwrap();
+            let app = discover(&dir).unwrap();
+            assert!(
+                app.routes.iter().any(|route| route.path == expected),
+                "{} missing {}",
+                app.framework.unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_rust_frameworks_and_route_macros() {
+        let dir = temp_dir("rust-axum");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"api\"\n[dependencies]\naxum = \"0.8\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/main.rs"),
+            "Router::new().route(\"/users\", get(users));",
+        )
+        .unwrap();
+        let app = discover(&dir).unwrap();
+        assert_eq!(app.framework.as_deref(), Some("Axum"));
+        assert!(app.routes.iter().any(|route| route.path == "/users"));
+    }
+
+    #[test]
+    fn discovers_fastapi_application_and_decorator_routes() {
+        let dir = temp_dir("python-fastapi");
+        fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nname = \"accounts-api\"\ndependencies = [\"fastapi\", \"uvicorn\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.py"),
+            "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/login')\ndef login(): pass\n@app.post(\"/sessions\")\ndef session(): pass\n",
+        )
+        .unwrap();
+
+        let app = discover(&dir).expect("FastAPI app discovered");
+        assert_eq!(app.language.as_deref(), Some("Python"));
+        assert_eq!(app.framework.as_deref(), Some("FastAPI"));
+        assert_eq!(app.package_manager.as_deref(), Some("pip"));
+        assert_eq!(app.servers[0].command, "uvicorn main:app --reload");
+        assert!(app
+            .routes
+            .iter()
+            .any(|route| route.method == "GET" && route.path == "/login"));
+        assert!(app
+            .routes
+            .iter()
+            .any(|route| route.method == "POST" && route.path == "/sessions"));
+    }
+
+    #[test]
+    fn recognizes_major_python_framework_families() {
+        for (dependency, expected) in [
+            ("django", "Django"),
+            ("flask", "Flask"),
+            ("starlette", "Starlette"),
+            ("litestar", "Litestar"),
+            ("sanic", "Sanic"),
+            ("falcon", "Falcon"),
+            ("quart", "Quart"),
+            ("tornado", "Tornado"),
+            ("bottle", "Bottle"),
+            ("pyramid", "Pyramid"),
+        ] {
+            let dir = temp_dir(&format!("python-framework-{expected}"));
+            fs::write(dir.join("requirements.txt"), format!("{dependency}\n")).unwrap();
+            fs::write(dir.join("app.py"), "# application\n").unwrap();
+            assert_eq!(discover(&dir).unwrap().framework.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn infers_capabilities_and_normalizes_parameters_deterministically() {
         assert_eq!(
             normalize_path("/invoices/{id}"),
@@ -1896,6 +2711,7 @@ mod tests {
                 },
             ],
             providers: Vec::new(),
+            existing_auth: Vec::new(),
             existing_authport: ExistingAuthPort::default(),
             confidence: DiscoveryConfidence::High,
         };
@@ -1943,6 +2759,7 @@ mod tests {
             servers: Vec::new(),
             routes,
             providers: Vec::new(),
+            existing_auth: Vec::new(),
             existing_authport: ExistingAuthPort::default(),
             confidence: DiscoveryConfidence::High,
         }

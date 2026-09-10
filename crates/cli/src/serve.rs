@@ -31,6 +31,7 @@ pub struct ServeOptions {
     pub grants: Vec<Grant>,
     pub upstream: Option<String>,
     pub public_paths: Vec<String>,
+    pub public_exact: Vec<String>,
     pub required: Vec<(String, String)>,
     pub proxy_secret: String,
     pub studio_page: Option<String>,
@@ -47,6 +48,7 @@ impl Default for ServeOptions {
             grants: Vec::new(),
             upstream: None,
             public_paths: Vec::new(),
+            public_exact: Vec::new(),
             required: Vec::new(),
             proxy_secret: "authboundry-development-secret".to_string(),
             studio_page: None,
@@ -259,6 +261,9 @@ pub(crate) fn application_policy(options: &ServeOptions) -> RoutePolicy {
     ];
 
     let mut policy = RoutePolicy::new();
+    for path in &options.public_exact {
+        policy = policy.public(&[Method::Get, Method::Head], path);
+    }
     for path in &options.public_paths {
         policy = policy.rule(&all, PathPattern::Prefix(path.clone()), Requirement::Public);
     }
