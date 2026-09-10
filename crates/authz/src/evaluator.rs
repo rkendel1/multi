@@ -462,9 +462,7 @@ fn delegation_scope_matches(
         if key == "tenant" || key == "tenant_id" {
             return matches_tenant(expected, &resource.tenant_id.0);
         }
-        resource_attributes
-            .and_then(|attributes| attributes.values.get(key))
-            == Some(expected)
+        resource_attributes.and_then(|attributes| attributes.values.get(key)) == Some(expected)
     })
 }
 

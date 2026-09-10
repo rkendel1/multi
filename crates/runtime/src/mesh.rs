@@ -520,12 +520,12 @@ impl AuthMesh {
         let delegator_envelope =
             evaluate_with_delegations(&policy, &delegator, &tenant, &delegator_delegations, now)
                 .map_err(|err| {
-                AuthError::new(
-                    AuthLifecycleStage::PolicyEvaluation,
-                    err.message,
-                    DenialReason::PolicyNotFound,
-                )
-            })?;
+                    AuthError::new(
+                        AuthLifecycleStage::PolicyEvaluation,
+                        err.message,
+                        DenialReason::PolicyNotFound,
+                    )
+                })?;
 
         let mut chain = Vec::new();
         for capability in &request.capabilities {
@@ -548,7 +548,10 @@ impl AuthMesh {
                     .ok_or_else(|| {
                         AuthError::new(
                             AuthLifecycleStage::DelegationManagement,
-                            format!("delegator `{}` does not hold `{}`", request.delegator, capability),
+                            format!(
+                                "delegator `{}` does not hold `{}`",
+                                request.delegator, capability
+                            ),
                             DenialReason::DelegationExceedsAuthority,
                         )
                     })?;
@@ -659,6 +662,15 @@ impl AuthMesh {
         now: i64,
     ) -> Result<(), AuthError> {
         self.set_agent_state(tenant_id, agent, AgentState::Revoked, now)
+    }
+
+    pub fn retire_agent(
+        &self,
+        tenant_id: &str,
+        agent: &PrincipalId,
+        now: i64,
+    ) -> Result<(), AuthError> {
+        self.set_agent_state(tenant_id, agent, AgentState::Retired, now)
     }
 
     fn set_agent_state(

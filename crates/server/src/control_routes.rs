@@ -7,13 +7,17 @@ use appport_auth_mesh_boundary::{
     ProposalSource, ProposalStatus, RouteId, RouteProtection as LiveRouteProtection,
     StoredProposal,
 };
-use appport_auth_mesh_contract::PolicyId;
+use appport_auth_mesh_contract::{
+    AgentState, Claims, ContractVersion, DelegationId, PolicyId, Principal, PrincipalId,
+    PrincipalKind, ResourceScope,
+};
 use appport_auth_mesh_discovery::{
     propose_authority, render_drift_json, render_proposal_json, render_reconciliation_json,
     ApplicationCandidate, AuthorityProposal, AuthorityReconciler, DiscoveryConfidence,
     ExistingAuthPort, ProposalHistoryItem, ProposalReviewStatus, RecommendationAction,
     ReconciliationResult,
 };
+use appport_auth_mesh_runtime::DelegationRequest;
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +71,45 @@ pub fn handle_control_route(
             Some(authorization_decision(runtime, path))
         }
         ("GET", "/_authport/providers") => Some(providers(runtime)),
+        ("GET", "/_authport/agents") => Some(agents(runtime, request)),
+        ("POST", "/_authport/agents") => Some(create_agent(runtime, request)),
+        _ if method == "GET" && path.starts_with("/_authport/agents/") => {
+            Some(agent(runtime, path, request))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/agents/")
+            && path.ends_with("/suspend") =>
+        {
+            Some(set_agent_state(
+                runtime,
+                path,
+                request,
+                AgentState::Suspended,
+            ))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/agents/")
+            && path.ends_with("/revoke") =>
+        {
+            Some(set_agent_state(runtime, path, request, AgentState::Revoked))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/agents/")
+            && path.ends_with("/retire") =>
+        {
+            Some(set_agent_state(runtime, path, request, AgentState::Retired))
+        }
+        ("GET", "/_authport/delegations") => Some(delegations(runtime, request)),
+        ("POST", "/_authport/delegations") => Some(create_delegation(runtime, request)),
+        _ if method == "GET" && path.starts_with("/_authport/delegations/") => {
+            Some(delegation(runtime, path, request))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/delegations/")
+            && path.ends_with("/revoke") =>
+        {
+            Some(revoke_delegation(runtime, path, request))
+        }
         ("POST", "/_authport/propose") => Some(propose(runtime, request)),
         ("POST", "/_authport/approve") => Some(approve(runtime, request)),
         ("POST", "/_authport/apply") => Some(apply(runtime, request)),
@@ -723,11 +766,17 @@ fn decision_json(decision: &AuthorizationEvidence) -> JsonValue {
 
 fn authority_source_json(decision: &AuthorizationEvidence) -> JsonValue {
     match (
-        decision.authority.as_ref().map(|authority| authority.as_str()),
+        decision
+            .authority
+            .as_ref()
+            .map(|authority| authority.as_str()),
         decision.delegation_chain.last(),
     ) {
         (Some("delegated"), Some(delegation_id)) => JsonValue::Object(vec![
-            ("type".to_string(), JsonValue::String("delegation".to_string())),
+            (
+                "type".to_string(),
+                JsonValue::String("delegation".to_string()),
+            ),
             (
                 "id".to_string(),
                 JsonValue::String(delegation_id.to_string()),
@@ -815,6 +864,360 @@ fn providers(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
 
     let json = JsonValue::Array(providers_json);
     HttpResponse::ok_json(json)
+}
+
+fn agents(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let agents = runtime
+        .mesh()
+        .stores()
+        .principals
+        .list_principals(&tenant)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|principal| principal.kind == PrincipalKind::Agent)
+        .map(|principal| agent_json(&principal))
+        .collect();
+    HttpResponse::ok_json(JsonValue::Object(vec![(
+        "agents".to_string(),
+        JsonValue::Array(agents),
+    )]))
+}
+
+fn agent(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let Some(id) = path_id(path, "/_authport/agents/") else {
+        return HttpResponse::bad_request("missing agent id");
+    };
+    match runtime
+        .mesh()
+        .stores()
+        .principals
+        .get_principal(&tenant, &PrincipalId(id.to_string()))
+    {
+        Ok(Some(principal)) if principal.kind == PrincipalKind::Agent => {
+            HttpResponse::ok_json(agent_json(&principal))
+        }
+        Ok(_) => HttpResponse::denied(404, "not_found", "agent not found"),
+        Err(err) => HttpResponse::bad_request(&err.message),
+    }
+}
+
+fn create_agent(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let body = String::from_utf8_lossy(&request.body);
+    let name = extract_quoted_field(&body, "name").unwrap_or_else(|| "agent".to_string());
+    let id = extract_quoted_field(&body, "id")
+        .unwrap_or_else(|| format!("agent:{}", name.replace(' ', "-")));
+    let principal = Principal::agent(
+        PrincipalId(id),
+        tenant.tenant_id.clone(),
+        Claims {
+            values: Default::default(),
+        },
+        ContractVersion { major: 1, minor: 0 },
+        AgentState::Active,
+    );
+    match runtime
+        .mesh()
+        .stores()
+        .principals
+        .put_principal(principal.clone())
+    {
+        Ok(()) => HttpResponse::ok_json(agent_json(&principal)),
+        Err(err) => HttpResponse::bad_request(&err.message),
+    }
+}
+
+fn set_agent_state(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+    state: AgentState,
+) -> HttpResponse {
+    let tenant_id = match request_value(request, "tenant") {
+        Some(tenant) => tenant,
+        None => return HttpResponse::bad_request("missing tenant"),
+    };
+    let Some(id) = path_id(path, "/_authport/agents/") else {
+        return HttpResponse::bad_request("missing agent id");
+    };
+    let agent_id = id
+        .trim_end_matches("/suspend")
+        .trim_end_matches("/revoke")
+        .trim_end_matches("/retire");
+    let result = match state {
+        AgentState::Suspended => runtime.mesh().suspend_agent(
+            &tenant_id,
+            &PrincipalId(agent_id.to_string()),
+            runtime.now(),
+        ),
+        AgentState::Revoked => runtime.mesh().revoke_agent(
+            &tenant_id,
+            &PrincipalId(agent_id.to_string()),
+            runtime.now(),
+        ),
+        AgentState::Retired => runtime.mesh().retire_agent(
+            &tenant_id,
+            &PrincipalId(agent_id.to_string()),
+            runtime.now(),
+        ),
+        _ => Ok(()),
+    };
+    match result {
+        Ok(()) => HttpResponse::ok_json(JsonValue::Object(vec![
+            ("id".to_string(), JsonValue::String(agent_id.to_string())),
+            (
+                "status".to_string(),
+                JsonValue::String(agent_state(&state).to_string()),
+            ),
+        ])),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn delegations(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let Some(delegate) = request_value(request, "delegate") else {
+        return HttpResponse::bad_request("missing delegate");
+    };
+    let delegations = runtime
+        .mesh()
+        .delegations_for(&tenant, &PrincipalId(delegate))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|delegation| delegation_json(&delegation))
+        .collect();
+    HttpResponse::ok_json(JsonValue::Object(vec![(
+        "delegations".to_string(),
+        JsonValue::Array(delegations),
+    )]))
+}
+
+fn delegation(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let Some(id) = path_id(path, "/_authport/delegations/") else {
+        return HttpResponse::bad_request("missing delegation id");
+    };
+    match runtime
+        .mesh()
+        .stores()
+        .delegations
+        .get_delegation(&tenant, &DelegationId(id.to_string()))
+    {
+        Ok(Some(delegation)) => HttpResponse::ok_json(delegation_json(&delegation)),
+        Ok(None) => HttpResponse::denied(404, "not_found", "delegation not found"),
+        Err(err) => HttpResponse::bad_request(&err.message),
+    }
+}
+
+fn create_delegation(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let body = String::from_utf8_lossy(&request.body);
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(id) = extract_quoted_field(&body, "id") else {
+        return HttpResponse::bad_request("missing id");
+    };
+    let Some(delegator) = extract_quoted_field(&body, "delegator") else {
+        return HttpResponse::bad_request("missing delegator");
+    };
+    let Some(delegate) = extract_quoted_field(&body, "delegate") else {
+        return HttpResponse::bad_request("missing delegate");
+    };
+    let Some(capability) = extract_quoted_field(&body, "capability") else {
+        return HttpResponse::bad_request("missing capability");
+    };
+    let expires_at = extract_number_field(&body, "expires_at");
+    match runtime.mesh().delegate(
+        &tenant,
+        DelegationRequest {
+            id: DelegationId(id),
+            delegator: PrincipalId(delegator),
+            delegate: PrincipalId(delegate),
+            capabilities: vec![capability.into()],
+            resource_scope: ResourceScope::any(),
+            issued_at: runtime.now(),
+            expires_at,
+        },
+        runtime.now(),
+    ) {
+        Ok(delegation) => HttpResponse::ok_json(delegation_json(&delegation)),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn revoke_delegation(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(id) = path_id(path, "/_authport/delegations/") else {
+        return HttpResponse::bad_request("missing delegation id");
+    };
+    let delegation_id = id.trim_end_matches("/revoke");
+    match runtime.mesh().revoke_delegation(
+        &tenant,
+        &DelegationId(delegation_id.to_string()),
+        runtime.now(),
+    ) {
+        Ok(()) => HttpResponse::ok_json(JsonValue::Object(vec![
+            (
+                "id".to_string(),
+                JsonValue::String(delegation_id.to_string()),
+            ),
+            (
+                "status".to_string(),
+                JsonValue::String("revoked".to_string()),
+            ),
+        ])),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn tenant_from_request(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    request: &HttpRequest,
+) -> Result<appport_auth_mesh_contract::TenantContext, HttpResponse> {
+    let tenant_id = request_value(request, "tenant")
+        .ok_or_else(|| HttpResponse::bad_request("missing tenant"))?;
+    runtime.mesh().tenant(&tenant_id).map_err(|err| {
+        HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        )
+    })
+}
+
+fn request_value(request: &HttpRequest, field: &str) -> Option<String> {
+    request.query.get(field).cloned().or_else(|| {
+        let body = String::from_utf8_lossy(&request.body);
+        extract_quoted_field(&body, field)
+    })
+}
+
+fn path_id<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix).filter(|id| !id.is_empty())
+}
+
+fn agent_json(principal: &Principal) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "id".to_string(),
+            JsonValue::String(principal.id.to_string()),
+        ),
+        ("kind".to_string(), JsonValue::String("agent".to_string())),
+        (
+            "tenant".to_string(),
+            JsonValue::String(principal.tenant_id.to_string()),
+        ),
+        (
+            "status".to_string(),
+            JsonValue::String(
+                principal
+                    .agent_state
+                    .as_ref()
+                    .map(agent_state)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+        ),
+    ])
+}
+
+fn delegation_json(delegation: &appport_auth_mesh_contract::Delegation) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "id".to_string(),
+            JsonValue::String(delegation.id.to_string()),
+        ),
+        (
+            "delegator".to_string(),
+            JsonValue::String(delegation.delegator.to_string()),
+        ),
+        (
+            "delegate".to_string(),
+            JsonValue::String(delegation.delegate.to_string()),
+        ),
+        (
+            "expires_at".to_string(),
+            delegation
+                .expires_at
+                .map(|expires_at| JsonValue::Number(expires_at as f64))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "status".to_string(),
+            JsonValue::String(if delegation.revoked_at.is_some() {
+                "revoked".to_string()
+            } else {
+                "active".to_string()
+            }),
+        ),
+    ])
+}
+
+fn agent_state(state: &AgentState) -> &'static str {
+    match state {
+        AgentState::Created => "created",
+        AgentState::Active => "active",
+        AgentState::Suspended => "suspended",
+        AgentState::Revoked => "revoked",
+        AgentState::Retired => "retired",
+    }
+}
+
+fn extract_number_field(json: &str, field: &str) -> Option<i64> {
+    let pattern = format!("\"{}\":", field);
+    let start = json.find(&pattern)? + pattern.len();
+    let rest = json[start..].trim_start();
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+        .collect::<String>();
+    digits.parse().ok()
 }
 
 fn propose(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {

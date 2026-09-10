@@ -564,7 +564,9 @@ impl AuthorizationDecision {
                 DenialReason::ExpiredDelegation => DecisionReason::DelegationExpired,
                 DenialReason::RevokedDelegation => DecisionReason::DelegationRevoked,
                 DenialReason::DelegationScopeDenied => DecisionReason::DelegationScopeDenied,
-                DenialReason::DelegationExceedsAuthority => DecisionReason::DelegationExceedsAuthority,
+                DenialReason::DelegationExceedsAuthority => {
+                    DecisionReason::DelegationExceedsAuthority
+                }
                 DenialReason::AgentRevoked => DecisionReason::AgentRevoked,
                 DenialReason::AgentSuspended => DecisionReason::AgentSuspended,
                 DenialReason::InvalidDelegation

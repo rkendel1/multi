@@ -89,7 +89,11 @@ impl Delegation {
             DelegationStatus::Revoked
         } else if self.issued_at > now {
             DelegationStatus::Pending
-        } else if self.expires_at.map(|expires_at| now >= expires_at).unwrap_or(false) {
+        } else if self
+            .expires_at
+            .map(|expires_at| now >= expires_at)
+            .unwrap_or(false)
+        {
             DelegationStatus::Expired
         } else {
             DelegationStatus::Active

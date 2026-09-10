@@ -45,7 +45,10 @@ impl AgentCredential {
             && agent.tenant_id == self.tenant_id
             && agent.id == self.agent
             && agent.agent_state == Some(AgentState::Active)
-            && self.revoked_at.map(|revoked_at| now < revoked_at).unwrap_or(true)
+            && self
+                .revoked_at
+                .map(|revoked_at| now < revoked_at)
+                .unwrap_or(true)
     }
 }
 

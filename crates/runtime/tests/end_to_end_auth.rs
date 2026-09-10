@@ -486,8 +486,7 @@ fn delegated_authority_is_limited_by_resource_scope() {
         .with_tenant("tenant-a")
         .with_value("department", ClaimValue::Enum("sales".to_string()));
     assert_denies(
-        &mesh
-            .authorize_request(&context, &request, Some(&sales_invoice), NOW + 10),
+        &mesh.authorize_request(&context, &request, Some(&sales_invoice), NOW + 10),
         DenialReason::DelegationScopeDenied,
     );
 }
@@ -567,9 +566,16 @@ fn chained_delegation_preserves_attenuated_scope_and_evidence() {
     let grant = decision.grant().unwrap();
     assert_eq!(
         grant.delegation_chain,
-        vec![parent.id, DelegationId("delegation-invoice-agent".to_string())]
+        vec![
+            parent.id,
+            DelegationId("delegation-invoice-agent".to_string())
+        ]
     );
     assert_eq!(grant.principal_id, invoice_agent.principal().id);
+    let evidence = mesh.recent_decisions().last().cloned().unwrap();
+    assert_eq!(evidence.decision.as_str(), "allow");
+    assert_eq!(evidence.delegation_chain, grant.delegation_chain);
+    assert_eq!(evidence.delegated_by, Some(manager.principal().id.clone()));
 }
 
 #[test]
@@ -1095,6 +1101,6 @@ fn a_delegation_belongs_to_one_tenant() {
     };
     assert_denies(
         &mesh.authorize(&smuggled, &capability("invoice.create"), NOW + 10),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
 }
