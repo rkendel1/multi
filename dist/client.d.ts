@@ -15,6 +15,8 @@ export interface AuthBoundryState { loading: boolean; auth: AuthProjection }
 export interface AuthBoundryOptions {
   baseUrl?: string;
   fetch?: typeof fetch;
+  tenant?: string;
+  connector?: string;
 }
 export interface AuthBoundryClient {
   readonly state: AuthBoundryState;

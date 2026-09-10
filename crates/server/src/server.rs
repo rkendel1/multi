@@ -530,6 +530,7 @@ fn percent_encode_path(value: &str) -> String {
 pub fn status_for(reason: &DenialReason) -> u16 {
     match reason {
         DenialReason::MissingCredential
+        | DenialReason::UnknownPrincipal
         | DenialReason::InvalidSession
         | DenialReason::ExpiredSession
         | DenialReason::RevokedSession => 401,

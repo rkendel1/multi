@@ -1,0 +1,8 @@
+import type { MailMessage, MailTransport } from "@mailerport/core";
+export { MailPortError, ERROR_CODES } from "@mailerport/core";
+export interface SendOptions { identity:string; to:string|string[]; cc?:string|string[]; bcc?:string|string[]; reply_to?:string|string[]; subject?:string; text?:string; html?:string; variables?:Record<string,unknown>; metadata?:Record<string,unknown>; idempotencyKey?:string; tenantId?:string }
+export interface MailFilters { to?:string; subject?:string; template?:string|null; status?:string; testRunId?:string }
+export interface MailPort { transportName:string; send(options:SendOptions):Promise<MailMessage>; send(template:string,options:SendOptions):Promise<MailMessage>; get(id:string):Promise<MailMessage|null>|MailMessage|null; list(filters?:MailFilters):Promise<MailMessage[]>|MailMessage[]; test:{list(filters?:MailFilters):Promise<MailMessage[]>|MailMessage[];get(id:string):Promise<MailMessage|null>|MailMessage|null;clear(filters?:MailFilters):Promise<void>|void;waitFor(filters?:MailFilters&{timeoutMs?:number;intervalMs?:number}):Promise<MailMessage|null>};close():Promise<void>|void }
+export interface MailPortConfig { applicationId?:string; transport?:"remote"|"local"|"memory"|MailTransport; remote?:{baseUrl?:string;apiKey?:string}; identities?:Record<string,string>; templates?:Record<string,{subject?:string;text?:string;html?:string}>; testEndpointsEnabled?:boolean; environment?:Record<string,string|undefined> }
+export function createMailPort(config?:MailPortConfig):MailPort;
+export function createRemoteMailPortClient(config:{baseUrl:string;apiKey?:string;testEndpointsEnabled?:boolean}):MailPort;

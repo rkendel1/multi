@@ -146,6 +146,7 @@ fn denials_carry_a_status_and_a_reason() {
     assert_eq!(status_for(&DenialReason::ExpiredSession), 401);
     assert_eq!(status_for(&DenialReason::RevokedSession), 401);
     assert_eq!(status_for(&DenialReason::InvalidSession), 401);
+    assert_eq!(status_for(&DenialReason::UnknownPrincipal), 401);
     assert_eq!(status_for(&DenialReason::CapabilityNotGranted), 403);
     assert_eq!(status_for(&DenialReason::TenantMismatch), 403);
     assert_eq!(status_for(&DenialReason::AgentRevoked), 403);

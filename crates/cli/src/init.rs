@@ -696,7 +696,7 @@ fn react_integration_changes(
 import React from 'react';
 import { createAuthBoundryReact } from '@authboundry/core/react';
 
-const integration = createAuthBoundryReact(React);
+const integration = createAuthBoundryReact(React, { tenant: 'development', connector: 'local' });
 export const useAuthBoundry = integration.useAuth;
 export const authBoundryClient = integration.client;
 
@@ -709,7 +709,7 @@ export function AuthBoundryProvider({ children }: { children: React.ReactNode })
 import React from 'react';
 import { createAuthBoundryReact } from '@authboundry/core/react';
 
-const integration = createAuthBoundryReact(React);
+const integration = createAuthBoundryReact(React, { tenant: 'development', connector: 'local' });
 export const useAuthBoundry = integration.useAuth;
 export const authBoundryClient = integration.client;
 
@@ -756,13 +756,13 @@ fn package_dependency_change(root: &Path) -> Result<Option<FileChange>, CliError
     let after = if before.contains("\"dependencies\": {") {
         before.replacen(
             "\"dependencies\": {",
-            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.11.0\",",
+            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.12.0\",",
             1,
         )
     } else {
         before.replacen(
             '{',
-            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.11.0\"},",
+            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.12.0\"},",
             1,
         )
     };

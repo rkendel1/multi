@@ -69,9 +69,15 @@
     }
 
     async function signIn(credentials) {
+      const supplied = credentials || {};
+      const payload = {
+        ...(settings.tenant ? { tenant: settings.tenant } : {}),
+        ...(settings.connector ? { connector: settings.connector } : {}),
+        ...supplied,
+      };
       const { ok, status, body } = await call("/auth/sign-in", {
         method: "POST",
-        body: JSON.stringify(credentials || {}),
+        body: JSON.stringify(payload),
       });
       if (!ok) {
         publish({ loading: false, auth: ANONYMOUS });

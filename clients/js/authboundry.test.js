@@ -83,6 +83,25 @@ test("sign-in failures leave the client anonymous", async () => {
   assert.equal(auth.auth.authenticated, false);
 });
 
+test("sign-in applies configured bridge defaults without overriding supplied credentials", async () => {
+  let submitted;
+  const client = createAuthBoundry({
+    tenant: "development",
+    connector: "local",
+    fetch: async (_url, init) => {
+      submitted = JSON.parse(init.body);
+      return { ok: false, status: 401, text: async () => '{"reason":"unknown_principal"}' };
+    },
+  });
+  await assert.rejects(() => client.signIn({ username: "admin", password: "secret" }));
+  assert.deepEqual(submitted, {
+    tenant: "development",
+    connector: "local",
+    username: "admin",
+    password: "secret",
+  });
+});
+
 test("subscribers see every authority change", async () => {
   const { fetchImpl } = stubFetch({
     "GET /auth/session": { status: 200, body: ALICE },
