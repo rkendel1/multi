@@ -102,6 +102,19 @@ impl StudioApplication {
             *proxy = None;
         }
     }
+
+    fn sync(&self, upstream: Option<&str>) {
+        match upstream {
+            Some(value) if init::upstream_reachable(value) => {
+                if let Ok(proxy) = build_proxy(value) {
+                    if let Ok(mut current) = self.proxy.write() {
+                        *current = Some(proxy);
+                    }
+                }
+            }
+            _ => self.detach(),
+        }
+    }
 }
 
 fn build_proxy(upstream: &str) -> Result<UpstreamProxy, CliError> {
@@ -185,6 +198,8 @@ impl RepositoryStudio {
 
 impl StudioController for RepositoryStudio {
     fn page(&self) -> Option<String> {
+        let upstream = init::adoption_upstream(&self.root);
+        self.binding.sync(upstream.as_deref());
         Some(render(&self.root, &self.surface))
     }
 
@@ -402,9 +417,9 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
 const dialog=document.getElementById('attach-dialog'), status=document.getElementById('attach-status'), input=document.getElementById('upstream'); let proposal=null;
 document.getElementById('studio-origin').textContent=location.origin;
 const post=async(path,body={{}})=>{{const response=await fetch(path,{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(body)}});const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.reason||'Request failed');return data}};
-document.getElementById('open-attachment').onclick=()=>dialog.showModal();
+document.getElementById('open-attachment')?.addEventListener('click',()=>dialog.showModal());
 document.getElementById('discover').onclick=async()=>{{status.textContent='Discovering reachable runtimes…';try{{const data=await post('/_authboundry/application/discover');if(data.reachable){{input.value=data.upstream;status.textContent='✓ Application reachable';status.className='ok'}}else{{status.textContent='No running application was detected.';status.className='warn'}}}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
-document.getElementById('test-connection').onclick=async()=>{{status.textContent='Testing connection…';try{{const data=await post('/_authboundry/application/discover',{{upstream:input.value}});if(!data.reachable)throw new Error('Application not reachable. Start the application or change the upstream.');status.textContent='✓ Application reachable (not attached yet)';status.className='ok'}}}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
+document.getElementById('test-connection').onclick=async()=>{{status.textContent='Testing connection…';try{{const data=await post('/_authboundry/application/discover',{{upstream:input.value}});if(!data.reachable)throw new Error('Application not reachable. Start the application or change the upstream.');status.textContent='✓ Application reachable (not attached yet)';status.className='ok'}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
 document.getElementById('preview').onclick=async()=>{{status.textContent='Validating attachment…';try{{proposal=await post('/_authboundry/application/attachment/preview',{{upstream:input.value}});document.getElementById('preview-text').textContent=proposal.preview;document.getElementById('attach-step').hidden=true;document.getElementById('approval').hidden=false}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
 document.getElementById('cancel').onclick=()=>{{proposal=null;document.getElementById('approval').hidden=true;document.getElementById('attach-step').hidden=false;status.textContent='Attachment cancelled. No changes were made.'}};
 document.getElementById('approve').onclick=async()=>{{try{{await post('/_authboundry/application/attachment/apply',{{proposal_id:proposal.proposal_id}});await fetch('/__authboundry_attachment_probe').catch(()=>{{}});const result=await post('/_authboundry/application/attachment/test');status.textContent=result.request_forwarded?'✓ Attachment configured\n✓ Request crossed AuthBoundry\nBasic attachment verified.\nProtected-route verification unavailable until routes are discovered.':'Attachment configured; boundary request was not verified.';setTimeout(()=>location.reload(),900)}}catch(error){{document.getElementById('approval').hidden=true;document.getElementById('attach-step').hidden=false;status.textContent='Attachment failed. No partial attachment was recorded.\n'+error.message;status.className='warn'}}}};
@@ -515,7 +530,7 @@ mod tests {
         let surface =
             AuthSurface::derive(&parse_auth_block("use auth { providers = [local] }\n").unwrap());
         let binding = Arc::new(StudioApplication::new(None).unwrap());
-        let controller = RepositoryStudio::new(root.clone(), binding, surface);
+        let controller = RepositoryStudio::new(root.clone(), binding.clone(), surface);
         let request = |path: &str, body: String| {
             HttpRequest::assemble(
                 Method::Post,
@@ -562,6 +577,38 @@ mod tests {
         assert_eq!(detached.status, 200);
         assert!(init::adoption_upstream(&root).is_none());
         assert!(controller.page().unwrap().contains("⚠ Not attached"));
+
+        // CLI and Studio may be separate processes. A CLI attachment must be
+        // adopted by the already-running Studio on its next request.
+        let external = init::plan_attachment(&root, &upstream).unwrap();
+        init::apply_attachment(&external).unwrap();
+        controller.page().unwrap();
+        assert!(binding.proxy.read().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rendered_studio_javascript_is_valid() {
+        let root =
+            std::env::temp_dir().join(format!("authboundry-studio-js-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".authboundry")).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"name":"sample-app"}"#).unwrap();
+        std::fs::write(root.join(".authboundry/adoption.json"), r#"{"application":"sample-app","mode":"standalone","authority":"configured","attachment":"none","upstream":"","routes":0}"#).unwrap();
+        let config = parse_auth_block("use auth { providers = [local] }\n").unwrap();
+        let html = render(&root, &AuthSurface::derive(&config));
+        let script = html
+            .split_once("<script>")
+            .unwrap()
+            .1
+            .split_once("</script>")
+            .unwrap()
+            .0;
+        let status = Command::new("node")
+            .args(["-e", "new Function(process.argv[1])", script])
+            .status()
+            .unwrap();
+        assert!(status.success(), "rendered Studio JavaScript must compile");
         let _ = std::fs::remove_dir_all(root);
     }
 }
