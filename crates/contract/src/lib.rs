@@ -1,3 +1,4 @@
+pub mod authentication;
 pub mod claims;
 pub mod delegation;
 pub mod identity;
@@ -7,6 +8,12 @@ pub mod run;
 pub mod tenant;
 pub mod versioning;
 
+pub use authentication::{
+    AuthExtension, AuthPortIdentityProfile, AuthenticationAssurance, AuthenticationCeremony,
+    AuthenticationCeremonyId, AuthenticationCeremonyState, AuthenticationMethod,
+    AuthenticationResult, Device, DeviceId, DeviceStatus, DeviceType, RecoveryCeremony,
+    RecoveryMethod,
+};
 pub use claims::ClaimValue;
 pub use delegation::{Delegation, DelegationStatus, ResourceScope};
 pub use identity::{Claims, Identity};

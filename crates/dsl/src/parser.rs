@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::model::{
-    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, PasswordPolicy,
+    AuthConfig, AuthExperience, AuthExperienceCapability, AuthUiConfig, AuthUiMode, ClaimDef,
+    ClaimKind, ExperienceRenderer, ExperienceState, IsolationMode, PasswordPolicy,
     PolicyClaimCondition, PolicyDef, StorageConfig, UiScreen, UiScreenOverride, UiTheme,
 };
 
@@ -90,6 +91,7 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             "policy" => config.policies = parse_policies(&value)?,
             "password" | "password_policy" => config.password_policy = parse_password(&value)?,
             "storage" => config.storage = parse_storage(&value)?,
+            "experience" => config.experience = parse_experience(&value)?,
             "agents" => config.agents = expect_bool(&key, &value)?,
             "ui" => config.ui = parse_ui(&value)?,
             _ => return Err(AuthDslError::new(format!("unknown auth field `{}`", key))),
@@ -513,6 +515,7 @@ fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
                 key
             )));
         }
+
         match key.as_str() {
             "min_length" => policy.min_length = expect_usize(key, value)?,
             "max_length" => policy.max_length = expect_usize(key, value)?,
@@ -542,6 +545,36 @@ fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
         .validate()
         .map_err(|err| AuthDslError::new(err.message))?;
     Ok(policy)
+}
+
+fn parse_experience(value: &Value) -> Result<AuthExperience, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("experience must be a `{ ... }` block")),
+    };
+    let mut experience = AuthExperience::default();
+    let mut seen = HashSet::new();
+    for (key, value) in entries {
+        if !seen.insert(key.clone()) {
+            return Err(AuthDslError::new(format!(
+                "duplicate experience field `{}`",
+                key
+            )));
+        }
+        let capability = AuthExperienceCapability::parse(key)
+            .ok_or_else(|| AuthDslError::new(format!("unknown experience `{}`", key)))?;
+        let state = ExperienceState::parse(expect_scalar(key, value)?).ok_or_else(|| {
+            AuthDslError::new(format!(
+                "experience `{}` must be disabled, enabled, required, admin_only, true, or false",
+                key
+            ))
+        })?;
+        experience.set(capability, state);
+    }
+    experience
+        .validate()
+        .map_err(|err| AuthDslError::new(err.message))?;
+    Ok(experience)
 }
 
 fn expect_usize(key: &str, value: &Value) -> Result<usize, AuthDslError> {
@@ -577,6 +610,13 @@ fn parse_ui(value: &Value) -> Result<AuthUiConfig, AuthDslError> {
             ui.theme = UiTheme {
                 name: expect_scalar(key, entry)?.to_string(),
             };
+            continue;
+        }
+        if key == "mode" {
+            ui.renderer =
+                ExperienceRenderer::parse(expect_scalar(key, entry)?).ok_or_else(|| {
+                    AuthDslError::new("ui mode must be generated, embedded, headless, or custom")
+                })?;
             continue;
         }
 
@@ -818,6 +858,56 @@ use auth {
         assert_eq!(parsed.ui.theme.name, "midnight");
         assert_eq!(parsed.ui.mode_for(UiScreen::Login), AuthUiMode::Custom);
         assert_eq!(parsed.ui.mode_for(UiScreen::Signup), AuthUiMode::Default);
+    }
+
+    #[test]
+    fn parses_canonical_auth_experience_and_renderer_mode() {
+        let parsed = parse_auth_block(
+            r#"
+use auth {
+  providers = [local, google]
+  experience = {
+    sign_in = required
+    passkeys = true
+    mfa = admin_only
+    devices = false
+    profile = enabled
+    recovery = disabled
+  }
+  ui = {
+    mode = "headless"
+  }
+}
+"#,
+        )
+        .expect("experience block should parse");
+
+        assert_eq!(parsed.experience.sign_in, ExperienceState::Required);
+        assert_eq!(parsed.experience.passkeys, ExperienceState::Enabled);
+        assert_eq!(parsed.experience.mfa, ExperienceState::AdminOnly);
+        assert_eq!(
+            parsed.experience.device_management,
+            ExperienceState::Disabled
+        );
+        assert_eq!(parsed.ui.renderer, ExperienceRenderer::Headless);
+    }
+
+    #[test]
+    fn rejects_experience_that_exposes_no_authentication_entrypoint() {
+        let err = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  experience = {
+    sign_in = false
+    sign_up = disabled
+  }
+}
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.message, "experience must expose sign_in or sign_up");
     }
 
     #[test]

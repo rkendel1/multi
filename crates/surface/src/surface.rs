@@ -1,5 +1,6 @@
 use appport_auth_mesh_dsl::{
-    stable_hash, AuthConfig, AuthUiMode, ClaimKind, IsolationMode, UiScreen,
+    stable_hash, AuthConfig, AuthExperienceCapability, AuthUiMode, AuthenticationAssurance,
+    AuthenticationMethod, ClaimKind, ExperienceRenderer, ExperienceState, IsolationMode, UiScreen,
 };
 use appport_auth_mesh_providers::catalog;
 use appport_auth_mesh_providers::{ConnectorKind, ConnectorStatus};
@@ -19,6 +20,7 @@ pub struct AuthSurface {
     pub principals: Vec<PrincipalSurfaceKind>,
     pub agents: Option<AgentSurface>,
     pub ui: AuthUiSurface,
+    pub experiences: Vec<ExperienceSurface>,
     pub multi_tenant: bool,
     pub isolation: IsolationMode,
     pub contract_fingerprint: String,
@@ -30,7 +32,7 @@ impl AuthSurface {
         let features = AuthFeatures::derive(&config);
 
         Self {
-            routes: AuthRoute::derive(&features),
+            routes: AuthRoute::derive(&config, &features),
             boundary: BoundarySurface::derive(),
             providers: config
                 .providers
@@ -48,6 +50,7 @@ impl AuthSurface {
             principals: PrincipalSurfaceKind::derive(&features),
             agents: features.agents.then(AgentSurface::derive),
             ui: AuthUiSurface::derive(&config, &features),
+            experiences: ExperienceSurface::derive_all(&config, &features),
             multi_tenant: config.multi_tenant,
             isolation: config.isolation.clone(),
             contract_fingerprint: config.fingerprint(),
@@ -113,6 +116,9 @@ impl AuthSurface {
         }
         material.push_str(&self.features.canonical_string());
         material.push_str(&self.ui.canonical_string());
+        for experience in &self.experiences {
+            material.push_str(&experience.canonical_string());
+        }
         material.push_str(&self.boundary.canonical_string());
         format!("{:016x}", stable_hash(material.as_bytes()))
     }
@@ -163,69 +169,170 @@ impl AuthRoute {
         self
     }
 
-    fn derive(features: &AuthFeatures) -> Vec<Self> {
+    fn derive(config: &AuthConfig, features: &AuthFeatures) -> Vec<Self> {
         use AuthMethod::{Delete, Get, Post};
 
-        let mut routes = vec![
-            // GET renders the generated UI, POST performs the sign-in.
-            Self::new(
-                "/auth/login",
-                &[Get, Post],
-                AuthOperation::Login,
-                false,
-                AuthFeature::Login,
-            )
-            .with_alias("/auth/sign-in"),
-            Self::new(
+        let mut routes = Vec::new();
+        if config.experience.enabled(AuthExperienceCapability::SignIn) {
+            routes.push(
+                // GET renders the generated UI, POST performs the sign-in.
+                Self::new(
+                    "/auth/login",
+                    &[Get, Post],
+                    AuthOperation::Login,
+                    false,
+                    AuthFeature::Login,
+                )
+                .with_alias("/auth/sign-in"),
+            );
+        }
+        if config.experience.enabled(AuthExperienceCapability::SignUp) {
+            routes.push(Self::new(
                 "/auth/signup",
                 &[Get, Post],
                 AuthOperation::Signup,
                 false,
                 AuthFeature::Signup,
-            ),
-            Self::new(
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::PasswordChange)
+        {
+            routes.push(Self::new(
                 "/auth/password/change",
                 &[Post],
                 AuthOperation::PasswordChange,
                 false,
                 AuthFeature::Signup,
-            ),
-            Self::new(
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::PasswordReset)
+        {
+            routes.push(Self::new(
                 "/auth/password/reset",
                 &[Post],
                 AuthOperation::PasswordReset,
                 false,
                 AuthFeature::Signup,
-            ),
-            Self::new(
-                "/_authport/password-policy",
-                &[Get],
-                AuthOperation::PasswordPolicy,
-                false,
-                AuthFeature::ControlPlane,
-            ),
-            Self::new(
-                "/auth/logout",
-                &[Post],
-                AuthOperation::Logout,
-                true,
-                AuthFeature::Sessions,
-            )
-            .with_alias("/auth/sign-out"),
-            Self::new(
+            ));
+        }
+        routes.extend([Self::new(
+            "/_authport/password-policy",
+            &[Get],
+            AuthOperation::PasswordPolicy,
+            false,
+            AuthFeature::ControlPlane,
+        )]);
+        if config.experience.enabled(AuthExperienceCapability::SignOut) {
+            routes.push(
+                Self::new(
+                    "/auth/logout",
+                    &[Post],
+                    AuthOperation::Logout,
+                    true,
+                    AuthFeature::Sessions,
+                )
+                .with_alias("/auth/sign-out"),
+            );
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::SessionManagement)
+        {
+            routes.push(Self::new(
                 "/auth/session",
                 &[Get, Delete],
                 AuthOperation::Session,
                 true,
                 AuthFeature::Sessions,
-            ),
-            Self::new(
+            ));
+            routes.push(Self::new(
+                "/auth/sessions",
+                &[Get],
+                AuthOperation::Sessions,
+                true,
+                AuthFeature::Sessions,
+            ));
+        }
+        if config.experience.enabled(AuthExperienceCapability::Profile) {
+            routes.push(Self::new(
+                "/auth/profile",
+                &[Get],
+                AuthOperation::Profile,
+                true,
+                AuthFeature::Profile,
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::DeviceManagement)
+        {
+            routes.push(Self::new(
+                "/auth/devices",
+                &[Get],
+                AuthOperation::Devices,
+                true,
+                AuthFeature::Devices,
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::EmailVerification)
+        {
+            routes.push(Self::new(
+                "/auth/email/verification",
+                &[Get, Post],
+                AuthOperation::EmailVerification,
+                true,
+                AuthFeature::EmailVerification,
+            ));
+        }
+        if config.experience.enabled(AuthExperienceCapability::Mfa) {
+            routes.push(Self::new(
+                "/auth/mfa",
+                &[Get, Post],
+                AuthOperation::Mfa,
+                true,
+                AuthFeature::Mfa,
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::Passkeys)
+        {
+            routes.push(Self::new(
+                "/auth/passkeys",
+                &[Get, Post],
+                AuthOperation::Passkeys,
+                true,
+                AuthFeature::Passkeys,
+            ));
+        }
+        if config
+            .experience
+            .enabled(AuthExperienceCapability::Recovery)
+        {
+            routes.push(Self::new(
+                "/auth/recovery",
+                &[Post],
+                AuthOperation::Recovery,
+                false,
+                AuthFeature::Recovery,
+            ));
+        }
+        if config.experience.enabled(AuthExperienceCapability::SignIn) {
+            routes.push(Self::new(
                 "/auth/providers",
                 &[Get],
                 AuthOperation::Providers,
                 false,
                 AuthFeature::Login,
-            ),
+            ));
+        }
+        routes.extend([
             // The boundary's own authority question, asked over HTTP: the
             // answer is derived server-side, never supplied by the caller.
             Self::new(
@@ -256,9 +363,13 @@ impl AuthRoute {
                 true,
                 AuthFeature::ControlPlane,
             ),
-        ];
+        ]);
 
-        if features.account_linking {
+        if features.account_linking
+            && config
+                .experience
+                .enabled(AuthExperienceCapability::AccountLinking)
+        {
             routes.push(Self::new(
                 "/auth/account/links",
                 &[Get, Post, Delete],
@@ -268,7 +379,11 @@ impl AuthRoute {
             ));
         }
 
-        if features.tenants {
+        if features.tenants
+            && config
+                .experience
+                .enabled(AuthExperienceCapability::TenantSwitching)
+        {
             routes.push(Self::new(
                 "/auth/tenant",
                 &[Get],
@@ -344,6 +459,13 @@ pub enum AuthOperation {
     PasswordPolicy,
     Logout,
     Session,
+    Sessions,
+    Profile,
+    Devices,
+    EmailVerification,
+    Mfa,
+    Passkeys,
+    Recovery,
     Providers,
     Authorize,
     Policies,
@@ -366,6 +488,13 @@ impl AuthOperation {
             Self::PasswordPolicy => "password_policy",
             Self::Logout => "logout",
             Self::Session => "session",
+            Self::Sessions => "sessions",
+            Self::Profile => "profile",
+            Self::Devices => "devices",
+            Self::EmailVerification => "email_verification",
+            Self::Mfa => "mfa",
+            Self::Passkeys => "passkeys",
+            Self::Recovery => "recovery",
             Self::Providers => "providers",
             Self::Authorize => "authorize",
             Self::Policies => "policies",
@@ -426,6 +555,12 @@ pub struct AuthFeatures {
     pub sessions: bool,
     pub tenants: bool,
     pub account_linking: bool,
+    pub profile: bool,
+    pub devices: bool,
+    pub email_verification: bool,
+    pub mfa: bool,
+    pub passkeys: bool,
+    pub recovery: bool,
     pub agents: bool,
     pub delegation: bool,
     pub control_plane: bool,
@@ -441,6 +576,20 @@ impl AuthFeatures {
             // Linking only means something once a principal can hold more than
             // one external identity.
             account_linking: config.providers.len() > 1,
+            profile: config.experience.enabled(AuthExperienceCapability::Profile),
+            devices: config
+                .experience
+                .enabled(AuthExperienceCapability::DeviceManagement),
+            email_verification: config
+                .experience
+                .enabled(AuthExperienceCapability::EmailVerification),
+            mfa: config.experience.enabled(AuthExperienceCapability::Mfa),
+            passkeys: config
+                .experience
+                .enabled(AuthExperienceCapability::Passkeys),
+            recovery: config
+                .experience
+                .enabled(AuthExperienceCapability::Recovery),
             agents: config.agents,
             delegation: config.agents,
             control_plane: true,
@@ -454,19 +603,31 @@ impl AuthFeatures {
             AuthFeature::Sessions => self.sessions,
             AuthFeature::Tenants => self.tenants,
             AuthFeature::AccountLinking => self.account_linking,
+            AuthFeature::Profile => self.profile,
+            AuthFeature::Devices => self.devices,
+            AuthFeature::EmailVerification => self.email_verification,
+            AuthFeature::Mfa => self.mfa,
+            AuthFeature::Passkeys => self.passkeys,
+            AuthFeature::Recovery => self.recovery,
             AuthFeature::Agents => self.agents,
             AuthFeature::Delegation => self.delegation,
             AuthFeature::ControlPlane => self.control_plane,
         }
     }
 
-    pub fn all() -> [AuthFeature; 8] {
+    pub fn all() -> [AuthFeature; 14] {
         [
             AuthFeature::Login,
             AuthFeature::Signup,
             AuthFeature::Sessions,
             AuthFeature::Tenants,
             AuthFeature::AccountLinking,
+            AuthFeature::Profile,
+            AuthFeature::Devices,
+            AuthFeature::EmailVerification,
+            AuthFeature::Mfa,
+            AuthFeature::Passkeys,
+            AuthFeature::Recovery,
             AuthFeature::Agents,
             AuthFeature::Delegation,
             AuthFeature::ControlPlane,
@@ -488,6 +649,12 @@ pub enum AuthFeature {
     Sessions,
     Tenants,
     AccountLinking,
+    Profile,
+    Devices,
+    EmailVerification,
+    Mfa,
+    Passkeys,
+    Recovery,
     Agents,
     Delegation,
     ControlPlane,
@@ -501,6 +668,12 @@ impl AuthFeature {
             Self::Sessions => "sessions",
             Self::Tenants => "tenants",
             Self::AccountLinking => "account_linking",
+            Self::Profile => "profile",
+            Self::Devices => "devices",
+            Self::EmailVerification => "email_verification",
+            Self::Mfa => "mfa",
+            Self::Passkeys => "passkeys",
+            Self::Recovery => "recovery",
             Self::Agents => "agents",
             Self::Delegation => "delegation",
             Self::ControlPlane => "control_plane",
@@ -588,9 +761,206 @@ impl AgentOperation {
     }
 }
 
+/// Canonical registry entry shared by runtime, generated UI, embedded clients,
+/// headless APIs, Studio and docs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExperienceSurface {
+    pub id: AuthExperienceCapability,
+    pub purpose: String,
+    pub required_capabilities: Vec<AuthExperienceCapability>,
+    pub authentication_methods: Vec<AuthenticationMethod>,
+    pub required_assurance: AuthenticationAssurance,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub state: ExperienceState,
+    pub operation: Option<AuthOperation>,
+}
+
+impl ExperienceSurface {
+    fn derive_all(config: &AuthConfig, features: &AuthFeatures) -> Vec<Self> {
+        AuthExperienceCapability::all()
+            .into_iter()
+            .filter(|capability| match capability {
+                AuthExperienceCapability::TenantSwitching => features.tenants,
+                AuthExperienceCapability::AccountLinking => features.account_linking,
+                _ => true,
+            })
+            .map(|capability| Self::derive(config, capability))
+            .collect()
+    }
+
+    fn derive(config: &AuthConfig, id: AuthExperienceCapability) -> Self {
+        let state = config.experience.state(id);
+        let (purpose, methods, assurance, inputs, outputs, operation) = match id {
+            AuthExperienceCapability::SignIn => (
+                "authenticate a principal and open a session",
+                vec![
+                    AuthenticationMethod::Password,
+                    AuthenticationMethod::ExternalIdentity,
+                ],
+                AuthenticationAssurance::Basic,
+                vec!["tenant_hint", "provider", "credential"],
+                vec!["principal", "session", "authentication_assurance"],
+                Some(AuthOperation::Login),
+            ),
+            AuthExperienceCapability::SignUp => (
+                "register an identity through the authoritative runtime",
+                vec![
+                    AuthenticationMethod::Password,
+                    AuthenticationMethod::ExternalIdentity,
+                ],
+                AuthenticationAssurance::Basic,
+                vec!["tenant_hint", "provider", "credential"],
+                vec!["principal", "session"],
+                Some(AuthOperation::Signup),
+            ),
+            AuthExperienceCapability::SignOut => (
+                "revoke the current session",
+                Vec::new(),
+                AuthenticationAssurance::Basic,
+                vec!["session"],
+                vec!["session_revoked"],
+                Some(AuthOperation::Logout),
+            ),
+            AuthExperienceCapability::Password => (
+                "password authentication capability",
+                vec![AuthenticationMethod::Password],
+                AuthenticationAssurance::Basic,
+                vec!["username", "password"],
+                vec!["authentication_result"],
+                None,
+            ),
+            AuthExperienceCapability::PasswordReset => (
+                "recover access through a password reset ceremony",
+                vec![AuthenticationMethod::Recovery],
+                AuthenticationAssurance::Basic,
+                vec!["principal_hint"],
+                vec!["recovery_ceremony"],
+                Some(AuthOperation::PasswordReset),
+            ),
+            AuthExperienceCapability::PasswordChange => (
+                "change a known password through the public protocol",
+                vec![AuthenticationMethod::Password],
+                AuthenticationAssurance::Basic,
+                vec!["current_password", "new_password"],
+                vec!["password_changed"],
+                Some(AuthOperation::PasswordChange),
+            ),
+            AuthExperienceCapability::ExternalIdentity => (
+                "verify an identity through an external provider",
+                vec![AuthenticationMethod::ExternalIdentity],
+                AuthenticationAssurance::Basic,
+                vec!["provider", "provider_response"],
+                vec!["external_identity"],
+                Some(AuthOperation::Providers),
+            ),
+            AuthExperienceCapability::AccountLinking => (
+                "link another verified external identity to the same principal",
+                vec![AuthenticationMethod::ExternalIdentity],
+                AuthenticationAssurance::Basic,
+                vec!["session", "provider_response"],
+                vec!["identity_link"],
+                Some(AuthOperation::AccountLinks),
+            ),
+            AuthExperienceCapability::EmailVerification => (
+                "verify an email identity",
+                vec![AuthenticationMethod::ExternalIdentity],
+                AuthenticationAssurance::Basic,
+                vec!["email", "verification_response"],
+                vec!["verified_identity"],
+                Some(AuthOperation::EmailVerification),
+            ),
+            AuthExperienceCapability::Mfa => (
+                "perform or enroll a multi-factor authentication method",
+                vec![AuthenticationMethod::Mfa],
+                AuthenticationAssurance::Strong,
+                vec!["session", "challenge_response"],
+                vec!["authentication_assurance"],
+                Some(AuthOperation::Mfa),
+            ),
+            AuthExperienceCapability::Passkeys => (
+                "perform a passkey ceremony",
+                vec![AuthenticationMethod::Passkey],
+                AuthenticationAssurance::PhishingResistant,
+                vec!["principal_hint", "ceremony_response"],
+                vec!["authentication_result"],
+                Some(AuthOperation::Passkeys),
+            ),
+            AuthExperienceCapability::DeviceManagement => (
+                "manage authenticating devices without granting principal authority",
+                vec![AuthenticationMethod::DeviceApproval],
+                AuthenticationAssurance::Strong,
+                vec!["session", "device"],
+                vec!["device"],
+                Some(AuthOperation::Devices),
+            ),
+            AuthExperienceCapability::SessionManagement => (
+                "inspect or revoke sessions through public protocol APIs",
+                Vec::new(),
+                AuthenticationAssurance::Basic,
+                vec!["session"],
+                vec!["session"],
+                Some(AuthOperation::Sessions),
+            ),
+            AuthExperienceCapability::Profile => (
+                "read AuthPort identity profile data, not application domain profile data",
+                Vec::new(),
+                AuthenticationAssurance::Basic,
+                vec!["session"],
+                vec!["authport_identity_profile", "application_profile_ref"],
+                Some(AuthOperation::Profile),
+            ),
+            AuthExperienceCapability::TenantSwitching => (
+                "select among tenant identities authorized by AuthPort",
+                Vec::new(),
+                AuthenticationAssurance::Basic,
+                vec!["session"],
+                vec!["tenant"],
+                Some(AuthOperation::Tenants),
+            ),
+            AuthExperienceCapability::Recovery => (
+                "recover an account through a recovery ceremony independent of password reset",
+                vec![AuthenticationMethod::Recovery],
+                AuthenticationAssurance::Basic,
+                vec!["principal_hint", "recovery_method"],
+                vec!["recovery_ceremony"],
+                Some(AuthOperation::Recovery),
+            ),
+        };
+        Self {
+            id,
+            purpose: purpose.to_string(),
+            required_capabilities: vec![id],
+            authentication_methods: methods,
+            required_assurance: assurance,
+            inputs: inputs.into_iter().map(str::to_string).collect(),
+            outputs: outputs.into_iter().map(str::to_string).collect(),
+            state,
+            operation,
+        }
+    }
+
+    fn canonical_string(&self) -> String {
+        let methods = self
+            .authentication_methods
+            .iter()
+            .map(|method| method.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "experience={}:{}:{}:{};",
+            self.id.as_str(),
+            self.state.as_str(),
+            self.required_assurance.as_str(),
+            methods
+        )
+    }
+}
+
 /// The default UI, generated from the same contract as the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthUiSurface {
+    pub renderer: ExperienceRenderer,
     pub mode: AuthUiMode,
     pub theme: String,
     pub screens: Vec<UiScreenSurface>,
@@ -611,6 +981,7 @@ impl AuthUiSurface {
         }
 
         Self {
+            renderer: config.ui.renderer,
             mode: config.ui.mode.clone(),
             theme: config.ui.theme.name.clone(),
             screens,
@@ -622,7 +993,12 @@ impl AuthUiSurface {
     }
 
     fn canonical_string(&self) -> String {
-        let mut out = format!("ui={};{};", self.mode.as_str(), self.theme);
+        let mut out = format!(
+            "ui={};{};{};",
+            self.renderer.as_str(),
+            self.mode.as_str(),
+            self.theme
+        );
         for screen in &self.screens {
             out.push_str(&format!(
                 "{}:{}:",

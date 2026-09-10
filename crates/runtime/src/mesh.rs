@@ -9,9 +9,10 @@ use appport_auth_mesh_authz::{
 };
 use appport_auth_mesh_authz::{Action, Condition, Effect, ResourceSelector, Rule};
 use appport_auth_mesh_contract::{
-    AgentRun, AgentState, AuditEventId, Capability, ClaimValue, Claims, Delegation, DelegationId,
-    ExecutionCredentialId, Principal, PrincipalId, PrincipalKind, ResourceScope, RunId, RunStatus,
-    SessionId, TaskId, TaskSpec, TenantContext, TenantId,
+    AgentRun, AgentState, AuditEventId, AuthenticationAssurance, AuthenticationMethod, Capability,
+    ClaimValue, Claims, Delegation, DelegationId, ExecutionCredentialId, Principal, PrincipalId,
+    PrincipalKind, ResourceScope, RunId, RunStatus, SessionId, TaskId, TaskSpec, TenantContext,
+    TenantId,
 };
 use appport_auth_mesh_dsl::{stable_hash, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -317,7 +318,16 @@ impl AuthMesh {
             AuditRecord::new(AuditEventKind::Login)
                 .principal(&resolved.principal.id)
                 .session(&session.id)
-                .meta("connector", &external.connector),
+                .meta("provider", &external.connector)
+                .meta(
+                    "authentication_method",
+                    authentication_method_for_provider(&external.connector).as_str(),
+                )
+                .meta(
+                    "authentication_assurance",
+                    AuthenticationAssurance::Basic.as_str(),
+                )
+                .meta("authentication_result", "success"),
             now,
         )?;
 
@@ -386,7 +396,16 @@ impl AuthMesh {
             AuditRecord::new(AuditEventKind::AccountLinked)
                 .principal(&resolved.principal.id)
                 .session(&session.id)
-                .meta("connector", &external.connector),
+                .meta("provider", &external.connector)
+                .meta(
+                    "authentication_method",
+                    authentication_method_for_provider(&external.connector).as_str(),
+                )
+                .meta(
+                    "authentication_assurance",
+                    AuthenticationAssurance::Basic.as_str(),
+                )
+                .meta("authentication_result", "success"),
             now,
         )?;
 
@@ -1847,6 +1866,14 @@ fn deny(reason: DenialReason) -> AuthorizationDecision {
         matched_rules: Vec::new(),
         conditions: Vec::new(),
         audit_event_id: None,
+    }
+}
+
+fn authentication_method_for_provider(provider: &str) -> AuthenticationMethod {
+    if provider == "local" {
+        AuthenticationMethod::Password
+    } else {
+        AuthenticationMethod::ExternalIdentity
     }
 }
 

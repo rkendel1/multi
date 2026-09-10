@@ -47,12 +47,12 @@ impl LocalConnector {
     }
 
     pub fn register(&mut self, account: LocalAccount) -> Result<(), ConnectorError> {
-        let accounts = self
-            .accounts
-            .get_mut()
-            .map_err(|_| ConnectorError::PasswordHashingFailed {
-                connector: Self::ID.to_string(),
-            })?;
+        let accounts =
+            self.accounts
+                .get_mut()
+                .map_err(|_| ConnectorError::PasswordHashingFailed {
+                    connector: Self::ID.to_string(),
+                })?;
         if accounts.contains_key(&account.username) {
             return Err(ConnectorError::InvalidRequest {
                 connector: Self::ID.to_string(),
@@ -179,11 +179,12 @@ impl AuthConnector for LocalConnector {
         policy: &PasswordPolicy,
         now: i64,
     ) -> Result<(), ConnectorError> {
-        let mut accounts = self.accounts.lock().map_err(|_| {
-            ConnectorError::PasswordHashingFailed {
-                connector: Self::ID.to_string(),
-            }
-        })?;
+        let mut accounts =
+            self.accounts
+                .lock()
+                .map_err(|_| ConnectorError::PasswordHashingFailed {
+                    connector: Self::ID.to_string(),
+                })?;
         let account = accounts
             .get_mut(username)
             .ok_or_else(Self::invalid_credentials)?;
@@ -201,11 +202,12 @@ impl AuthConnector for LocalConnector {
         policy: &PasswordPolicy,
         now: i64,
     ) -> Result<(), ConnectorError> {
-        let mut accounts = self.accounts.lock().map_err(|_| {
-            ConnectorError::PasswordHashingFailed {
-                connector: Self::ID.to_string(),
-            }
-        })?;
+        let mut accounts =
+            self.accounts
+                .lock()
+                .map_err(|_| ConnectorError::PasswordHashingFailed {
+                    connector: Self::ID.to_string(),
+                })?;
         let account = accounts
             .get_mut(username)
             .ok_or_else(Self::invalid_credentials)?;
@@ -227,7 +229,10 @@ impl std::fmt::Debug for LocalAccount {
         f.debug_struct("LocalAccount")
             .field("username", &self.username)
             .field("password_hash", &"<redacted>")
-            .field("password_history", &format_args!("{} entries", self.password_history.len()))
+            .field(
+                "password_history",
+                &format_args!("{} entries", self.password_history.len()),
+            )
             .field("password_changed_at", &self.password_changed_at)
             .field("attributes", &self.attributes)
             .finish()
@@ -256,7 +261,11 @@ impl LocalAccount {
     fn verify_password(&self, password: &str) -> bool {
         PasswordHash::new(&self.password_hash)
             .ok()
-            .and_then(|hash| Argon2::default().verify_password(password.as_bytes(), &hash).ok())
+            .and_then(|hash| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &hash)
+                    .ok()
+            })
             .is_some()
     }
 
@@ -278,7 +287,8 @@ impl LocalAccount {
             })?,
         );
         self.password_history.insert(0, previous);
-        self.password_history.truncate(policy.password_history_count);
+        self.password_history
+            .truncate(policy.password_history_count);
         self.password_changed_at = now;
         Ok(())
     }

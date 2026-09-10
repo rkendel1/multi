@@ -48,6 +48,7 @@ pub fn render_text(surface: &AuthSurface) -> String {
     }
 
     out.push_str("\nUI:\n");
+    out.push_str(&format!("  renderer: {}\n", surface.ui.renderer.as_str()));
     out.push_str(&format!("  mode: {}\n", surface.ui.mode.as_str()));
     out.push_str(&format!("  theme: {}\n", surface.ui.theme));
     for screen in &surface.ui.screens {
@@ -61,6 +62,23 @@ pub fn render_text(surface: &AuthSurface) -> String {
             screen_label(&screen.screen),
             screen.mode.as_str(),
             providers
+        ));
+    }
+
+    out.push_str("\nExperience:\n");
+    for experience in &surface.experiences {
+        let methods = experience
+            .authentication_methods
+            .iter()
+            .map(|method| method.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "  {}: {} assurance={} methods=[{}]\n",
+            experience.id.as_str(),
+            experience.state.as_str(),
+            experience.required_assurance.as_str(),
+            methods
         ));
     }
 
@@ -231,7 +249,8 @@ pub fn render_json_with(surface: &AuthSurface, extra: &[(String, String)]) -> St
 
     out.push_str("  \"ui\": {\n");
     out.push_str(&format!(
-        "    \"mode\": \"{}\",\n    \"theme\": \"{}\",\n    \"screens\": [\n",
+        "    \"renderer\": \"{}\",\n    \"mode\": \"{}\",\n    \"theme\": \"{}\",\n    \"screens\": [\n",
+        surface.ui.renderer.as_str(),
         surface.ui.mode.as_str(),
         escape(&surface.ui.theme)
     ));
@@ -250,7 +269,46 @@ pub fn render_json_with(surface: &AuthSurface, extra: &[(String, String)]) -> St
             comma(index, surface.ui.screens.len())
         ));
     }
-    out.push_str("    ]\n  }");
+    out.push_str("    ]\n  },\n");
+
+    out.push_str("  \"experience\": [\n");
+    for (index, experience) in surface.experiences.iter().enumerate() {
+        let methods = experience
+            .authentication_methods
+            .iter()
+            .map(|method| format!("\"{}\"", method.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let inputs = experience
+            .inputs
+            .iter()
+            .map(|input| format!("\"{}\"", escape(input)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let outputs = experience
+            .outputs
+            .iter()
+            .map(|output| format!("\"{}\"", escape(output)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let operation = experience
+            .operation
+            .map(|operation| format!("\"{}\"", operation.as_str()))
+            .unwrap_or_else(|| "null".to_string());
+        out.push_str(&format!(
+            "    {{\"id\": \"{}\", \"purpose\": \"{}\", \"state\": \"{}\", \"authentication_methods\": [{}], \"required_authentication_assurance\": \"{}\", \"inputs\": [{}], \"outputs\": [{}], \"operation\": {}}}{}\n",
+            experience.id.as_str(),
+            escape(&experience.purpose),
+            experience.state.as_str(),
+            methods,
+            experience.required_assurance.as_str(),
+            inputs,
+            outputs,
+            operation,
+            comma(index, surface.experiences.len())
+        ));
+    }
+    out.push_str("  ]");
 
     if let Some(agents) = &surface.agents {
         let operations = agents

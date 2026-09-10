@@ -778,6 +778,51 @@ fn the_session_cookie_is_the_one_the_contract_names() {
 }
 
 #[test]
+fn disabled_or_custom_experiences_do_not_create_private_ui_authority_paths() {
+    let config = parse_auth_block(
+        r#"
+use auth {
+  providers = [local]
+  experience = {
+    sign_in = disabled
+    sign_up = enabled
+    profile = enabled
+  }
+  ui = {
+    signup = "custom"
+    mode = "custom"
+  }
+}
+"#,
+    )
+    .unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+
+    let disabled = server.handle(&request(Method::Post, "/auth/sign-in", &[], ""));
+    assert_eq!(disabled.status, 404);
+    assert!(disabled
+        .body_string()
+        .contains("\"reason\": \"unsupported_experience\""));
+
+    let custom = server.handle(&request(Method::Get, "/auth/signup", &[], ""));
+    assert_eq!(custom.status, 404);
+    assert!(custom.body_string().contains("\"reason\": \"custom_ui\""));
+
+    let profile_without_session = server.handle(&request(Method::Get, "/auth/profile", &[], ""));
+    assert_eq!(profile_without_session.status, 401);
+}
+
+#[test]
 fn control_plane_http_routes_store_apply_and_list_history() {
     let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
     let registry = ConnectorRegistry::from_config(&config).unwrap();

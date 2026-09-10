@@ -13,6 +13,7 @@ pub struct AuthConfig {
     pub agents: bool,
     pub policies: Vec<PolicyDef>,
     pub ui: AuthUiConfig,
+    pub experience: AuthExperience,
     pub password_policy: PasswordPolicy,
     pub storage: StorageConfig,
 }
@@ -27,6 +28,7 @@ impl Default for AuthConfig {
             agents: false,
             policies: Vec::new(),
             ui: AuthUiConfig::default(),
+            experience: AuthExperience::default(),
             password_policy: PasswordPolicy::default(),
             storage: StorageConfig::default(),
         }
@@ -57,6 +59,7 @@ impl AuthConfig {
             agents: self.agents,
             policies,
             ui: self.ui.canonical(),
+            experience: self.experience.clone(),
             password_policy: self.password_policy.clone(),
             storage: self.storage.clone(),
         }
@@ -131,6 +134,7 @@ impl AuthConfig {
         }
 
         self.ui.validate()?;
+        self.experience.validate()?;
         self.password_policy.validate()?;
         self.storage.validate()?;
 
@@ -188,8 +192,288 @@ impl AuthConfig {
             }
         }
         self.ui.write_canonical(out);
+        self.experience.write_canonical(out);
         self.password_policy.write_canonical(out);
         self.storage.write_canonical(out);
+    }
+}
+
+/// Canonical, framework-neutral auth experiences derived from `use auth`.
+///
+/// Capability support, current authority, and rendered UI are intentionally
+/// separate: these states say which protocol experiences are exposed, not which
+/// principal is allowed to use them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthExperience {
+    pub sign_in: ExperienceState,
+    pub sign_up: ExperienceState,
+    pub sign_out: ExperienceState,
+    pub password: ExperienceState,
+    pub password_reset: ExperienceState,
+    pub password_change: ExperienceState,
+    pub external_identity: ExperienceState,
+    pub account_linking: ExperienceState,
+    pub email_verification: ExperienceState,
+    pub mfa: ExperienceState,
+    pub passkeys: ExperienceState,
+    pub device_management: ExperienceState,
+    pub session_management: ExperienceState,
+    pub profile: ExperienceState,
+    pub tenant_switching: ExperienceState,
+    pub recovery: ExperienceState,
+}
+
+impl Default for AuthExperience {
+    fn default() -> Self {
+        Self {
+            sign_in: ExperienceState::Enabled,
+            sign_up: ExperienceState::Enabled,
+            sign_out: ExperienceState::Enabled,
+            password: ExperienceState::Enabled,
+            password_reset: ExperienceState::Enabled,
+            password_change: ExperienceState::Enabled,
+            external_identity: ExperienceState::Enabled,
+            account_linking: ExperienceState::Enabled,
+            email_verification: ExperienceState::Disabled,
+            mfa: ExperienceState::Disabled,
+            passkeys: ExperienceState::Disabled,
+            device_management: ExperienceState::Disabled,
+            session_management: ExperienceState::Enabled,
+            profile: ExperienceState::Disabled,
+            tenant_switching: ExperienceState::Enabled,
+            recovery: ExperienceState::Disabled,
+        }
+    }
+}
+
+impl AuthExperience {
+    pub fn state(&self, capability: AuthExperienceCapability) -> ExperienceState {
+        match capability {
+            AuthExperienceCapability::SignIn => self.sign_in,
+            AuthExperienceCapability::SignUp => self.sign_up,
+            AuthExperienceCapability::SignOut => self.sign_out,
+            AuthExperienceCapability::Password => self.password,
+            AuthExperienceCapability::PasswordReset => self.password_reset,
+            AuthExperienceCapability::PasswordChange => self.password_change,
+            AuthExperienceCapability::ExternalIdentity => self.external_identity,
+            AuthExperienceCapability::AccountLinking => self.account_linking,
+            AuthExperienceCapability::EmailVerification => self.email_verification,
+            AuthExperienceCapability::Mfa => self.mfa,
+            AuthExperienceCapability::Passkeys => self.passkeys,
+            AuthExperienceCapability::DeviceManagement => self.device_management,
+            AuthExperienceCapability::SessionManagement => self.session_management,
+            AuthExperienceCapability::Profile => self.profile,
+            AuthExperienceCapability::TenantSwitching => self.tenant_switching,
+            AuthExperienceCapability::Recovery => self.recovery,
+        }
+    }
+
+    pub fn set(&mut self, capability: AuthExperienceCapability, state: ExperienceState) {
+        match capability {
+            AuthExperienceCapability::SignIn => self.sign_in = state,
+            AuthExperienceCapability::SignUp => self.sign_up = state,
+            AuthExperienceCapability::SignOut => self.sign_out = state,
+            AuthExperienceCapability::Password => self.password = state,
+            AuthExperienceCapability::PasswordReset => self.password_reset = state,
+            AuthExperienceCapability::PasswordChange => self.password_change = state,
+            AuthExperienceCapability::ExternalIdentity => self.external_identity = state,
+            AuthExperienceCapability::AccountLinking => self.account_linking = state,
+            AuthExperienceCapability::EmailVerification => self.email_verification = state,
+            AuthExperienceCapability::Mfa => self.mfa = state,
+            AuthExperienceCapability::Passkeys => self.passkeys = state,
+            AuthExperienceCapability::DeviceManagement => self.device_management = state,
+            AuthExperienceCapability::SessionManagement => self.session_management = state,
+            AuthExperienceCapability::Profile => self.profile = state,
+            AuthExperienceCapability::TenantSwitching => self.tenant_switching = state,
+            AuthExperienceCapability::Recovery => self.recovery = state,
+        }
+    }
+
+    pub fn enabled(&self, capability: AuthExperienceCapability) -> bool {
+        self.state(capability).is_invokable()
+    }
+
+    pub fn validate(&self) -> Result<(), AuthConfigError> {
+        if self.sign_in == ExperienceState::Disabled && self.sign_up == ExperienceState::Disabled {
+            return Err(AuthConfigError {
+                message: "experience must expose sign_in or sign_up".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"experience=");
+        for capability in AuthExperienceCapability::all() {
+            out.extend_from_slice(capability.as_str().as_bytes());
+            out.push(b':');
+            out.extend_from_slice(self.state(capability).as_str().as_bytes());
+            out.push(b',');
+        }
+        out.push(b';');
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AuthExperienceCapability {
+    SignIn,
+    SignUp,
+    SignOut,
+    Password,
+    PasswordReset,
+    PasswordChange,
+    ExternalIdentity,
+    AccountLinking,
+    EmailVerification,
+    Mfa,
+    Passkeys,
+    DeviceManagement,
+    SessionManagement,
+    Profile,
+    TenantSwitching,
+    Recovery,
+}
+
+impl AuthExperienceCapability {
+    pub fn all() -> [Self; 16] {
+        [
+            Self::SignIn,
+            Self::SignUp,
+            Self::SignOut,
+            Self::Password,
+            Self::PasswordReset,
+            Self::PasswordChange,
+            Self::ExternalIdentity,
+            Self::AccountLinking,
+            Self::EmailVerification,
+            Self::Mfa,
+            Self::Passkeys,
+            Self::DeviceManagement,
+            Self::SessionManagement,
+            Self::Profile,
+            Self::TenantSwitching,
+            Self::Recovery,
+        ]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SignIn => "sign_in",
+            Self::SignUp => "sign_up",
+            Self::SignOut => "sign_out",
+            Self::Password => "password",
+            Self::PasswordReset => "password_reset",
+            Self::PasswordChange => "password_change",
+            Self::ExternalIdentity => "external_identity",
+            Self::AccountLinking => "account_linking",
+            Self::EmailVerification => "email_verification",
+            Self::Mfa => "mfa",
+            Self::Passkeys => "passkeys",
+            Self::DeviceManagement => "device_management",
+            Self::SessionManagement => "session_management",
+            Self::Profile => "profile",
+            Self::TenantSwitching => "tenant_switching",
+            Self::Recovery => "recovery",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sign_in" => Some(Self::SignIn),
+            "sign_up" => Some(Self::SignUp),
+            "sign_out" => Some(Self::SignOut),
+            "password" => Some(Self::Password),
+            "password_reset" => Some(Self::PasswordReset),
+            "password_change" => Some(Self::PasswordChange),
+            "external_identity" => Some(Self::ExternalIdentity),
+            "account_linking" => Some(Self::AccountLinking),
+            "email_verification" => Some(Self::EmailVerification),
+            "mfa" => Some(Self::Mfa),
+            "passkeys" => Some(Self::Passkeys),
+            "devices" | "device_management" => Some(Self::DeviceManagement),
+            "sessions" | "session_management" => Some(Self::SessionManagement),
+            "profile" => Some(Self::Profile),
+            "tenant_switching" | "tenant_switcher" => Some(Self::TenantSwitching),
+            "recovery" => Some(Self::Recovery),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExperienceState {
+    Disabled,
+    Enabled,
+    Required,
+    AdminOnly,
+}
+
+impl ExperienceState {
+    pub fn is_invokable(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+            Self::Required => "required",
+            Self::AdminOnly => "admin_only",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "false" | "disabled" => Some(Self::Disabled),
+            "true" | "enabled" => Some(Self::Enabled),
+            "required" => Some(Self::Required),
+            "admin_only" => Some(Self::AdminOnly),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AuthenticationMethod {
+    Password,
+    ExternalIdentity,
+    Passkey,
+    Mfa,
+    DeviceApproval,
+    Qr,
+    Recovery,
+}
+
+impl AuthenticationMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::ExternalIdentity => "external_identity",
+            Self::Passkey => "passkey",
+            Self::Mfa => "mfa",
+            Self::DeviceApproval => "device_approval",
+            Self::Qr => "qr",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AuthenticationAssurance {
+    Anonymous,
+    Basic,
+    Strong,
+    PhishingResistant,
+}
+
+impl AuthenticationAssurance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Basic => "basic",
+            Self::Strong => "strong",
+            Self::PhishingResistant => "phishing_resistant",
+        }
     }
 }
 
@@ -394,6 +678,7 @@ impl IsolationMode {
 /// screens without replacing the identity model underneath.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthUiConfig {
+    pub renderer: ExperienceRenderer,
     pub mode: AuthUiMode,
     pub theme: UiTheme,
     pub screens: Vec<UiScreenOverride>,
@@ -402,6 +687,7 @@ pub struct AuthUiConfig {
 impl Default for AuthUiConfig {
     fn default() -> Self {
         Self {
+            renderer: ExperienceRenderer::Generated,
             mode: AuthUiMode::Default,
             theme: UiTheme::default(),
             screens: Vec::new(),
@@ -423,6 +709,7 @@ impl AuthUiConfig {
             AuthUiMode::Default
         };
         Self {
+            renderer: self.renderer,
             mode,
             theme: self.theme.clone(),
             screens,
@@ -458,7 +745,7 @@ impl AuthUiConfig {
         out.extend_from_slice(
             format!(
                 "ui=mode:{};theme:{};screens:",
-                self.mode.as_str(),
+                self.renderer.as_str(),
                 self.theme.name
             )
             .as_bytes(),
@@ -484,6 +771,35 @@ impl AuthUiMode {
         match self {
             Self::Default => "default",
             Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExperienceRenderer {
+    Generated,
+    Embedded,
+    Headless,
+    Custom,
+}
+
+impl ExperienceRenderer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::Embedded => "embedded",
+            Self::Headless => "headless",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "generated" | "default" => Some(Self::Generated),
+            "embedded" => Some(Self::Embedded),
+            "headless" => Some(Self::Headless),
+            "custom" => Some(Self::Custom),
+            _ => None,
         }
     }
 }
