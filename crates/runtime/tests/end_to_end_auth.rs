@@ -205,6 +205,35 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
     assert!(mesh.surface().exposes("/auth/agents"));
 
     let (alice, agent, _bob) = sign_up_cast(&mesh);
+    let auth_events = stores.audit_events();
+    let alice_auth_event = auth_events
+        .iter()
+        .find(|event| {
+            event.principal_id.as_ref() == Some(&alice.principal().id)
+                && event.kind == AuditEventKind::AccountLinked
+        })
+        .expect("authentication event is recorded as evidence");
+    assert_eq!(
+        alice_auth_event
+            .metadata
+            .get("provider")
+            .map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(
+        alice_auth_event
+            .metadata
+            .get("authentication_method")
+            .map(String::as_str),
+        Some("password")
+    );
+    assert_eq!(
+        alice_auth_event
+            .metadata
+            .get("authentication_assurance")
+            .map(String::as_str),
+        Some("basic")
+    );
 
     // Connector -> ExternalIdentity -> Principal
     assert_eq!(alice.external.connector, "local");

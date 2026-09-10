@@ -13,12 +13,15 @@ pub use inspect::{render_json, render_json_with, render_text};
 pub use surface::{
     AgentOperation, AgentSurface, AuthFeature, AuthFeatures, AuthMethod, AuthOperation, AuthRoute,
     AuthSurface, AuthUiSurface, BindingModeSurface, BoundarySurface, ClaimSurface,
-    PrincipalSurfaceKind, ProviderSurface, UiScreenSurface,
+    ExperienceSurface, PrincipalSurfaceKind, ProviderSurface, UiScreenSurface,
 };
 
 #[cfg(test)]
 mod tests {
-    use appport_auth_mesh_dsl::{parse_auth_block, AuthUiMode, UiScreen};
+    use appport_auth_mesh_dsl::{
+        parse_auth_block, AuthExperienceCapability, AuthUiMode, AuthenticationAssurance,
+        AuthenticationMethod, ExperienceRenderer, ExperienceState, UiScreen,
+    };
     use appport_auth_mesh_providers::ConnectorStatus;
 
     use super::*;
@@ -167,6 +170,7 @@ use auth {
 
         assert_eq!(surface.ui.mode, AuthUiMode::Custom);
         assert_eq!(surface.ui.theme, "midnight");
+        assert_eq!(surface.ui.renderer, ExperienceRenderer::Generated);
         assert_eq!(
             surface.ui.screen(UiScreen::Login).unwrap().mode,
             AuthUiMode::Custom
@@ -175,6 +179,81 @@ use auth {
             surface.ui.screen(UiScreen::Signup).unwrap().mode,
             AuthUiMode::Default
         );
+    }
+
+    #[test]
+    fn experience_registry_separates_capability_method_and_renderer() {
+        let surface = surface(
+            r#"
+use auth {
+  providers = [local, google]
+  tenant = true
+  experience = {
+    mfa = required
+    passkeys = enabled
+    devices = enabled
+    profile = enabled
+  }
+  ui = {
+    mode = "embedded"
+  }
+}
+"#,
+        );
+
+        assert_eq!(surface.ui.renderer, ExperienceRenderer::Embedded);
+        let mfa = surface
+            .experiences
+            .iter()
+            .find(|experience| experience.id == AuthExperienceCapability::Mfa)
+            .expect("mfa registry entry");
+        assert_eq!(mfa.state, ExperienceState::Required);
+        assert_eq!(mfa.authentication_methods, vec![AuthenticationMethod::Mfa]);
+        assert_eq!(mfa.required_assurance, AuthenticationAssurance::Strong);
+        assert!(surface.exposes("/auth/mfa"));
+        assert!(surface.exposes("/auth/passkeys"));
+        assert!(surface.exposes("/auth/devices"));
+        assert!(surface.exposes("/auth/profile"));
+
+        let sign_in = surface
+            .experiences
+            .iter()
+            .find(|experience| experience.id == AuthExperienceCapability::SignIn)
+            .unwrap();
+        assert_eq!(
+            sign_in.authentication_methods,
+            vec![
+                AuthenticationMethod::Password,
+                AuthenticationMethod::ExternalIdentity
+            ]
+        );
+        assert!(surface.provider("google").is_some());
+    }
+
+    #[test]
+    fn disabled_experience_is_removed_from_the_protocol_surface() {
+        let surface = surface(
+            r#"
+use auth {
+  providers = [local]
+  experience = {
+    sign_in = disabled
+    sign_up = enabled
+    password_reset = disabled
+  }
+}
+"#,
+        );
+
+        assert!(!surface.exposes("/auth/sign-in"));
+        assert!(surface.exposes("/auth/signup"));
+        assert!(!surface.exposes("/auth/password/reset"));
+        let reset = surface
+            .experiences
+            .iter()
+            .find(|experience| experience.id == AuthExperienceCapability::PasswordReset)
+            .unwrap();
+        assert_eq!(reset.state, ExperienceState::Disabled);
     }
 
     #[test]

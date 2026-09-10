@@ -79,6 +79,13 @@ impl AuthPortServer {
             }
             return self.handle_auth_route(&route, &request);
         }
+        if request.path.starts_with("/auth/") {
+            return HttpResponse::denied(
+                404,
+                "unsupported_experience",
+                "auth experience is not exposed by this contract",
+            );
+        }
 
         self.handle_application(&request)
     }
@@ -124,6 +131,47 @@ impl AuthPortServer {
                     Err(_) => HttpResponse::json(401, ClientAuthContext::anonymous_json()),
                 },
             },
+            AuthOperation::Sessions => match self.runtime.authenticate(request) {
+                Ok(context) => HttpResponse::json(
+                    200,
+                    format!(
+                        "{{\"sessions\": [{{\"id\": \"{}\", \"principal\": \"{}\", \"tenant\": \"{}\"}}]}}",
+                        escape(context.session.id.as_str()),
+                        escape(context.principal.id.as_str()),
+                        escape(context.tenant.tenant_id.as_str())
+                    ),
+                ),
+                Err(err) => denial(&err),
+            },
+            AuthOperation::Profile => match self.runtime.authenticate(request) {
+                Ok(context) => HttpResponse::json(
+                    200,
+                    format!(
+                        "{{\"profile\": {{\"principal\": \"{}\", \"tenant\": \"{}\", \"application_profile_ref\": null}}}}",
+                        escape(context.principal.id.as_str()),
+                        escape(context.tenant.tenant_id.as_str())
+                    ),
+                ),
+                Err(err) => denial(&err),
+            },
+            AuthOperation::Devices => match self.runtime.authenticate(request) {
+                Ok(context) => HttpResponse::json(
+                    200,
+                    format!(
+                        "{{\"devices\": [], \"principal\": \"{}\"}}",
+                        escape(context.principal.id.as_str())
+                    ),
+                ),
+                Err(err) => denial(&err),
+            },
+            AuthOperation::EmailVerification
+            | AuthOperation::Mfa
+            | AuthOperation::Passkeys
+            | AuthOperation::Recovery => HttpResponse::denied(
+                501,
+                "not_enabled",
+                "experience is modeled but no provider implementation is enabled",
+            ),
             AuthOperation::Providers => HttpResponse::json(200, self.providers_json()),
             AuthOperation::Authorize => self.handle_authorize(request),
             AuthOperation::Policies

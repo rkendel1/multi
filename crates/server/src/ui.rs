@@ -10,7 +10,11 @@ pub const CLIENT_JS: &str = include_str!("../../../clients/js/authport.js");
 /// The provider buttons come from the same `AuthSurface` the runtime
 /// authenticates against: there is one provider declaration, and this reads it
 /// rather than repeating it.
-pub fn render_sign_in(surface: &AuthSurface, policy: &PasswordPolicy, tenants: &[String]) -> String {
+pub fn render_sign_in(
+    surface: &AuthSurface,
+    policy: &PasswordPolicy,
+    tenants: &[String],
+) -> String {
     let providers = surface
         .ui
         .screen(UiScreen::Login)
