@@ -25,7 +25,8 @@ use appport_auth_mesh_providers::{
 use appport_auth_mesh_runtime::{DelegationRequest, MemoryStores, RuntimeContext};
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
-    render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy, RouterApp,
+    render_sign_in, should_redirect_to_login, status_for, AuthPortServer, PathPattern,
+    RouteOutcome, RoutePolicy, RouterApp,
 };
 use appport_auth_mesh_storage::{PrincipalStore, TenantRootStore};
 use appport_auth_mesh_surface::{AuthSurface, BoundarySurface};
@@ -151,6 +152,11 @@ fn denials_carry_a_status_and_a_reason() {
     assert_eq!(status_for(&DenialReason::TenantMismatch), 403);
     assert_eq!(status_for(&DenialReason::AgentRevoked), 403);
     assert_eq!(status_for(&DenialReason::AuditUnavailable), 403);
+    assert!(should_redirect_to_login(&DenialReason::MissingCredential));
+    assert!(!should_redirect_to_login(
+        &DenialReason::CapabilityNotGranted
+    ));
+    assert!(!should_redirect_to_login(&DenialReason::ClaimMismatch));
 
     let denied = HttpResponse::denied(403, "capability_not_granted", "no");
     assert!(denied

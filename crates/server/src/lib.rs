@@ -28,6 +28,9 @@ pub use router::{
     AppHandler, AppRequest, ApplicationBinding, PathPattern, RouteOutcome, RoutePolicy, RouteRule,
     RouterApp,
 };
-pub use server::{serve, status_for, AuthPortServer, HttpHandler, ServerHandle, StudioController};
+pub use server::{
+    serve, should_redirect_to_login, status_for, AuthPortServer, HttpHandler, ServerHandle,
+    StudioController,
+};
 pub use ui::{render_sign_in, CLIENT_JS};
 pub use upstream::{ApplicationUpstream, UpstreamScheme};

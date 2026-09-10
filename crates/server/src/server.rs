@@ -461,7 +461,20 @@ impl AuthPortServer {
 
         match self.runtime.enforce(request, &requirement) {
             Ok(context) => self.app.handle(request, context.as_ref()),
-            Err(_err)
+            Err(err)
+                if request.method == Method::Get
+                    && request
+                        .headers
+                        .get("accept")
+                        .map(|value| value.contains("text/html"))
+                        .unwrap_or(false)
+                    && should_redirect_to_login(&err.denial) =>
+            {
+                let return_to = percent_encode_path(&request.path);
+                HttpResponse::html(302, String::new())
+                    .with_header("location", format!("/auth/login?return_to={}", return_to))
+            }
+            Err(err)
                 if request.method == Method::Get
                     && request
                         .headers
@@ -469,9 +482,13 @@ impl AuthPortServer {
                         .map(|value| value.contains("text/html"))
                         .unwrap_or(false) =>
             {
-                let return_to = percent_encode_path(&request.path);
-                HttpResponse::html(302, String::new())
-                    .with_header("location", format!("/auth/login?return_to={}", return_to))
+                HttpResponse::html(
+                    403,
+                    format!(
+                        "<!doctype html><title>Forbidden · AuthBoundry</title><h1>Access denied</h1><p>{}</p>",
+                        escape(&err.message)
+                    ),
+                )
             }
             Err(err) => denial(&err),
         }
@@ -531,6 +548,17 @@ impl AuthPortServer {
             .join(", ");
         format!("{{\"providers\": [{}]}}", providers)
     }
+}
+
+pub fn should_redirect_to_login(reason: &DenialReason) -> bool {
+    matches!(
+        reason,
+        DenialReason::MissingCredential
+            | DenialReason::InvalidSession
+            | DenialReason::ExpiredSession
+            | DenialReason::RevokedSession
+            | DenialReason::UnknownPrincipal
+    )
 }
 
 fn percent_encode_path(value: &str) -> String {

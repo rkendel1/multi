@@ -11,7 +11,89 @@ use appport_auth_mesh_server::ApplicationUpstream;
 
 use crate::{error, CliError, Output};
 
-const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n  claims = {\n    role = enum[\"admin\", \"user\"]\n  }\n}\n\nuse mail\nmail {\n  identities {\n    auth = \"auth@example.com\"\n  }\n  templates {\n    password_reset = \"./emails/password-reset.html\"\n    email_verification = \"./emails/email-verification.html\"\n  }\n}\n";
+const DEFAULT_DECLARATION: &str = r#"use auth {
+  providers = [local]
+  tenant = false
+  isolation = "strict"
+  agents = false
+
+  claims = {
+    role = enum["admin", "user"]
+  }
+
+  policy = {}
+
+  experience = {
+    sign_in = enabled
+    sign_up = enabled
+    sign_out = enabled
+    password = enabled
+    password_reset = enabled
+    password_change = enabled
+    external_identity = enabled
+    account_linking = enabled
+    email_verification = disabled
+    mfa = disabled
+    passkeys = disabled
+    device_management = disabled
+    session_management = enabled
+    profile = disabled
+    tenant_switching = enabled
+    recovery = disabled
+  }
+
+  password = {
+    min_length = 12
+    max_length = 128
+    require_uppercase = false
+    require_lowercase = false
+    require_number = false
+    require_special_character = false
+    expiration_days = null
+    history_count = 5
+    allow_password_change = true
+    allow_password_reset = true
+  }
+
+  storage = {
+    authority = "feltdb"
+    audit = "feltdb"
+    reporting = "authboundry_projection"
+  }
+
+  ui = {
+    mode = "generated"
+    theme = "authboundry-default"
+    login = "default"
+    signup = "default"
+    account = "default"
+    tenant = "default"
+    agents = "default"
+  }
+}
+
+use mail
+mail {
+  identities {
+    auth = "auth@example.com"
+  }
+  templates {
+    password_reset = "./emails/password-reset.html"
+    email_verification = "./emails/email-verification.html"
+  }
+}
+"#;
+
+const AUTH_OPTION_DEFAULTS: &[(&str, &str)] = &[
+    ("tenant", "  tenant = false\n"),
+    ("isolation", "  isolation = \"strict\"\n"),
+    ("agents", "  agents = false\n"),
+    ("policy", "  policy = {}\n"),
+    ("experience", "  experience = {\n    sign_in = enabled\n    sign_up = enabled\n    sign_out = enabled\n    password = enabled\n    password_reset = enabled\n    password_change = enabled\n    external_identity = enabled\n    account_linking = enabled\n    email_verification = disabled\n    mfa = disabled\n    passkeys = disabled\n    device_management = disabled\n    session_management = enabled\n    profile = disabled\n    tenant_switching = enabled\n    recovery = disabled\n  }\n"),
+    ("password", "  password = {\n    min_length = 12\n    max_length = 128\n    require_uppercase = false\n    require_lowercase = false\n    require_number = false\n    require_special_character = false\n    expiration_days = null\n    history_count = 5\n    allow_password_change = true\n    allow_password_reset = true\n  }\n"),
+    ("storage", "  storage = {\n    authority = \"feltdb\"\n    audit = \"feltdb\"\n    reporting = \"authboundry_projection\"\n  }\n"),
+    ("ui", "  ui = {\n    mode = \"generated\"\n    theme = \"authboundry-default\"\n    login = \"default\"\n    signup = \"default\"\n    account = \"default\"\n    tenant = \"default\"\n    agents = \"default\"\n  }\n"),
+];
 const MANIFEST_DIR: &str = ".authboundry";
 const MANIFEST_FILE: &str = ".authboundry/adoption.json";
 const DEVELOPMENT_FILE: &str = ".authboundry/development.json";
@@ -1023,6 +1105,11 @@ fn config_upgrade_change(root: &Path) -> Option<FileChange> {
             1,
         );
     }
+    for (field, declaration) in AUTH_OPTION_DEFAULTS {
+        if !auth_has_field(&after, field) {
+            after = insert_auth_declaration(&after, declaration)?;
+        }
+    }
     if !after.contains("use mail") {
         after.push_str("\nuse mail\nmail {\n  identities {\n    auth = \"auth@example.com\"\n  }\n  templates {\n    password_reset = \"./emails/password-reset.html\"\n    email_verification = \"./emails/email-verification.html\"\n  }\n}\n");
     }
@@ -1034,6 +1121,59 @@ fn config_upgrade_change(root: &Path) -> Option<FileChange> {
         before: Some(before),
         after,
     })
+}
+
+fn auth_block_bounds(source: &str) -> Option<(usize, usize)> {
+    let start = source.find("use auth")?;
+    let open = start + source[start..].find('{')?;
+    let mut depth = 0usize;
+    for (offset, ch) in source[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((open, open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn auth_has_field(source: &str, field: &str) -> bool {
+    let Some((open, close)) = auth_block_bounds(source) else {
+        return false;
+    };
+    let mut depth = 0i32;
+    for line in source[open + 1..close].lines() {
+        let trimmed = line.trim_start();
+        if depth == 0
+            && trimmed.starts_with(field)
+            && trimmed[field.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_whitespace() || ch == '=' || ch == ':' || ch == '{')
+        {
+            return true;
+        }
+        depth += line.chars().filter(|ch| *ch == '{').count() as i32;
+        depth -= line.chars().filter(|ch| *ch == '}').count() as i32;
+    }
+    false
+}
+
+fn insert_auth_declaration(source: &str, declaration: &str) -> Option<String> {
+    let (_, close) = auth_block_bounds(source)?;
+    let mut upgraded = String::with_capacity(source.len() + declaration.len() + 1);
+    upgraded.push_str(&source[..close]);
+    if !upgraded.ends_with('\n') {
+        upgraded.push('\n');
+    }
+    upgraded.push_str(declaration);
+    upgraded.push_str(&source[close..]);
+    Some(upgraded)
 }
 
 fn manifest_change(application: &ApplicationCandidate, mode: InitMode) -> FileChange {
@@ -1945,7 +2085,11 @@ fn _manifest_path(root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod confirmation_tests {
-    use super::{confirm_adoption, conventional_dev_upstream, upstream_reachable};
+    use super::{
+        auth_has_field, confirm_adoption, conventional_dev_upstream, insert_auth_declaration,
+        upstream_reachable, AUTH_OPTION_DEFAULTS, DEFAULT_DECLARATION,
+    };
+    use appport_auth_mesh_dsl::parse_auth_block;
     use std::io::{Cursor, Write};
     use std::net::TcpListener;
 
@@ -1968,6 +2112,21 @@ mod confirmation_tests {
     #[test]
     fn create_react_app_uses_its_conventional_port() {
         assert_eq!(conventional_dev_upstream("React"), "http://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn generated_and_upgraded_contracts_expose_every_supported_option_group() {
+        parse_auth_block(DEFAULT_DECLARATION).expect("the complete generated contract is valid");
+        let mut upgraded = "use auth {\n  providers = [local]\n  claims = { role = enum[\"admin\", \"user\"] }\n}\n".to_string();
+        for (field, declaration) in AUTH_OPTION_DEFAULTS {
+            if !auth_has_field(&upgraded, field) {
+                upgraded = insert_auth_declaration(&upgraded, declaration).unwrap();
+            }
+        }
+        for (field, _) in AUTH_OPTION_DEFAULTS {
+            assert!(auth_has_field(&upgraded, field), "missing {field}");
+        }
+        parse_auth_block(&upgraded).expect("the upgraded auth block is valid");
     }
 
     #[test]
