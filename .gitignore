@@ -5,3 +5,4 @@ target/
 state/
 state-test/
 state-test-*
+node_modules/
