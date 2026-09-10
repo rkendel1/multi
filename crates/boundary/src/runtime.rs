@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use appport_auth_mesh_authz::{AuthorizationDecision, DenialReason};
+use appport_auth_mesh_authz::{
+    Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, DenialReason,
+    ResourceAttributes, ResourceRef, ResourceResolver,
+};
 use appport_auth_mesh_contract::{Capability, PrincipalKind};
 use appport_auth_mesh_dsl::AuthConfig;
 use appport_auth_mesh_providers::{
@@ -102,6 +105,7 @@ pub struct AuthPortRuntime {
     mesh: AuthMesh,
     mode: BindingMode,
     clock: Arc<dyn Clock>,
+    resource_resolver: Arc<dyn ResourceResolver + Send + Sync>,
     registration: RegistrationPolicy,
     /// Live authority state overlays the immutable contract
     authority: Arc<RwLock<LiveAuthorityState>>,
@@ -123,6 +127,7 @@ impl AuthPortRuntime {
             mesh,
             mode,
             clock: Arc::new(SystemClock),
+            resource_resolver: Arc::new(NoResourceResolver),
             registration: RegistrationPolicy::default(),
             authority: Arc::new(RwLock::new(LiveAuthorityState::new())),
             proposals: Arc::new(MemoryProposalStore::new()),
@@ -147,6 +152,14 @@ impl AuthPortRuntime {
 
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    pub fn with_resource_resolver(
+        mut self,
+        resolver: Arc<dyn ResourceResolver + Send + Sync>,
+    ) -> Self {
+        self.resource_resolver = resolver;
         self
     }
 
@@ -206,9 +219,14 @@ impl AuthPortRuntime {
             Requirement::Authenticated => self.authenticate(request).map(Some),
             Requirement::Capability(capability) => {
                 let context = self.authenticate(request)?;
-                let decision = self.authorize(&context, capability)?;
+                let decision = match authorization_request(context.runtime(), capability, request) {
+                    Some(auth_request) => self.authorize_resource(&context, auth_request)?,
+                    None => self.authorize(&context, capability)?,
+                };
                 match decision {
-                    AuthorizationDecision::Allow { .. } => Ok(Some(context)),
+                    AuthorizationDecision::Allow { .. } => {
+                        Ok(Some(context.with_decision(decision)))
+                    }
                     AuthorizationDecision::Deny { reason, .. } => Err(AuthError::new(
                         AuthLifecycleStage::PolicyEvaluation,
                         format!("`{}` is not granted to this principal", capability),
@@ -707,6 +725,98 @@ impl AuthBoundary for AuthPortRuntime {
             self.now(),
         ))
     }
+}
+
+impl AuthPortRuntime {
+    pub fn authorize_resource(
+        &self,
+        context: &AuthContext,
+        request: AuthorizationRequest,
+    ) -> Result<AuthorizationDecision, AuthError> {
+        if request.capability.as_str().trim().is_empty() {
+            return Err(AuthError::new(
+                AuthLifecycleStage::PolicyEvaluation,
+                "no capability named",
+                DenialReason::UnknownCapability,
+            ));
+        }
+        let attributes = request
+            .resource
+            .as_ref()
+            .map(|resource| self.resource_resolver.resolve(resource, &request.context));
+        Ok(self.mesh.authorize_request(
+            context.runtime(),
+            &request,
+            attributes.as_ref(),
+            self.now(),
+        ))
+    }
+}
+
+struct NoResourceResolver;
+
+impl ResourceResolver for NoResourceResolver {
+    fn resolve(
+        &self,
+        resource: &ResourceRef,
+        _context: &AuthorizationContext,
+    ) -> ResourceAttributes {
+        ResourceAttributes::new().with_tenant(resource.tenant_id.clone())
+    }
+}
+
+fn authorization_request(
+    context: &appport_auth_mesh_runtime::RuntimeContext,
+    capability: &str,
+    request: &BoundaryRequest,
+) -> Option<AuthorizationRequest> {
+    let (resource_type, resource_id, action) =
+        infer_resource_target(request.method, &request.path)?;
+    Some(AuthorizationRequest {
+        principal: context.principal.id.clone(),
+        tenant: context.tenant.tenant_id.clone(),
+        capability: Capability(capability.to_string()),
+        action,
+        resource: Some(ResourceRef::new(
+            resource_type,
+            resource_id,
+            context.tenant.tenant_id.clone(),
+        )),
+        context: AuthorizationContext::default(),
+    })
+}
+
+fn infer_resource_target(method: Method, path: &str) -> Option<(String, String, Action)> {
+    let segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.is_empty() || matches!(segments[0], "auth" | "_authport") {
+        return None;
+    }
+    let action = match method {
+        Method::Get => "read",
+        Method::Post => "create",
+        Method::Put | Method::Patch => "update",
+        Method::Delete => "delete",
+        Method::Head | Method::Options => return None,
+    };
+    let resource_type = singular_resource(segments[0]);
+    let resource_id = if segments.len() == 1 {
+        "*".to_string()
+    } else {
+        segments[1].to_string()
+    };
+    Some((resource_type, resource_id, action.into()))
+}
+
+fn singular_resource(resource: &str) -> String {
+    resource
+        .strip_suffix("ies")
+        .map(|prefix| format!("{}y", prefix))
+        .or_else(|| resource.strip_suffix('s').map(str::to_string))
+        .unwrap_or_else(|| resource.to_string())
 }
 
 /// Reserved fields select the flow; everything else is the connector's.

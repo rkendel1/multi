@@ -265,12 +265,14 @@ fn policy(tenant: &TenantContext, grants: &[Grant]) -> Policy {
         id: tenant.policy_id.clone(),
         rules: grants
             .iter()
-            .map(|grant| Rule {
-                capability: Capability(grant.capability.clone()),
-                condition: Condition::ClaimEquals {
-                    key: grant.claim.clone(),
-                    value: ClaimValue::Enum(grant.value.clone()),
-                },
+            .map(|grant| {
+                Rule::allow(
+                    Capability(grant.capability.clone()),
+                    Condition::ClaimEquals {
+                        key: grant.claim.clone(),
+                        value: ClaimValue::Enum(grant.value.clone()),
+                    },
+                )
             })
             .collect(),
     }

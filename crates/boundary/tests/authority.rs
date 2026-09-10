@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use appport_auth_mesh_authz::{Condition, DenialReason, Policy, Rule};
+use appport_auth_mesh_authz::{
+    Action, AuthorizationContext, Condition, DenialReason, Effect, Policy, ResourceAttributes,
+    ResourceRef, ResourceResolver, ResourceSelector, Rule,
+};
 use appport_auth_mesh_boundary::{
     AuthBoundary, AuthPortRuntime, BindingMode, BoundaryRequest, Method, RegistrationPolicy,
     Requirement, SessionCredential, SignInOutcome, TestClock, RESERVED_HEADER_PREFIX,
@@ -44,13 +47,13 @@ fn stores() -> MemoryStores {
             .policies
             .put(Policy {
                 id: context.policy_id.clone(),
-                rules: vec![Rule {
-                    capability: Capability("invoice.read".to_string()),
-                    condition: Condition::ClaimEquals {
+                rules: vec![Rule::allow(
+                    Capability("invoice.read".to_string()),
+                    Condition::ClaimEquals {
                         key: "role".to_string(),
                         value: ClaimValue::Enum("owner".to_string()),
                     },
-                }],
+                )],
             })
             .unwrap();
     }
@@ -95,6 +98,23 @@ fn seed_alice(runtime: &AuthPortRuntime, tenant: &str, role: &str) -> SessionCre
         )
         .expect("Alice is provisioned");
     SessionCredential::new(tenant, response.session.id)
+}
+
+struct InvoiceResolver;
+
+impl ResourceResolver for InvoiceResolver {
+    fn resolve(
+        &self,
+        resource: &ResourceRef,
+        _context: &AuthorizationContext,
+    ) -> ResourceAttributes {
+        let tenant = if resource.resource_id == "globex-invoice" {
+            "globex"
+        } else {
+            "acme"
+        };
+        ResourceAttributes::new().with_tenant(tenant)
+    }
 }
 
 fn connector_response(
@@ -145,6 +165,45 @@ fn a_context_exists_only_after_verification() {
             "`{forged}` must not authenticate"
         );
     }
+}
+
+#[test]
+fn route_authorization_uses_resolved_resource_tenant() {
+    let stores = stores();
+    let acme = tenant("acme");
+    stores
+        .policies
+        .put(Policy {
+            id: acme.policy_id.clone(),
+            rules: vec![Rule {
+                capability: Capability("invoice.read".to_string()),
+                condition: Condition::TenantCurrent,
+                resource: Some(ResourceSelector::any("invoice")),
+                action: Some(Action("read".to_string())),
+                effect: Effect::Allow,
+            }],
+        })
+        .unwrap();
+    let runtime =
+        runtime(BindingMode::Embedded, &stores).with_resource_resolver(Arc::new(InvoiceResolver));
+    let credential = seed_alice(&runtime, "acme", "owner");
+
+    let acme_invoice = BoundaryRequest::get("/invoices/acme-invoice").with_credential(&credential);
+    let context = runtime
+        .enforce(&acme_invoice, &Requirement::capability("invoice.read"))
+        .expect("same-tenant resource is allowed")
+        .expect("authorized requests receive context");
+    assert!(context
+        .decision
+        .as_ref()
+        .is_some_and(|decision| decision.is_allowed()));
+
+    let globex_invoice =
+        BoundaryRequest::get("/invoices/globex-invoice").with_credential(&credential);
+    let denied = runtime
+        .enforce(&globex_invoice, &Requirement::capability("invoice.read"))
+        .expect_err("cross-tenant resource is denied");
+    assert_eq!(denied.denial, DenialReason::TenantMismatch);
 }
 
 #[test]

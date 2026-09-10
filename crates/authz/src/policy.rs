@@ -2,6 +2,7 @@ use appport_auth_mesh_contract::{
     AuditEventId, Capability, ClaimValue, DelegationId, PolicyId, PrincipalId, PrincipalKind,
     TenantId,
 };
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -13,10 +14,158 @@ pub struct Policy {
 pub struct Rule {
     pub capability: Capability,
     pub condition: Condition,
+    pub resource: Option<ResourceSelector>,
+    pub action: Option<Action>,
+    pub effect: Effect,
+}
+
+impl Rule {
+    pub fn allow(capability: impl Into<Capability>, condition: Condition) -> Self {
+        Self {
+            capability: capability.into(),
+            condition,
+            resource: None,
+            action: None,
+            effect: Effect::Allow,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action(pub String);
+
+impl Action {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Action {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for Action {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceRef {
+    pub resource_type: String,
+    pub resource_id: String,
+    pub tenant_id: TenantId,
+}
+
+impl ResourceRef {
+    pub fn new(
+        resource_type: impl Into<String>,
+        resource_id: impl Into<String>,
+        tenant_id: impl Into<TenantId>,
+    ) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            resource_id: resource_id.into(),
+            tenant_id: tenant_id.into(),
+        }
+    }
+
+    pub fn opaque(&self) -> String {
+        format!("{}:{}", self.resource_type, self.resource_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSelector {
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+}
+
+impl ResourceSelector {
+    pub fn any(resource_type: impl Into<String>) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            resource_id: None,
+        }
+    }
+
+    pub fn exact(resource_type: impl Into<String>, resource_id: impl Into<String>) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            resource_id: Some(resource_id.into()),
+        }
+    }
+
+    pub fn matches(&self, resource: &ResourceRef) -> bool {
+        self.resource_type == resource.resource_type
+            && self
+                .resource_id
+                .as_ref()
+                .map(|id| id == "*" || id == &resource.resource_id)
+                .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceAttributes {
+    pub tenant_id: Option<TenantId>,
+    pub values: BTreeMap<String, ClaimValue>,
+}
+
+impl ResourceAttributes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_tenant(mut self, tenant_id: impl Into<TenantId>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn with_value(mut self, key: impl Into<String>, value: ClaimValue) -> Self {
+        self.values.insert(key.into(), value);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AuthorizationContext {
+    pub values: BTreeMap<String, ClaimValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationRequest {
+    pub principal: PrincipalId,
+    pub tenant: TenantId,
+    pub capability: Capability,
+    pub action: Action,
+    pub resource: Option<ResourceRef>,
+    pub context: AuthorizationContext,
+}
+
+pub trait ResourceResolver {
+    fn resolve(&self, resource: &ResourceRef, context: &AuthorizationContext)
+        -> ResourceAttributes;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
+    Always,
+    All(Vec<Condition>),
     ClaimEquals {
         key: String,
         value: ClaimValue,
@@ -29,6 +178,26 @@ pub enum Condition {
         start: i64,
         end: i64,
     },
+    TenantCurrent,
+    ResourceAttributeEquals {
+        key: String,
+        value: ClaimValue,
+    },
+    ResourceAttributeIn {
+        key: String,
+        values: Vec<ClaimValue>,
+    },
+    RelationshipEquals {
+        resource_attribute: String,
+        principal: PrincipalAttribute,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrincipalAttribute {
+    Id,
+    Tenant,
+    Claim(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,10 +318,18 @@ fn principal_kind_str(kind: &PrincipalKind) -> &'static str {
 pub enum AuthorizationDecision {
     Allow {
         grant: GrantedCapability,
+        resource: Option<ResourceRef>,
+        action: Option<Action>,
+        matched_rules: Vec<String>,
         audit_event_id: Option<AuditEventId>,
     },
     Deny {
         reason: DenialReason,
+        capability: Option<Capability>,
+        resource: Option<ResourceRef>,
+        action: Option<Action>,
+        policy_id: Option<PolicyId>,
+        matched_rules: Vec<String>,
         audit_event_id: Option<AuditEventId>,
     },
 }

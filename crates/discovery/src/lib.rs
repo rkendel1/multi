@@ -108,8 +108,16 @@ impl InferenceKind {
 pub struct Inference {
     pub kind: InferenceKind,
     pub capability: String,
+    pub resource: Option<ResourceInference>,
     pub confidence: Confidence,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceInference {
+    pub resource_type: String,
+    pub resource_id: String,
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1093,6 +1101,11 @@ fn discovery_revision(routes: &[RouteDescription]) -> u64 {
         route.capability.hash(&mut hasher);
         if let Some(inference) = &route.inference {
             inference.capability.hash(&mut hasher);
+            if let Some(resource) = &inference.resource {
+                resource.resource_type.hash(&mut hasher);
+                resource.resource_id.hash(&mut hasher);
+                resource.action.hash(&mut hasher);
+            }
             inference.confidence.as_str().hash(&mut hasher);
             inference.reasons.hash(&mut hasher);
         }
@@ -1131,6 +1144,7 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
     let method = method.to_ascii_uppercase();
     let normalized = normalize_path(path);
     let segments = path_segments(&normalized);
+    let raw_segments = path_segments(path);
     if segments.is_empty()
         || matches!(
             segments.first().copied(),
@@ -1140,7 +1154,7 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
         return None;
     }
 
-    let (capability, confidence, mut reasons) = if segments.len() == 1 {
+    let (capability, resource_inference, confidence, mut reasons) = if segments.len() == 1 {
         let resource = segments[0];
         let singular = singular_resource(resource);
         let action = match method.as_str() {
@@ -1155,6 +1169,11 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
         };
         (
             format!("{}.{}", singular, action),
+            Some(ResourceInference {
+                resource_type: singular,
+                resource_id: "*".to_string(),
+                action: action.to_string(),
+            }),
             confidence,
             vec![
                 format!("method is {}", method),
@@ -1173,6 +1192,16 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
         };
         (
             format!("{}.{}", singular, action),
+            Some(ResourceInference {
+                resource_type: singular,
+                resource_id: raw_segments
+                    .get(1)
+                    .and_then(|segment| parameter_name(segment))
+                    .or_else(|| parameter_name(segments[1]))
+                    .map(|name| format!("{{{}}}", name))
+                    .unwrap_or_else(|| "*".to_string()),
+                action: action.to_string(),
+            }),
             if is_plural(resource) {
                 Confidence::High
             } else {
@@ -1192,6 +1221,11 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
         };
         (
             format!("{}.{}", singular_resource(segments[0]), segments[1]),
+            Some(ResourceInference {
+                resource_type: singular_resource(segments[0]),
+                resource_id: "*".to_string(),
+                action: segments[1].to_string(),
+            }),
             confidence,
             vec![
                 format!("method is {}", method),
@@ -1203,6 +1237,11 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
         return Some(Inference {
             kind: InferenceKind::Capability,
             capability: format!("{}.review", singular_resource(segments[0])),
+            resource: Some(ResourceInference {
+                resource_type: singular_resource(segments[0]),
+                resource_id: "*".to_string(),
+                action: "review".to_string(),
+            }),
             confidence: Confidence::Low,
             reasons: vec!["route shape is ambiguous; review manually".to_string()],
         });
@@ -1212,9 +1251,16 @@ pub fn infer_capability(method: &str, path: &str) -> Option<Inference> {
     Some(Inference {
         kind: InferenceKind::Capability,
         capability,
+        resource: resource_inference,
         confidence,
         reasons,
     })
+}
+
+fn parameter_name(segment: &str) -> Option<&str> {
+    segment
+        .strip_prefix(':')
+        .or_else(|| segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
 }
 
 pub fn normalize_path(path: &str) -> String {
@@ -1598,9 +1644,14 @@ fn route_json(route: &RouteDescription) -> String {
 
 fn inference_json(inference: &Inference) -> String {
     format!(
-        "{{\"kind\": \"{}\", \"capability\": \"{}\", \"confidence\": \"{}\", \"reasons\": [{}]}}",
+        "{{\"kind\": \"{}\", \"capability\": \"{}\", \"resource\": {}, \"confidence\": \"{}\", \"reasons\": [{}]}}",
         inference.kind.as_str(),
         escape(&inference.capability),
+        inference
+            .resource
+            .as_ref()
+            .map(resource_inference_json)
+            .unwrap_or_else(|| "null".to_string()),
         inference.confidence.as_str(),
         inference
             .reasons
@@ -1608,6 +1659,15 @@ fn inference_json(inference: &Inference) -> String {
             .map(|reason| format!("\"{}\"", escape(reason)))
             .collect::<Vec<_>>()
             .join(", ")
+    )
+}
+
+fn resource_inference_json(resource: &ResourceInference) -> String {
+    format!(
+        "{{\"type\": \"{}\", \"id\": \"{}\", \"action\": \"{}\"}}",
+        escape(&resource.resource_type),
+        escape(&resource.resource_id),
+        escape(&resource.action)
     )
 }
 
@@ -1750,10 +1810,19 @@ mod tests {
         let read = infer_capability("GET", "/invoices/:id").unwrap();
         assert_eq!(read.capability, "invoice.read");
         assert_eq!(read.confidence, Confidence::High);
+        assert_eq!(
+            read.resource,
+            Some(ResourceInference {
+                resource_type: "invoice".to_string(),
+                resource_id: "{id}".to_string(),
+                action: "read".to_string(),
+            })
+        );
 
         let create = infer_capability("POST", "/customers").unwrap();
         assert_eq!(create.capability, "customer.create");
         assert_eq!(create.confidence, Confidence::High);
+        assert_eq!(create.resource.as_ref().unwrap().resource_id, "*");
 
         let action = infer_capability("POST", "/billing/charge").unwrap();
         assert_eq!(action.capability, "billing.charge");

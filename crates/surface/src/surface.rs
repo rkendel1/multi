@@ -214,6 +214,27 @@ impl AuthRoute {
                 true,
                 AuthFeature::Sessions,
             ),
+            Self::new(
+                "/_authport/policies",
+                &[Get],
+                AuthOperation::Policies,
+                true,
+                AuthFeature::ControlPlane,
+            ),
+            Self::new(
+                "/_authport/authorization/decisions",
+                &[Get],
+                AuthOperation::AuthorizationDecisions,
+                true,
+                AuthFeature::ControlPlane,
+            ),
+            Self::new(
+                "/_authport/authorization/explain",
+                &[Get],
+                AuthOperation::AuthorizationExplain,
+                true,
+                AuthFeature::ControlPlane,
+            ),
         ];
 
         if features.account_linking {
@@ -301,6 +322,9 @@ pub enum AuthOperation {
     Session,
     Providers,
     Authorize,
+    Policies,
+    AuthorizationDecisions,
+    AuthorizationExplain,
     AccountLinks,
     CurrentTenant,
     Tenants,
@@ -317,6 +341,9 @@ impl AuthOperation {
             Self::Session => "session",
             Self::Providers => "providers",
             Self::Authorize => "authorize",
+            Self::Policies => "policies",
+            Self::AuthorizationDecisions => "authorization_decisions",
+            Self::AuthorizationExplain => "authorization_explain",
             Self::AccountLinks => "account_links",
             Self::CurrentTenant => "current_tenant",
             Self::Tenants => "tenants",
@@ -374,6 +401,7 @@ pub struct AuthFeatures {
     pub account_linking: bool,
     pub agents: bool,
     pub delegation: bool,
+    pub control_plane: bool,
 }
 
 impl AuthFeatures {
@@ -388,6 +416,7 @@ impl AuthFeatures {
             account_linking: config.providers.len() > 1,
             agents: config.agents,
             delegation: config.agents,
+            control_plane: true,
         }
     }
 
@@ -400,10 +429,11 @@ impl AuthFeatures {
             AuthFeature::AccountLinking => self.account_linking,
             AuthFeature::Agents => self.agents,
             AuthFeature::Delegation => self.delegation,
+            AuthFeature::ControlPlane => self.control_plane,
         }
     }
 
-    pub fn all() -> [AuthFeature; 7] {
+    pub fn all() -> [AuthFeature; 8] {
         [
             AuthFeature::Login,
             AuthFeature::Signup,
@@ -412,6 +442,7 @@ impl AuthFeatures {
             AuthFeature::AccountLinking,
             AuthFeature::Agents,
             AuthFeature::Delegation,
+            AuthFeature::ControlPlane,
         ]
     }
 
@@ -432,6 +463,7 @@ pub enum AuthFeature {
     AccountLinking,
     Agents,
     Delegation,
+    ControlPlane,
 }
 
 impl AuthFeature {
@@ -444,6 +476,7 @@ impl AuthFeature {
             Self::AccountLinking => "account_linking",
             Self::Agents => "agents",
             Self::Delegation => "delegation",
+            Self::ControlPlane => "control_plane",
         }
     }
 }

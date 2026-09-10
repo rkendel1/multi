@@ -1,7 +1,7 @@
 use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 use crate::http::{HttpRequest, HttpResponse, JsonValue};
 use crate::router::ApplicationBinding;
-use appport_auth_mesh_authz::Policy;
+use appport_auth_mesh_authz::{AuthorizationDecision, Policy};
 use appport_auth_mesh_boundary::{
     Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method, ProposalMetadata,
     ProposalSource, ProposalStatus, RouteId, RouteProtection as LiveRouteProtection,
@@ -52,6 +52,11 @@ pub fn handle_control_route(
         ("POST", "/_authport/authority-proposals/approve") => Some(approve_bulk(runtime, request)),
         ("POST", "/_authport/authority-proposals/apply") => Some(apply_bulk(runtime, request)),
         ("GET", "/_authport/policies") => Some(policies(runtime)),
+        _ if method == "GET" && path.starts_with("/_authport/policies/") => {
+            Some(policy(runtime, path))
+        }
+        ("GET", "/_authport/authorization/decisions") => Some(authorization_decisions(runtime)),
+        ("GET", "/_authport/authorization/explain") => Some(authorization_explain(runtime)),
         ("GET", "/_authport/providers") => Some(providers(runtime)),
         ("POST", "/_authport/propose") => Some(propose(runtime, request)),
         ("POST", "/_authport/approve") => Some(approve(runtime, request)),
@@ -360,21 +365,299 @@ fn routes(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
 fn policies(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     let authority = runtime.live_authority();
 
-    let policies_json: Vec<(String, JsonValue)> = authority
+    let live_policies: Vec<JsonValue> = authority
         .capability_policies
         .iter()
-        .map(|(cap, policy)| (cap.clone(), JsonValue::String(format!("{:?}", policy))))
+        .map(|(capability, policy)| policy_summary_json(capability, policy))
         .collect();
+    let contract_policies = runtime
+        .contract()
+        .policies
+        .iter()
+        .map(|policy| {
+            JsonValue::Object(vec![
+                (
+                    "id".to_string(),
+                    JsonValue::String(policy.capability.clone()),
+                ),
+                (
+                    "capability".to_string(),
+                    JsonValue::String(policy.capability.clone()),
+                ),
+                (
+                    "tenant".to_string(),
+                    JsonValue::String(if policy.tenant_current {
+                        "current".to_string()
+                    } else {
+                        "unspecified".to_string()
+                    }),
+                ),
+                (
+                    "resource".to_string(),
+                    policy
+                        .resource
+                        .as_ref()
+                        .map(|resource| JsonValue::String(resource.clone()))
+                        .unwrap_or(JsonValue::Null),
+                ),
+                (
+                    "action".to_string(),
+                    policy
+                        .action
+                        .as_ref()
+                        .map(|action| JsonValue::String(action.clone()))
+                        .unwrap_or(JsonValue::Null),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
 
     let json = JsonValue::Object(vec![
         (
             "revision".to_string(),
             JsonValue::Number(authority.revision as f64),
         ),
-        ("policies".to_string(), JsonValue::Object(policies_json)),
+        ("live_policies".to_string(), JsonValue::Array(live_policies)),
+        (
+            "contract_policies".to_string(),
+            JsonValue::Array(contract_policies),
+        ),
     ]);
 
     HttpResponse::ok_json(json)
+}
+
+fn policy(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
+    let id = path.trim_start_matches("/_authport/policies/");
+    let authority = runtime.live_authority();
+    if let Some((capability, policy)) = authority
+        .capability_policies
+        .iter()
+        .find(|(capability, policy)| capability.as_str() == id || policy.id.as_str() == id)
+    {
+        return HttpResponse::ok_json(policy_summary_json(capability, policy));
+    }
+    if let Some(policy) = runtime
+        .contract()
+        .policies
+        .iter()
+        .find(|policy| policy.capability == id)
+    {
+        return HttpResponse::ok_json(JsonValue::Object(vec![
+            (
+                "id".to_string(),
+                JsonValue::String(policy.capability.clone()),
+            ),
+            (
+                "capability".to_string(),
+                JsonValue::String(policy.capability.clone()),
+            ),
+            (
+                "tenant".to_string(),
+                JsonValue::String(if policy.tenant_current {
+                    "current".to_string()
+                } else {
+                    "unspecified".to_string()
+                }),
+            ),
+        ]));
+    }
+    HttpResponse::denied(404, "policy_not_found", "no such policy")
+}
+
+fn authorization_decisions(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    HttpResponse::ok_json(JsonValue::Object(vec![(
+        "decisions".to_string(),
+        JsonValue::Array(
+            runtime
+                .mesh()
+                .recent_decisions()
+                .iter()
+                .map(decision_json)
+                .collect(),
+        ),
+    )]))
+}
+
+fn authorization_explain(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    let decisions = runtime.mesh().recent_decisions();
+    let latest = decisions
+        .last()
+        .map(decision_json)
+        .unwrap_or(JsonValue::Null);
+    HttpResponse::ok_json(JsonValue::Object(vec![
+        ("latest_decision".to_string(), latest),
+        (
+            "message".to_string(),
+            JsonValue::String(
+                "authorization explanations are derived from structured decisions".to_string(),
+            ),
+        ),
+    ]))
+}
+
+fn policy_summary_json(capability: &str, policy: &Policy) -> JsonValue {
+    JsonValue::Object(vec![
+        ("id".to_string(), JsonValue::String(policy.id.0.clone())),
+        (
+            "capability".to_string(),
+            JsonValue::String(capability.to_string()),
+        ),
+        (
+            "rules".to_string(),
+            JsonValue::Array(
+                policy
+                    .rules
+                    .iter()
+                    .map(|rule| {
+                        JsonValue::Object(vec![
+                            (
+                                "capability".to_string(),
+                                JsonValue::String(rule.capability.to_string()),
+                            ),
+                            (
+                                "effect".to_string(),
+                                JsonValue::String(
+                                    match rule.effect {
+                                        appport_auth_mesh_authz::Effect::Allow => "allow",
+                                        appport_auth_mesh_authz::Effect::Deny => "deny",
+                                    }
+                                    .to_string(),
+                                ),
+                            ),
+                            (
+                                "resource".to_string(),
+                                rule.resource
+                                    .as_ref()
+                                    .map(|resource| {
+                                        JsonValue::String(resource.resource_type.clone())
+                                    })
+                                    .unwrap_or(JsonValue::Null),
+                            ),
+                            (
+                                "action".to_string(),
+                                rule.action
+                                    .as_ref()
+                                    .map(|action| JsonValue::String(action.to_string()))
+                                    .unwrap_or(JsonValue::Null),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn decision_json(decision: &AuthorizationDecision) -> JsonValue {
+    match decision {
+        AuthorizationDecision::Allow {
+            grant,
+            resource,
+            action,
+            matched_rules,
+            audit_event_id,
+        } => JsonValue::Object(vec![
+            ("allowed".to_string(), JsonValue::Bool(true)),
+            (
+                "capability".to_string(),
+                JsonValue::String(grant.capability.to_string()),
+            ),
+            (
+                "policy_id".to_string(),
+                JsonValue::String(grant.policy_id.to_string()),
+            ),
+            (
+                "resource".to_string(),
+                resource
+                    .as_ref()
+                    .map(|resource| JsonValue::String(resource.opaque()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "action".to_string(),
+                action
+                    .as_ref()
+                    .map(|action| JsonValue::String(action.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "matched_rules".to_string(),
+                JsonValue::Array(
+                    matched_rules
+                        .iter()
+                        .map(|rule| JsonValue::String(rule.clone()))
+                        .collect(),
+                ),
+            ),
+            (
+                "audit_event_id".to_string(),
+                audit_event_id
+                    .as_ref()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ]),
+        AuthorizationDecision::Deny {
+            reason,
+            capability,
+            resource,
+            action,
+            policy_id,
+            matched_rules,
+            audit_event_id,
+        } => JsonValue::Object(vec![
+            ("allowed".to_string(), JsonValue::Bool(false)),
+            (
+                "reason".to_string(),
+                JsonValue::String(reason.as_str().to_string()),
+            ),
+            (
+                "capability".to_string(),
+                capability
+                    .as_ref()
+                    .map(|capability| JsonValue::String(capability.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "resource".to_string(),
+                resource
+                    .as_ref()
+                    .map(|resource| JsonValue::String(resource.opaque()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "action".to_string(),
+                action
+                    .as_ref()
+                    .map(|action| JsonValue::String(action.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "policy_id".to_string(),
+                policy_id
+                    .as_ref()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "matched_rules".to_string(),
+                JsonValue::Array(
+                    matched_rules
+                        .iter()
+                        .map(|rule| JsonValue::String(rule.clone()))
+                        .collect(),
+                ),
+            ),
+            (
+                "audit_event_id".to_string(),
+                audit_event_id
+                    .as_ref()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ]),
+    }
 }
 
 fn providers(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {

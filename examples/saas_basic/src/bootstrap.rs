@@ -74,9 +74,9 @@ pub fn policy(tenant: &TenantContext) -> Policy {
     Policy {
         id: tenant.policy_id.clone(),
         rules: vec![
-            Rule {
-                capability: Capability("invoice.read".to_string()),
-                condition: Condition::ClaimIn {
+            Rule::allow(
+                Capability("invoice.read".to_string()),
+                Condition::ClaimIn {
                     key: "role".to_string(),
                     values: vec![
                         ClaimValue::Enum("owner".to_string()),
@@ -84,25 +84,25 @@ pub fn policy(tenant: &TenantContext) -> Policy {
                         ClaimValue::Enum("member".to_string()),
                     ],
                 },
-            },
-            Rule {
-                capability: Capability("invoice.create".to_string()),
-                condition: Condition::ClaimIn {
+            ),
+            Rule::allow(
+                Capability("invoice.create".to_string()),
+                Condition::ClaimIn {
                     key: "role".to_string(),
                     values: vec![
                         ClaimValue::Enum("owner".to_string()),
                         ClaimValue::Enum("admin".to_string()),
                     ],
                 },
-            },
+            ),
             // Owning the account is not the same as being able to spend money.
-            Rule {
-                capability: Capability("billing.charge".to_string()),
-                condition: Condition::ClaimEquals {
+            Rule::allow(
+                Capability("billing.charge".to_string()),
+                Condition::ClaimEquals {
                     key: "billing".to_string(),
                     value: ClaimValue::Enum("manager".to_string()),
                 },
-            },
+            ),
         ],
     }
 }
