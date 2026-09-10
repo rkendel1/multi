@@ -1,17 +1,23 @@
 use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 use crate::http::{HttpRequest, HttpResponse, JsonValue};
+use crate::router::ApplicationBinding;
 use appport_auth_mesh_authz::Policy;
 use appport_auth_mesh_boundary::{
     Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method, ProposalMetadata,
     ProposalStatus, RouteId, RouteProtection as LiveRouteProtection, StoredProposal,
 };
 use appport_auth_mesh_contract::PolicyId;
+use appport_auth_mesh_discovery::{
+    propose_authority, render_proposal_json, ApplicationCandidate, DiscoveryConfidence,
+    ExistingAuthPort,
+};
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Handle control plane routes (_authport/*)
 pub fn handle_control_route(
     runtime: &std::sync::Arc<AuthPortRuntime>,
+    app: &dyn ApplicationBinding,
     path: &str,
     request: &HttpRequest,
 ) -> Option<HttpResponse> {
@@ -20,6 +26,7 @@ pub fn handle_control_route(
     match (method.as_str(), path) {
         ("GET", "/_authport/overview") => Some(overview(runtime)),
         ("GET", "/_authport/routes") => Some(routes(runtime)),
+        ("GET", "/_authport/authority-proposal") => Some(authority_proposal(runtime, app)),
         ("GET", "/_authport/policies") => Some(policies(runtime)),
         ("GET", "/_authport/providers") => Some(providers(runtime)),
         ("POST", "/_authport/propose") => Some(propose(runtime, request)),
@@ -32,6 +39,45 @@ pub fn handle_control_route(
         }
         _ => None,
     }
+}
+
+fn authority_proposal(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    app: &dyn ApplicationBinding,
+) -> HttpResponse {
+    let application = ApplicationCandidate {
+        root: std::path::PathBuf::new(),
+        name: Some("AuthPort".to_string()),
+        language: None,
+        framework: None,
+        package_manager: None,
+        entrypoints: Vec::new(),
+        servers: Vec::new(),
+        routes: app.observed_routes(),
+        providers: Vec::new(),
+        existing_authport: ExistingAuthPort::default(),
+        confidence: DiscoveryConfidence::High,
+    };
+    let authority = runtime.live_authority();
+    let existing = authority
+        .route_protection
+        .iter()
+        .filter_map(|(route, protection)| {
+            protection.capability.clone().map(|capability| {
+                (
+                    (route.method.as_str().to_string(), route.path.clone()),
+                    capability,
+                )
+            })
+        })
+        .collect();
+    let proposal = propose_authority(
+        &application,
+        runtime.contract().fingerprint(),
+        authority.revision,
+        &existing,
+    );
+    HttpResponse::json(200, render_proposal_json(&proposal))
 }
 
 fn overview(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {

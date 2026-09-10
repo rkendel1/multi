@@ -13,7 +13,7 @@ use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_runtime::MemoryStores;
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
-    render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy,
+    render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy, RouterApp,
 };
 use appport_auth_mesh_surface::{AuthSurface, BoundarySurface};
 
@@ -253,6 +253,53 @@ fn control_plane_http_routes_store_apply_and_list_history() {
     let history = server.handle(&request(Method::Get, "/_authport/history", &[], ""));
     assert_eq!(history.status, 200);
     assert!(history.body_string().contains(&change_id));
+}
+
+#[test]
+fn control_plane_exposes_same_authority_proposal_without_applying_it() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let app = RouterApp::new()
+        .public(
+            Method::Get,
+            "/health",
+            Box::new(|_| HttpResponse::text(200, "ok")),
+        )
+        .public(
+            Method::Post,
+            "/invoices",
+            Box::new(|_| HttpResponse::text(200, "created")),
+        );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    let proposed = server.handle(&request(
+        Method::Get,
+        "/_authport/authority-proposal",
+        &[],
+        "",
+    ));
+
+    assert_eq!(proposed.status, 200);
+    let body = proposed.body_string();
+    assert!(body.contains("\"contract_fingerprint\""));
+    assert!(body.contains("\"live_revision\": 0"));
+    assert!(body.contains("\"capability\": \"invoice.create\""));
+    assert!(body.contains("\"action\": \"protect_route\""));
+    assert!(
+        runtime
+            .get_route_protection(&Method::Post, "/invoices")
+            .is_none(),
+        "inference must not silently become authorization policy"
+    );
 }
 
 struct NoApp;

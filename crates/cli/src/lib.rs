@@ -5,6 +5,9 @@
 
 use std::path::PathBuf;
 
+use appport_auth_mesh_discovery::{
+    discover, propose_authority, render_proposal_json, render_proposal_text,
+};
 use appport_auth_mesh_dsl::{parse_auth_block, AuthConfig};
 use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_surface::{render_json_with, render_text, AuthSurface};
@@ -25,6 +28,7 @@ USAGE:
     authport providers [FILE]
     authport serve [FILE] [options]
     authport connect [--server URL] [--output-token]
+    authport propose [FILE] [--json]
     authport propose <change-type> [options] [--server URL] [--dry-run]
     authport apply [--proposal-id ID] [--server URL] --yes
 
@@ -78,10 +82,9 @@ where
     I: IntoIterator<Item = String>,
 {
     let args: Vec<String> = args.into_iter().collect();
-    if matches!(
-        args.first().map(String::as_str),
-        Some("connect" | "propose" | "apply")
-    ) {
+    if matches!(args.first().map(String::as_str), Some("connect" | "apply"))
+        || is_control_propose(&args)
+    {
         return control::run(&args);
     }
     if matches!(args.first().map(String::as_str), Some("init")) {
@@ -176,14 +179,60 @@ where
     }
 
     let command = command.unwrap_or_else(|| "inspect".to_string());
-    let path = resolve_file(file)?;
-    let source = std::fs::read_to_string(&path)
-        .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
-    let config = parse_auth_block(&source)
-        .map_err(|err| error(format!("{}: {}", path.display(), err.message)))?;
+    let path = resolve_file(file.clone());
+    let (path, source) = match path {
+        Ok(path) => {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
+            (Some(path), source)
+        }
+        Err(err) if matches!(command.as_str(), "inspect" | "propose") && file.is_none() => {
+            let root = std::env::current_dir()
+                .map_err(|err| error(format!("cannot read cwd: {}", err)))?;
+            if discover(&root).is_none() {
+                return Err(err);
+            }
+            (None, "use auth { providers = [local] }\n".to_string())
+        }
+        Err(err) => return Err(err),
+    };
+    let config = parse_auth_block(&source).map_err(|err| {
+        let display = path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(default contract)".to_string());
+        error(format!("{}: {}", display, err.message))
+    })?;
 
     let text = match command.as_str() {
-        "inspect" => describe(&config, json, mode.as_deref()),
+        "inspect" => {
+            let root = path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            describe(&config, json, mode.as_deref(), Some(&root))
+        }
+        "propose" => {
+            let root = path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let app = discover(&root)
+                .ok_or_else(|| error("no supported application found to propose authority"))?;
+            let proposal = propose_authority(
+                &app,
+                config.fingerprint(),
+                0,
+                &std::collections::BTreeMap::new(),
+            );
+            if json {
+                render_proposal_json(&proposal)
+            } else {
+                render_proposal_text(&proposal)
+            }
+        }
         "fingerprint" => format!(
             "contract {}\nsurface  {}\n",
             config.fingerprint(),
@@ -200,7 +249,10 @@ where
                     .join(",");
                 out.push_str(&format!("{:<18} {:<21} AuthPort\n", methods, route.path));
             }
-            let root = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let root = path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .unwrap_or_else(|| std::path::Path::new("."));
             if let Some(routes) = init::discovered_routes(root) {
                 for route in routes {
                     out.push_str(&format!(
@@ -240,10 +292,76 @@ fn run_server(config: AuthConfig, options: &serve::ServeOptions) -> Result<Outpu
     })
 }
 
-fn describe(config: &AuthConfig, json: bool, mode: Option<&str>) -> String {
+fn is_control_propose(args: &[String]) -> bool {
+    if args.first().map(String::as_str) != Some("propose") {
+        return false;
+    }
+    matches!(
+        args.get(1).map(String::as_str),
+        Some(
+            "protect-route"
+                | "unprotect-route"
+                | "set-policy"
+                | "enable-provider"
+                | "disable-provider"
+        )
+    ) || args
+        .iter()
+        .any(|arg| arg == "--server" || arg == "--dry-run")
+}
+
+fn describe(
+    config: &AuthConfig,
+    json: bool,
+    mode: Option<&str>,
+    root: Option<&std::path::Path>,
+) -> String {
     let surface = AuthSurface::derive(config);
+    let application = root.and_then(discover);
     if !json {
-        return render_text(&surface);
+        let mut out = render_text(&surface);
+        if let Some(app) = application {
+            let proposal = propose_authority(
+                &app,
+                config.fingerprint(),
+                0,
+                &std::collections::BTreeMap::new(),
+            );
+            out.push('\n');
+            out.push_str("Application discovery:\n");
+            out.push_str(&format!(
+                "  found: {}\n",
+                app.name.as_deref().unwrap_or("(unknown)")
+            ));
+            out.push_str("Routes:\n");
+            for route in &proposal.routes {
+                out.push_str(&format!("  {:<6} {}\n", route.method, route.path));
+            }
+            out.push_str("Inferred capabilities:\n");
+            for route in proposal
+                .routes
+                .iter()
+                .filter(|route| route.inference.is_some())
+            {
+                let inference = route.inference.as_ref().unwrap();
+                out.push_str(&format!(
+                    "  {} ({})\n",
+                    inference.capability,
+                    inference.confidence.as_str()
+                ));
+            }
+            out.push_str("Safe defaults:\n");
+            for route in &proposal.routes {
+                out.push_str(&format!(
+                    "  {:<6} {:<24} {}\n",
+                    route.method,
+                    route.path,
+                    route.protection.as_str()
+                ));
+            }
+            out.push_str("Nothing has been changed.\n");
+        }
+        return out;
     }
 
     // The contract is the same in both placements; the mode only says which
@@ -515,6 +633,40 @@ use auth {
             "const express = require('express');\nconst app = express();\napp.get('/', handler);\napp.get('/health', handler);\napp.post('/invoices', handler);\n",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn inspect_and_propose_discovered_routes_without_changing_authority() {
+        let dir = temp_dir("propose-express");
+        write_express_app(&dir);
+        std::fs::write(
+            dir.join("src/server.js"),
+            "const express = require('express');\nconst app = express();\napp.get('/health', handler);\napp.get('/invoices', handler);\napp.post('/invoices', handler);\napp.get('/customers', handler);\napp.post('/billing/charge', handler);\n",
+        )
+        .unwrap();
+        let path = write_declaration(&dir, "use auth { providers = [local] }");
+
+        let inspect = run_with(&["inspect", path.to_str().unwrap()]).unwrap().text;
+        assert!(inspect.contains("Application discovery:"));
+        assert!(inspect.contains("GET    /health"));
+        assert!(inspect.contains("invoice.read (high)"));
+        assert!(inspect.contains("billing.charge (high)"));
+        assert!(inspect.contains("Nothing has been changed."));
+
+        let proposal = run_with(&["propose", path.to_str().unwrap()]).unwrap().text;
+        assert!(proposal.contains("AUTHORITY PROPOSAL"));
+        assert!(proposal.contains("POST /invoices\n  → invoice.create"));
+        assert!(proposal.contains("POST /billing/charge\n  → billing.charge"));
+        assert!(proposal.contains("RECOMMENDED PROTECTION"));
+        assert!(proposal.contains("Nothing has been changed."));
+
+        let json = run_with(&["propose", path.to_str().unwrap(), "--json"])
+            .unwrap()
+            .text;
+        assert!(json.contains("\"application\": \"zero-app\""));
+        assert!(json.contains("\"contract_fingerprint\""));
+        assert!(json.contains("\"live_revision\": 0"));
+        assert!(json.contains("\"action\": \"protect_route\""));
     }
 
     #[test]
