@@ -227,6 +227,146 @@ pub struct AuthorityProposal {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityDrift {
+    NewRoute,
+    RemovedRoute,
+    RouteChanged,
+    CapabilityConflict,
+    OrphanedAuthority,
+    StaleProposal,
+}
+
+impl AuthorityDrift {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewRoute => "new_route",
+            Self::RemovedRoute => "removed_route",
+            Self::RouteChanged => "route_changed",
+            Self::CapabilityConflict => "capability_conflict",
+            Self::OrphanedAuthority => "orphaned_authority",
+            Self::StaleProposal => "stale_proposal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedAuthority {
+    pub method: String,
+    pub path: String,
+    pub capability: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedRoute {
+    pub previous: RouteDescription,
+    pub current: RouteDescription,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalHistoryItem {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    pub capability: String,
+    pub status: String,
+    pub discovery_revision: u64,
+    pub authority_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityDriftItem {
+    pub kind: AuthorityDrift,
+    pub route: String,
+    pub previous_state: String,
+    pub current_state: String,
+    pub authority_state: String,
+    pub recommended_action: String,
+    pub discovery_revision: u64,
+    pub authority_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationResult {
+    pub application: String,
+    pub contract_fingerprint: String,
+    pub discovery_revision: u64,
+    pub authority_revision: u64,
+    pub reconciliation_revision: u64,
+    pub new_routes: Vec<RouteDescription>,
+    pub removed_routes: Vec<RouteDescription>,
+    pub changed_routes: Vec<ChangedRoute>,
+    pub unchanged_routes: Vec<RouteDescription>,
+    pub equivalent_routes: Vec<ChangedRoute>,
+    pub orphaned_authority: Vec<OrphanedAuthority>,
+    pub new_authority_proposals: Vec<AuthorityRecommendation>,
+    pub stale_proposals: Vec<ProposalHistoryItem>,
+    pub warnings: Vec<String>,
+    pub drift: Vec<AuthorityDriftItem>,
+}
+
+pub struct AuthorityReconciler;
+
+impl AuthorityReconciler {
+    pub fn reconcile(
+        previous: Option<&ApplicationCandidate>,
+        current: &ApplicationCandidate,
+        contract_fingerprint: impl Into<String>,
+        authority_revision: u64,
+        live_authority: &BTreeMap<(String, String), String>,
+        proposal_history: &[ProposalHistoryItem],
+    ) -> ReconciliationResult {
+        let contract_fingerprint = contract_fingerprint.into();
+        let equivalent_keys = equivalent_route_keys(previous, current);
+        let current_proposal = propose_authority(
+            current,
+            contract_fingerprint.clone(),
+            authority_revision,
+            live_authority,
+        );
+        let previous_routes = previous
+            .map(|application| {
+                propose_authority(
+                    application,
+                    contract_fingerprint.clone(),
+                    authority_revision,
+                    live_authority,
+                )
+                .routes
+            })
+            .unwrap_or_else(|| {
+                live_authority
+                    .iter()
+                    .map(|((method, path), capability)| RouteDescription {
+                        id: format!("{} {}", method, normalize_path(path)),
+                        method: method.clone(),
+                        path: normalize_path(path),
+                        source: RouteSource::Unknown,
+                        capability: Some(capability.clone()),
+                        inference: None,
+                        protection: ProtectionState::Protected,
+                        protection_reason: "previously approved authority mapping".to_string(),
+                    })
+                    .collect()
+            });
+        reconcile_descriptions(
+            current
+                .name
+                .clone()
+                .unwrap_or_else(|| "application".to_string()),
+            contract_fingerprint,
+            authority_revision,
+            previous_routes,
+            current_proposal,
+            live_authority,
+            proposal_history,
+            &equivalent_keys,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
     pub id: String,
@@ -490,6 +630,455 @@ pub fn render_proposal_json(proposal: &AuthorityProposal) -> String {
         proposal.recommendations.iter().map(recommendation_json).collect::<Vec<_>>().join(", "),
         proposal.warnings.iter().map(|warning| format!("\"{}\"", escape(warning))).collect::<Vec<_>>().join(", ")
     )
+}
+
+pub fn render_reconciliation_text(result: &ReconciliationResult) -> String {
+    let mut out = String::from("AuthPort Authority Reconciliation\n");
+    out.push_str(&format!(
+        "Contract: {}\nDiscovery: {}\nAuthority: {}\nReconciliation: {}\n",
+        result.contract_fingerprint,
+        result.discovery_revision,
+        result.authority_revision,
+        result.reconciliation_revision
+    ));
+
+    if !result.new_routes.is_empty() {
+        out.push_str("NEW\n");
+        for route in &result.new_routes {
+            let capability = route
+                .inference
+                .as_ref()
+                .map(|inference| inference.capability.as_str())
+                .or(route.capability.as_deref())
+                .unwrap_or("(review)");
+            let confidence = route
+                .inference
+                .as_ref()
+                .map(|inference| inference.confidence.as_str())
+                .unwrap_or("unknown");
+            out.push_str(&format!(
+                "  {} {}\n  → {}\n  → {} confidence\n  → review required\n",
+                route.method,
+                route.path,
+                capability,
+                confidence.to_ascii_uppercase()
+            ));
+        }
+    }
+    if !result.orphaned_authority.is_empty() {
+        out.push_str("REMOVED\n");
+        for item in &result.orphaned_authority {
+            out.push_str(&format!(
+                "  {} {}\n  → {}\n  → orphaned authority\n",
+                item.method, item.path, item.capability
+            ));
+        }
+    }
+    if !result.changed_routes.is_empty() {
+        out.push_str("CHANGED\n");
+        for item in &result.changed_routes {
+            let capability = item
+                .current
+                .capability
+                .as_deref()
+                .or_else(|| {
+                    item.current
+                        .inference
+                        .as_ref()
+                        .map(|i| i.capability.as_str())
+                })
+                .unwrap_or("(review)");
+            out.push_str(&format!(
+                "  {} {} (was {} {})\n  → {}\n  → existing authority preserved\n",
+                item.current.method,
+                item.current.path,
+                item.previous.method,
+                item.previous.path,
+                capability
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "UNCHANGED\n  {} routes\n",
+        result.unchanged_routes.len()
+    ));
+    out.push_str("No authority was changed.\n");
+    out
+}
+
+pub fn render_reconciliation_json(result: &ReconciliationResult) -> String {
+    format!(
+        "{{\n  \"application\": \"{}\",\n  \"contract_fingerprint\": \"{}\",\n  \"discovery_revision\": {},\n  \"authority_revision\": {},\n  \"reconciliation_revision\": {},\n  \"summary\": {{\"new_routes\": {}, \"removed_routes\": {}, \"changed_routes\": {}, \"unchanged_routes\": {}, \"orphaned_authority\": {}, \"capability_conflicts\": {}, \"stale_proposals\": {}, \"unsafe_automatic_changes\": 0}},\n  \"new_routes\": [{}],\n  \"removed_routes\": [{}],\n  \"changed_routes\": [{}],\n  \"unchanged_routes\": [{}],\n  \"equivalent_routes\": [{}],\n  \"orphaned_authority\": [{}],\n  \"new_authority_proposals\": [{}],\n  \"stale_proposals\": [{}],\n  \"warnings\": [{}],\n  \"drift\": [{}]\n}}\n",
+        escape(&result.application),
+        escape(&result.contract_fingerprint),
+        result.discovery_revision,
+        result.authority_revision,
+        result.reconciliation_revision,
+        result.new_routes.len(),
+        result.removed_routes.len(),
+        result.changed_routes.len(),
+        result.unchanged_routes.len(),
+        result.orphaned_authority.len(),
+        result
+            .drift
+            .iter()
+            .filter(|item| item.kind == AuthorityDrift::CapabilityConflict)
+            .count(),
+        result.stale_proposals.len(),
+        result.new_routes.iter().map(route_json).collect::<Vec<_>>().join(", "),
+        result.removed_routes.iter().map(route_json).collect::<Vec<_>>().join(", "),
+        result.changed_routes.iter().map(changed_route_json).collect::<Vec<_>>().join(", "),
+        result.unchanged_routes.iter().map(route_json).collect::<Vec<_>>().join(", "),
+        result.equivalent_routes.iter().map(changed_route_json).collect::<Vec<_>>().join(", "),
+        result.orphaned_authority.iter().map(orphaned_authority_json).collect::<Vec<_>>().join(", "),
+        result.new_authority_proposals.iter().map(recommendation_json).collect::<Vec<_>>().join(", "),
+        result.stale_proposals.iter().map(proposal_history_json).collect::<Vec<_>>().join(", "),
+        result.warnings.iter().map(|warning| format!("\"{}\"", escape(warning))).collect::<Vec<_>>().join(", "),
+        result.drift.iter().map(drift_item_json).collect::<Vec<_>>().join(", ")
+    )
+}
+
+pub fn render_drift_json(result: &ReconciliationResult) -> String {
+    format!(
+        "{{\n  \"contract_fingerprint\": \"{}\",\n  \"discovery_revision\": {},\n  \"authority_revision\": {},\n  \"reconciliation_revision\": {},\n  \"drift\": [{}]\n}}\n",
+        escape(&result.contract_fingerprint),
+        result.discovery_revision,
+        result.authority_revision,
+        result.reconciliation_revision,
+        result
+            .drift
+            .iter()
+            .map(drift_item_json)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn equivalent_route_keys(
+    previous: Option<&ApplicationCandidate>,
+    current: &ApplicationCandidate,
+) -> Vec<(String, String)> {
+    let Some(previous) = previous else {
+        return Vec::new();
+    };
+    let previous_raw = previous
+        .routes
+        .iter()
+        .map(|route| {
+            (
+                (route.method.clone(), normalize_path(&route.path)),
+                route.path.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut keys = current
+        .routes
+        .iter()
+        .filter_map(|route| {
+            let key = (route.method.clone(), normalize_path(&route.path));
+            previous_raw
+                .get(&key)
+                .filter(|path| *path != &route.path)
+                .map(|_| key)
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn reconcile_descriptions(
+    application: String,
+    contract_fingerprint: String,
+    authority_revision: u64,
+    mut previous_routes: Vec<RouteDescription>,
+    current_proposal: AuthorityProposal,
+    live_authority: &BTreeMap<(String, String), String>,
+    proposal_history: &[ProposalHistoryItem],
+    equivalent_keys: &[(String, String)],
+) -> ReconciliationResult {
+    previous_routes.sort_by(route_order);
+    let mut current_routes = current_proposal.routes.clone();
+    current_routes.sort_by(route_order);
+    let discovery_revision = current_proposal.discovery_revision;
+
+    let previous_keys = previous_routes
+        .iter()
+        .map(|route| (route_key(route), route.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let current_keys = current_routes
+        .iter()
+        .map(|route| (route_key(route), route.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut unchanged_routes = Vec::new();
+    let mut equivalent_routes = Vec::new();
+    let mut removed_routes = Vec::new();
+    let mut new_routes = Vec::new();
+
+    for (key, current) in &current_keys {
+        if let Some(previous) = previous_keys.get(key) {
+            if equivalent_keys.contains(key) {
+                equivalent_routes.push(ChangedRoute {
+                    previous: previous.clone(),
+                    current: current.clone(),
+                    reason: "route parameter syntax normalized to the same authority route"
+                        .to_string(),
+                });
+            }
+            unchanged_routes.push(current.clone());
+        } else {
+            new_routes.push(current.clone());
+        }
+    }
+    for (key, previous) in &previous_keys {
+        if !current_keys.contains_key(key) {
+            removed_routes.push(previous.clone());
+        }
+    }
+
+    let mut changed_routes = Vec::new();
+    let mut paired_new = Vec::new();
+    let mut paired_removed = Vec::new();
+    for (removed_index, removed) in removed_routes.iter().enumerate() {
+        if let Some((new_index, new)) = new_routes.iter().enumerate().find(|(new_index, new)| {
+            !paired_new.contains(new_index) && route_family(removed) == route_family(new)
+        }) {
+            paired_removed.push(removed_index);
+            paired_new.push(new_index);
+            changed_routes.push(ChangedRoute {
+                previous: removed.clone(),
+                current: new.clone(),
+                reason: if removed.method != new.method {
+                    "HTTP method changed".to_string()
+                } else {
+                    "route shape changed".to_string()
+                },
+            });
+        }
+    }
+    new_routes = new_routes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, route)| (!paired_new.contains(&index)).then_some(route))
+        .collect();
+    removed_routes = removed_routes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, route)| (!paired_removed.contains(&index)).then_some(route))
+        .collect();
+
+    let mut orphaned_authority = live_authority
+        .iter()
+        .filter_map(|((method, path), capability)| {
+            let key = (method.clone(), normalize_path(path));
+            (!current_keys.contains_key(&key)).then(|| OrphanedAuthority {
+                method: method.clone(),
+                path: normalize_path(path),
+                capability: capability.clone(),
+                reason: "route no longer discovered; historical authority retained".to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    orphaned_authority.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.method.cmp(&b.method)));
+
+    let mut new_authority_proposals = current_proposal
+        .recommendations
+        .into_iter()
+        .filter(|item| item.action == RecommendationAction::ProtectRoute)
+        .collect::<Vec<_>>();
+    new_authority_proposals
+        .sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.method.cmp(&b.method)));
+
+    let mut stale_proposals = proposal_history
+        .iter()
+        .filter(|proposal| {
+            let key = (proposal.method.clone(), normalize_path(&proposal.path));
+            proposal.status != "applied" && !current_keys.contains_key(&key)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    stale_proposals.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut warnings = Vec::new();
+    let mut drift = Vec::new();
+    for route in &new_routes {
+        drift.push(drift_item(
+            AuthorityDrift::NewRoute,
+            route,
+            "absent",
+            "discovered",
+            route.protection.as_str(),
+            "review",
+            discovery_revision,
+            authority_revision,
+        ));
+    }
+    for route in &removed_routes {
+        drift.push(drift_item(
+            AuthorityDrift::RemovedRoute,
+            route,
+            "discovered",
+            "absent",
+            route.protection.as_str(),
+            "review",
+            discovery_revision,
+            authority_revision,
+        ));
+    }
+    for change in &changed_routes {
+        drift.push(drift_item(
+            AuthorityDrift::RouteChanged,
+            &change.current,
+            &format!("{} {}", change.previous.method, change.previous.path),
+            &format!("{} {}", change.current.method, change.current.path),
+            change.current.protection.as_str(),
+            "review",
+            discovery_revision,
+            authority_revision,
+        ));
+    }
+    for item in &orphaned_authority {
+        drift.push(AuthorityDriftItem {
+            kind: AuthorityDrift::OrphanedAuthority,
+            route: format!("{} {}", item.method, item.path),
+            previous_state: "protected".to_string(),
+            current_state: "route_absent".to_string(),
+            authority_state: format!("retained:{}", item.capability),
+            recommended_action: "review".to_string(),
+            discovery_revision,
+            authority_revision,
+        });
+    }
+    for proposal in &stale_proposals {
+        drift.push(AuthorityDriftItem {
+            kind: AuthorityDrift::StaleProposal,
+            route: format!("{} {}", proposal.method, normalize_path(&proposal.path)),
+            previous_state: proposal.status.clone(),
+            current_state: "route_absent".to_string(),
+            authority_state: format!("proposal:{}", proposal.id),
+            recommended_action: "reject_or_supersede".to_string(),
+            discovery_revision,
+            authority_revision,
+        });
+    }
+    for route in &current_routes {
+        if let Some(inference) = infer_capability(&route.method, &route.path) {
+            if let Some(existing) =
+                live_authority.get(&(route.method.clone(), normalize_path(&route.path)))
+            {
+                if existing != &inference.capability {
+                    warnings.push(format!(
+                        "authority conflict for {} {}: existing explicit authority {} differs from inferred {}",
+                        route.method, route.path, existing, inference.capability
+                    ));
+                    drift.push(AuthorityDriftItem {
+                        kind: AuthorityDrift::CapabilityConflict,
+                        route: format!("{} {}", route.method, route.path),
+                        previous_state: existing.clone(),
+                        current_state: inference.capability,
+                        authority_state: "explicit authority preserved".to_string(),
+                        recommended_action: "review".to_string(),
+                        discovery_revision,
+                        authority_revision,
+                    });
+                }
+            }
+        }
+    }
+
+    drift.sort_by(|a, b| {
+        a.route
+            .cmp(&b.route)
+            .then_with(|| a.kind.as_str().cmp(b.kind.as_str()))
+    });
+    let reconciliation_revision = reconciliation_revision(
+        discovery_revision,
+        authority_revision,
+        &contract_fingerprint,
+        &drift,
+    );
+
+    ReconciliationResult {
+        application,
+        contract_fingerprint,
+        discovery_revision,
+        authority_revision,
+        reconciliation_revision,
+        new_routes,
+        removed_routes,
+        changed_routes,
+        unchanged_routes,
+        equivalent_routes,
+        orphaned_authority,
+        new_authority_proposals,
+        stale_proposals,
+        warnings,
+        drift,
+    }
+}
+
+fn route_order(a: &RouteDescription, b: &RouteDescription) -> std::cmp::Ordering {
+    a.path.cmp(&b.path).then_with(|| a.method.cmp(&b.method))
+}
+
+fn route_key(route: &RouteDescription) -> (String, String) {
+    (route.method.clone(), normalize_path(&route.path))
+}
+
+fn route_family(route: &RouteDescription) -> String {
+    let normalized = normalize_path(&route.path);
+    path_segments(&normalized)
+        .into_iter()
+        .find(|segment| !is_parameter(segment))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn drift_item(
+    kind: AuthorityDrift,
+    route: &RouteDescription,
+    previous_state: impl Into<String>,
+    current_state: impl Into<String>,
+    authority_state: impl Into<String>,
+    recommended_action: impl Into<String>,
+    discovery_revision: u64,
+    authority_revision: u64,
+) -> AuthorityDriftItem {
+    AuthorityDriftItem {
+        kind,
+        route: format!("{} {}", route.method, route.path),
+        previous_state: previous_state.into(),
+        current_state: current_state.into(),
+        authority_state: authority_state.into(),
+        recommended_action: recommended_action.into(),
+        discovery_revision,
+        authority_revision,
+    }
+}
+
+fn reconciliation_revision(
+    discovery_revision: u64,
+    authority_revision: u64,
+    contract_fingerprint: &str,
+    drift: &[AuthorityDriftItem],
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    contract_fingerprint.hash(&mut hasher);
+    discovery_revision.hash(&mut hasher);
+    authority_revision.hash(&mut hasher);
+    for item in drift {
+        item.kind.as_str().hash(&mut hasher);
+        item.route.hash(&mut hasher);
+        item.previous_state.hash(&mut hasher);
+        item.current_state.hash(&mut hasher);
+        item.authority_state.hash(&mut hasher);
+        item.recommended_action.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn discovery_revision(routes: &[RouteDescription]) -> u64 {
@@ -1048,6 +1637,52 @@ fn recommendation_json(recommendation: &AuthorityRecommendation) -> String {
     )
 }
 
+fn changed_route_json(change: &ChangedRoute) -> String {
+    format!(
+        "{{\"previous\": {}, \"current\": {}, \"reason\": \"{}\"}}",
+        route_json(&change.previous),
+        route_json(&change.current),
+        escape(&change.reason)
+    )
+}
+
+fn orphaned_authority_json(item: &OrphanedAuthority) -> String {
+    format!(
+        "{{\"method\": \"{}\", \"path\": \"{}\", \"capability\": \"{}\", \"reason\": \"{}\"}}",
+        escape(&item.method),
+        escape(&item.path),
+        escape(&item.capability),
+        escape(&item.reason)
+    )
+}
+
+fn proposal_history_json(item: &ProposalHistoryItem) -> String {
+    format!(
+        "{{\"id\": \"{}\", \"method\": \"{}\", \"path\": \"{}\", \"capability\": \"{}\", \"status\": \"{}\", \"discovery_revision\": {}, \"authority_revision\": {}}}",
+        escape(&item.id),
+        escape(&item.method),
+        escape(&item.path),
+        escape(&item.capability),
+        escape(&item.status),
+        item.discovery_revision,
+        item.authority_revision
+    )
+}
+
+fn drift_item_json(item: &AuthorityDriftItem) -> String {
+    format!(
+        "{{\"type\": \"{}\", \"route\": \"{}\", \"previous_state\": \"{}\", \"current_state\": \"{}\", \"authority_state\": \"{}\", \"recommended_action\": \"{}\", \"discovery_revision\": {}, \"authority_revision\": {}}}",
+        item.kind.as_str(),
+        escape(&item.route),
+        escape(&item.previous_state),
+        escape(&item.current_state),
+        escape(&item.authority_state),
+        escape(&item.recommended_action),
+        item.discovery_revision,
+        item.authority_revision
+    )
+}
+
 fn option_string_json(value: Option<&str>) -> String {
     value
         .map(|value| format!("\"{}\"", escape(value)))
@@ -1197,5 +1832,162 @@ mod tests {
         assert!(json.contains("\"contract_fingerprint\": \"contract-1\""));
         assert!(json.contains("\"live_revision\": 4"));
         assert_eq!(json, render_proposal_json(&proposal));
+    }
+
+    fn app_with(routes: Vec<RouteCandidate>) -> ApplicationCandidate {
+        ApplicationCandidate {
+            root: PathBuf::from("."),
+            name: Some("billing-api".to_string()),
+            language: Some("Node".to_string()),
+            framework: Some("Express".to_string()),
+            package_manager: Some("npm".to_string()),
+            entrypoints: Vec::new(),
+            servers: Vec::new(),
+            routes,
+            providers: Vec::new(),
+            existing_authport: ExistingAuthPort::default(),
+            confidence: DiscoveryConfidence::High,
+        }
+    }
+
+    fn route(method: &str, path: &str) -> RouteCandidate {
+        RouteCandidate {
+            method: method.to_string(),
+            path: path.to_string(),
+            source: RouteSource::Express,
+            capability: None,
+        }
+    }
+
+    #[test]
+    fn reconciliation_proposes_new_routes_without_mutating_authority() {
+        let previous = app_with(vec![route("POST", "/invoices")]);
+        let current = app_with(vec![route("POST", "/invoices"), route("POST", "/refunds")]);
+        let mut authority = BTreeMap::new();
+        authority.insert(
+            ("POST".to_string(), "/invoices".to_string()),
+            "invoice.create".to_string(),
+        );
+
+        let result = AuthorityReconciler::reconcile(
+            Some(&previous),
+            &current,
+            "contract-1",
+            7,
+            &authority,
+            &[],
+        );
+
+        assert_eq!(result.authority_revision, 7);
+        assert_eq!(result.contract_fingerprint, "contract-1");
+        assert_eq!(result.new_routes.len(), 1);
+        assert_eq!(result.new_routes[0].path, "/refunds");
+        assert_eq!(
+            result.new_routes[0]
+                .inference
+                .as_ref()
+                .map(|inference| inference.capability.as_str()),
+            Some("refund.create")
+        );
+        assert_eq!(result.new_authority_proposals.len(), 1);
+        assert_eq!(
+            result.new_authority_proposals[0].current_authority_state,
+            "unprotected"
+        );
+        assert_eq!(
+            result.new_authority_proposals[0].proposed_authority_state,
+            "protected"
+        );
+        assert!(result.drift.iter().any(|item| {
+            item.kind == AuthorityDrift::NewRoute && item.route == "POST /refunds"
+        }));
+        assert!(render_reconciliation_text(&result).contains("No authority was changed."));
+    }
+
+    #[test]
+    fn reconciliation_orphans_removed_authority_without_deleting_history() {
+        let previous = app_with(vec![route("POST", "/billing/charge")]);
+        let current = app_with(Vec::new());
+        let mut authority = BTreeMap::new();
+        authority.insert(
+            ("POST".to_string(), "/billing/charge".to_string()),
+            "billing.charge".to_string(),
+        );
+
+        let result = AuthorityReconciler::reconcile(
+            Some(&previous),
+            &current,
+            "contract-1",
+            3,
+            &authority,
+            &[],
+        );
+
+        assert_eq!(authority.len(), 1, "reconciliation is read-only");
+        assert_eq!(result.orphaned_authority.len(), 1);
+        assert_eq!(result.orphaned_authority[0].capability, "billing.charge");
+        assert!(result.drift.iter().any(|item| {
+            item.kind == AuthorityDrift::OrphanedAuthority
+                && item.authority_state == "retained:billing.charge"
+        }));
+    }
+
+    #[test]
+    fn reconciliation_distinguishes_equivalent_and_meaningful_route_changes() {
+        let equivalent_previous = app_with(vec![route("GET", "/invoices/{id}")]);
+        let equivalent_current = app_with(vec![route("GET", "/invoices/[id]")]);
+        let authority = BTreeMap::new();
+
+        let equivalent = AuthorityReconciler::reconcile(
+            Some(&equivalent_previous),
+            &equivalent_current,
+            "contract-1",
+            0,
+            &authority,
+            &[],
+        );
+        assert_eq!(equivalent.equivalent_routes.len(), 1);
+        assert!(equivalent.changed_routes.is_empty());
+        assert!(equivalent.new_routes.is_empty());
+        assert!(equivalent.removed_routes.is_empty());
+
+        let changed_previous = app_with(vec![route("POST", "/invoices")]);
+        let changed_current = app_with(vec![route("PATCH", "/invoices/:id")]);
+        let changed = AuthorityReconciler::reconcile(
+            Some(&changed_previous),
+            &changed_current,
+            "contract-1",
+            0,
+            &authority,
+            &[],
+        );
+        assert_eq!(changed.changed_routes.len(), 1);
+        assert_eq!(changed.changed_routes[0].reason, "HTTP method changed");
+        assert!(changed
+            .drift
+            .iter()
+            .any(|item| item.kind == AuthorityDrift::RouteChanged));
+    }
+
+    #[test]
+    fn reconciliation_surfaces_conflicts_and_is_idempotent() {
+        let app = app_with(vec![route("POST", "/invoices")]);
+        let mut authority = BTreeMap::new();
+        authority.insert(
+            ("POST".to_string(), "/invoices".to_string()),
+            "invoice.write".to_string(),
+        );
+
+        let first = AuthorityReconciler::reconcile(None, &app, "contract-1", 9, &authority, &[]);
+        let second = AuthorityReconciler::reconcile(None, &app, "contract-1", 9, &authority, &[]);
+
+        assert_eq!(first, second);
+        assert!(first.new_authority_proposals.is_empty());
+        assert!(first.drift.iter().any(|item| {
+            item.kind == AuthorityDrift::CapabilityConflict
+                && item.previous_state == "invoice.write"
+                && item.current_state == "invoice.create"
+                && item.authority_state == "explicit authority preserved"
+        }));
     }
 }

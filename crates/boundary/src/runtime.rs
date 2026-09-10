@@ -395,6 +395,16 @@ impl AuthPortRuntime {
             ProposalStatus::Rejected => {
                 return Err(format!("proposal `{}` is rejected", proposal_id));
             }
+            ProposalStatus::Active
+            | ProposalStatus::Orphaned
+            | ProposalStatus::Stale
+            | ProposalStatus::Superseded => {
+                return Err(format!(
+                    "proposal `{}` is {} and requires reconciliation review",
+                    proposal_id,
+                    stored.status.as_str()
+                ));
+            }
         }
         self.verify_stored_proposal_is_current(&stored)?;
         self.proposals.mark_approved(proposal_id)
@@ -407,7 +417,12 @@ impl AuthPortRuntime {
                 return Err(format!("proposal `{}` is already applied", proposal_id));
             }
             ProposalStatus::Rejected => return Ok(()),
-            ProposalStatus::Pending | ProposalStatus::Approved => {}
+            ProposalStatus::Pending
+            | ProposalStatus::Approved
+            | ProposalStatus::Active
+            | ProposalStatus::Orphaned
+            | ProposalStatus::Stale
+            | ProposalStatus::Superseded => {}
         }
         self.proposals.mark_rejected(proposal_id, reason)
     }

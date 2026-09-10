@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 use appport_auth_mesh_discovery::{
-    discover, propose_authority, render_proposal_json, render_proposal_text,
+    discover, propose_authority, render_drift_json, render_proposal_json, render_proposal_text,
+    render_reconciliation_json, render_reconciliation_text, AuthorityReconciler,
+    ReconciliationResult,
 };
 use appport_auth_mesh_dsl::{parse_auth_block, AuthConfig};
 use appport_auth_mesh_providers::ConnectorRegistry;
@@ -29,6 +31,8 @@ USAGE:
     authport serve [FILE] [options]
     authport connect [--server URL] [--output-token]
     authport propose [FILE] [--json]
+    authport reconcile [FILE] [--json] [--check]
+    authport drift [FILE] [--json] [--check]
     authport propose <change-type> [options] [--server URL] [--dry-run]
     authport approve [--proposal-id ID|--all] [--server URL] --yes
     authport apply [--proposal-id ID|--all] [--server URL] --yes
@@ -100,6 +104,7 @@ where
     let mut command = None;
     let mut file: Option<PathBuf> = None;
     let mut json = false;
+    let mut check = false;
     let mut mode: Option<String> = None;
     let mut serve_options = serve::ServeOptions::default();
     let mut default_tenant = "default".to_string();
@@ -120,6 +125,7 @@ where
 
         match arg.as_str() {
             "--json" => json = true,
+            "--check" => check = true,
             "-h" | "--help" | "help" => {
                 return Ok(Output {
                     text: USAGE.to_string(),
@@ -190,7 +196,12 @@ where
                 .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
             (Some(path), source)
         }
-        Err(err) if matches!(command.as_str(), "inspect" | "propose") && file.is_none() => {
+        Err(err)
+            if matches!(
+                command.as_str(),
+                "inspect" | "propose" | "reconcile" | "drift"
+            ) && file.is_none() =>
+        {
             let root = std::env::current_dir()
                 .map_err(|err| error(format!("cannot read cwd: {}", err)))?;
             if discover(&root).is_none() {
@@ -237,6 +248,34 @@ where
                 render_proposal_text(&proposal)
             }
         }
+        "reconcile" => {
+            let result = local_reconciliation(&config, path.as_deref())?;
+            if check && !result.drift.is_empty() {
+                return Err(error(format!(
+                    "authority drift detected ({} unresolved items)",
+                    result.drift.len()
+                )));
+            }
+            if json {
+                render_reconciliation_json(&result)
+            } else {
+                render_reconciliation_text(&result)
+            }
+        }
+        "drift" => {
+            let result = local_reconciliation(&config, path.as_deref())?;
+            if check && !result.drift.is_empty() {
+                return Err(error(format!(
+                    "authority drift detected ({} unresolved items)",
+                    result.drift.len()
+                )));
+            }
+            if json {
+                render_drift_json(&result)
+            } else {
+                render_drift_text(&result)
+            }
+        }
         "fingerprint" => format!(
             "contract {}\nsurface  {}\n",
             config.fingerprint(),
@@ -273,6 +312,47 @@ where
     };
 
     Ok(Output { text })
+}
+
+fn local_reconciliation(
+    config: &AuthConfig,
+    path: Option<&std::path::Path>,
+) -> Result<ReconciliationResult, CliError> {
+    let root = path
+        .and_then(|path| path.parent())
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let app =
+        discover(&root).ok_or_else(|| error("no supported application found to reconcile"))?;
+    Ok(AuthorityReconciler::reconcile(
+        None,
+        &app,
+        config.fingerprint(),
+        0,
+        &std::collections::BTreeMap::new(),
+        &[],
+    ))
+}
+
+fn render_drift_text(result: &ReconciliationResult) -> String {
+    let mut out = String::from("AuthPort Authority Drift\n");
+    if result.drift.is_empty() {
+        out.push_str("No authority drift detected.\n");
+        return out;
+    }
+    for item in &result.drift {
+        out.push_str(&format!(
+            "{}\n  {}\n  previous: {}\n  current: {}\n  authority: {}\n  action: {}\n",
+            item.kind.as_str().to_ascii_uppercase(),
+            item.route,
+            item.previous_state,
+            item.current_state,
+            item.authority_state,
+            item.recommended_action
+        ));
+    }
+    out.push_str("No authority was changed.\n");
+    out
 }
 
 /// Start the standalone runtime and block until the process is stopped.
@@ -671,6 +751,42 @@ use auth {
         assert!(json.contains("\"contract_fingerprint\""));
         assert!(json.contains("\"live_revision\": 0"));
         assert!(json.contains("\"action\": \"protect_route\""));
+    }
+
+    #[test]
+    fn reconcile_and_drift_report_machine_readable_review_items() {
+        let dir = temp_dir("reconcile-express");
+        write_express_app(&dir);
+        std::fs::write(
+            dir.join("src/server.js"),
+            "const express = require('express');\nconst app = express();\napp.post('/refunds', handler);\n",
+        )
+        .unwrap();
+        let path = write_declaration(&dir, "use auth { providers = [local] }");
+
+        let reconcile = run_with(&["reconcile", path.to_str().unwrap()])
+            .unwrap()
+            .text;
+        assert!(reconcile.contains("AuthPort Authority Reconciliation"));
+        assert!(reconcile.contains("POST /refunds"));
+        assert!(reconcile.contains("refund.create"));
+        assert!(reconcile.contains("No authority was changed."));
+
+        let json = run_with(&["reconcile", path.to_str().unwrap(), "--json"])
+            .unwrap()
+            .text;
+        assert!(json.contains("\"new_routes\": 1"));
+        assert!(json.contains("\"unsafe_automatic_changes\": 0"));
+        assert!(json.contains("\"capability\": \"refund.create\""));
+
+        let drift = run_with(&["drift", path.to_str().unwrap(), "--json"])
+            .unwrap()
+            .text;
+        assert!(drift.contains("\"type\": \"new_route\""));
+        assert!(run_with(&["reconcile", path.to_str().unwrap(), "--check"])
+            .unwrap_err()
+            .message
+            .contains("authority drift detected"));
     }
 
     #[test]
