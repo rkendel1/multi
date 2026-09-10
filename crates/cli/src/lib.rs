@@ -1154,6 +1154,7 @@ use auth {
 
     #[test]
     fn attach_records_a_real_reachable_upstream_and_status_stays_truthful() {
+        use std::io::Write;
         use std::net::TcpListener;
 
         let dir = temp_dir("attach-upstream");
@@ -1163,11 +1164,17 @@ use auth {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let accepts = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let _ = listener.accept();
+            // Planning, atomic apply, status and boundary verification each
+            // use the exact configured localhost origin.
+            for _ in 0..5 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    );
+                }
             }
         });
-        let upstream = format!("http://{}", address);
+        let upstream = format!("http://localhost:{}", address.port());
         let attached = init::attach(&[
             dir.to_string_lossy().to_string(),
             "--upstream".to_string(),
@@ -1177,9 +1184,13 @@ use auth {
         .unwrap()
         .text;
         assert!(attached.contains("Application attached."));
-        let status = init::status(&[dir.to_string_lossy().to_string()])
-            .unwrap()
-            .text;
+        let status = init::status(&[
+            dir.to_string_lossy().to_string(),
+            "--server".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        ])
+        .unwrap()
+        .text;
         assert!(
             status.contains(&format!("✓ upstream {}", upstream)),
             "{}",
@@ -1187,6 +1198,21 @@ use auth {
         );
         assert!(status.contains("Runtime:\n  stopped"));
         assert!(status.contains("Protection:\n  not active"));
+        let inspected = run_with(&["inspect", dir.join("authboundry.toml").to_str().unwrap()])
+            .unwrap()
+            .text;
+        assert!(inspected.contains(&format!("upstream: {}", upstream)));
+        let verified = init::verify(&[
+            dir.to_string_lossy().to_string(),
+            "--server".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        ])
+        .unwrap()
+        .text;
+        assert!(verified.contains(&format!("Upstream:\n  {}", upstream)));
+        assert!(verified.contains("Connectivity:\n  ✓ reachable"));
+        assert!(verified.contains("Application response:\n  ✓ received"));
+        assert!(verified.contains("Runtime protection:\n  ○ inactive"));
         accepts.join().unwrap();
     }
 }

@@ -6,7 +6,6 @@
 //! embedded deployment uses.
 
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,13 +16,14 @@ use appport_auth_mesh_dsl::AuthConfig;
 use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{MemoryStores, Registration};
 use appport_auth_mesh_server::{
-    serve, AuthPortServer, PathPattern, RoutePolicy, ServerHandle, UpstreamProxy,
+    serve, ApplicationUpstream, AuthPortServer, PathPattern, RoutePolicy, ServerHandle,
+    UpstreamProxy,
 };
 use appport_auth_mesh_storage::TenantRootStore;
 
 use crate::{error, CliError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServeOptions {
     pub address: String,
     pub tenants: Vec<String>,
@@ -34,6 +34,8 @@ pub struct ServeOptions {
     pub required: Vec<(String, String)>,
     pub proxy_secret: String,
     pub studio_page: Option<String>,
+    pub studio_controller: Option<Arc<dyn appport_auth_mesh_server::StudioController>>,
+    pub application_binding: Option<Arc<dyn appport_auth_mesh_server::ApplicationBinding>>,
 }
 
 impl Default for ServeOptions {
@@ -48,6 +50,8 @@ impl Default for ServeOptions {
             required: Vec::new(),
             proxy_secret: "authboundry-development-secret".to_string(),
             studio_page: None,
+            studio_controller: None,
+            application_binding: None,
         }
     }
 }
@@ -197,34 +201,37 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
     let runtime = Arc::new(runtime);
     let tenant_names: Vec<&str> = tenants.iter().map(String::as_str).collect();
 
-    let server = match &options.upstream {
-        Some(upstream) => {
-            let socket = upstream
-                .strip_prefix("http://")
-                .unwrap_or(upstream)
-                .trim_end_matches('/');
-            let address: SocketAddr = socket
-                .parse()
-                .map_err(|_| error(format!("invalid --upstream address `{}`", upstream)))?;
-            TcpStream::connect_timeout(&address, Duration::from_millis(500)).map_err(|err| {
-                error(format!(
-                    "application upstream `{}` is not reachable: {}",
-                    upstream, err
-                ))
-            })?;
-            let proxy = UpstreamProxy::new(
-                address,
-                application_policy(options),
-                options.proxy_secret.clone(),
-            );
-            AuthPortServer::new(runtime, Arc::new(proxy)).with_tenants(&tenant_names)
+    let server = if let Some(binding) = &options.application_binding {
+        AuthPortServer::new(runtime, binding.clone()).with_tenants(&tenant_names)
+    } else {
+        match &options.upstream {
+            Some(upstream) => {
+                let origin = ApplicationUpstream::parse(upstream)
+                    .map_err(|err| error(format!("invalid --upstream `{}`: {}", upstream, err)))?;
+                origin.connect(Duration::from_millis(500)).map_err(|err| {
+                    error(format!(
+                        "application upstream `{}` is not reachable: {}",
+                        upstream, err
+                    ))
+                })?;
+                let proxy = UpstreamProxy::new(
+                    origin,
+                    application_policy(options),
+                    options.proxy_secret.clone(),
+                );
+                AuthPortServer::new(runtime, Arc::new(proxy)).with_tenants(&tenant_names)
+            }
+            // With no application behind it, AuthBoundry still serves its own surface:
+            // sign-in, session, providers and authorization.
+            None => AuthPortServer::new(runtime, Arc::new(AuthOnly)).with_tenants(&tenant_names),
         }
-        // With no application behind it, AuthBoundry still serves its own surface:
-        // sign-in, session, providers and authorization.
-        None => AuthPortServer::new(runtime, Arc::new(AuthOnly)).with_tenants(&tenant_names),
     };
     let server = match &options.studio_page {
         Some(page) => server.with_studio_page(page.clone()),
+        None => server,
+    };
+    let server = match &options.studio_controller {
+        Some(controller) => server.with_studio_controller(controller.clone()),
         None => server,
     };
 
@@ -241,7 +248,7 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
 /// The requirement table for a proxied application: explicit public paths,
 /// explicit capability requirements, and authentication for everything else
 /// that is listed. Nothing unlisted is forwarded.
-fn application_policy(options: &ServeOptions) -> RoutePolicy {
+pub(crate) fn application_policy(options: &ServeOptions) -> RoutePolicy {
     let all = [
         Method::Get,
         Method::Post,

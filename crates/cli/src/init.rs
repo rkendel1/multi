@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -8,6 +7,7 @@ use std::time::Duration;
 use appport_auth_mesh_discovery::{
     discover, propose_authority, ApplicationCandidate, RouteCandidate,
 };
+use appport_auth_mesh_server::ApplicationUpstream;
 
 use crate::{error, CliError, Output};
 
@@ -107,7 +107,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     }
 
     apply_plan(&plan)?;
-    let verified = verify_root(&root)?;
+    let verified = verify_root(&root, "http://127.0.0.1:8787")?;
     if !verified.ok {
         return Err(error("AuthBoundry initialization verification failed"));
     }
@@ -181,23 +181,8 @@ pub fn attach(args: &[String]) -> Result<Output, CliError> {
     let upstream = upstream.ok_or_else(|| {
         error("no application upstream configured\nUse:\n  authboundry attach --upstream http://127.0.0.1:9000")
     })?;
-    upstream_address(&upstream)?;
-    if !upstream_reachable(&upstream) {
-        return Err(error(format!(
-            "application upstream `{}` is not reachable; start the application and try again",
-            upstream
-        )));
-    }
-    let before = fs::read_to_string(root.join(MANIFEST_FILE))
-        .map_err(|_| error("no AuthBoundry adoption exists; run `authboundry init` first"))?;
-    let application = discover(&root).ok_or_else(|| error("no supported application found"))?;
-    let after = render_manifest_with_upstream(&application, InitMode::Standalone, Some(&upstream));
-    let preview = format!(
-        "AuthBoundry · Attach Application\nApplication:\n  {}\nIntegration mode:\n  standalone\nApplication upstream:\n  {}\nAuthBoundry will:\n  ✓ receive application requests\n  ✓ establish the authority context\n  ✓ enforce configured route policy\n  ✓ forward authorized requests\nApplication source:\n  unchanged\nPatch preview:\n--- .authboundry/adoption.json\n+++ .authboundry/adoption.json\n+ attachment: upstream\n+ upstream: {}\n",
-        application.name.as_deref().unwrap_or("(unknown)"),
-        upstream,
-        upstream
-    );
+    let plan = plan_attachment(&root, &upstream)?;
+    let preview = plan.preview.clone();
     if !yes {
         print!("{}Attach this application? [y/N] ", preview);
         io::stdout().flush().map_err(|err| error(err.to_string()))?;
@@ -206,18 +191,98 @@ pub fn attach(args: &[String]) -> Result<Output, CliError> {
                 text: "Attachment cancelled. No files were changed.\n".to_string(),
             });
         }
-        if fs::read_to_string(root.join(MANIFEST_FILE)).ok().as_deref() != Some(before.as_str()) {
+        if fs::read_to_string(root.join(MANIFEST_FILE)).ok().as_deref()
+            != Some(plan.before.as_str())
+        {
             return Err(error("the adoption state changed while the attachment plan was reviewed; refusing to apply a stale plan"));
         }
     }
-    atomic_write(&root.join(MANIFEST_FILE), &after)?;
+    apply_attachment(&plan)?;
     Ok(Output {
         text: format!(
             "{}Application attached.\nAuthority state:\n  configured\nApplication attachment:\n  upstream {}\nProtection:\n  ready when AuthBoundry is running\nApplication source:\n  unchanged\n",
             if yes { preview } else { String::new() },
-            upstream
+            plan.upstream
         ),
     })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentPlan {
+    pub root: PathBuf,
+    pub application: String,
+    pub upstream: String,
+    pub routes: usize,
+    pub before: String,
+    pub after: String,
+    pub preview: String,
+}
+
+pub(crate) fn plan_attachment(root: &Path, upstream: &str) -> Result<AttachmentPlan, CliError> {
+    let upstream = upstream_address(upstream)?;
+    if !upstream_reachable(&upstream.to_string()) {
+        return Err(error(format!(
+            "application upstream `{}` is not reachable; start the application and try again",
+            upstream
+        )));
+    }
+    let before = fs::read_to_string(root.join(MANIFEST_FILE))
+        .map_err(|_| error("no AuthBoundry adoption exists; run `authboundry init` first"))?;
+    let application = discover(root).ok_or_else(|| error("no supported application found"))?;
+    let name = application
+        .name
+        .clone()
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let upstream = upstream.to_string();
+    let after = render_manifest_with_upstream(&application, InitMode::Standalone, Some(&upstream));
+    let preview = format!(
+        "AuthBoundry · Attachment Preview\n+ application\n    {}\n+ mode\n    standalone\n+ upstream\n    {}\n+ protection\n    active after attachment\nApplication routes:\n    {} currently discovered\nNo application source will be modified.\n",
+        name, upstream, application.routes.len()
+    );
+    Ok(AttachmentPlan {
+        root: root.to_path_buf(),
+        application: name,
+        upstream: upstream.to_string(),
+        routes: application.routes.len(),
+        before,
+        after,
+        preview,
+    })
+}
+
+pub(crate) fn apply_attachment(plan: &AttachmentPlan) -> Result<(), CliError> {
+    let path = plan.root.join(MANIFEST_FILE);
+    if fs::read_to_string(&path).ok().as_deref() != Some(plan.before.as_str()) {
+        return Err(error(
+            "attachment state changed after preview; no changes were made",
+        ));
+    }
+    if !upstream_reachable(&plan.upstream) {
+        return Err(error(
+            "application became unreachable after preview; no changes were made",
+        ));
+    }
+    atomic_write(&path, &plan.after)
+}
+
+pub(crate) fn detach_application(root: &Path) -> Result<(), CliError> {
+    let state = read_adoption(root).ok_or_else(|| error("no AuthBoundry adoption exists"))?;
+    let application = discover(root).ok_or_else(|| error("no supported application found"))?;
+    let current =
+        fs::read_to_string(root.join(MANIFEST_FILE)).map_err(|err| error(err.to_string()))?;
+    let after = render_manifest_with_upstream(
+        &application,
+        if state.mode == "embedded" {
+            InitMode::Embedded
+        } else {
+            InitMode::Standalone
+        },
+        None,
+    );
+    if current == after {
+        return Ok(());
+    }
+    atomic_write(&root.join(MANIFEST_FILE), &after)
 }
 
 pub fn status(args: &[String]) -> Result<Output, CliError> {
@@ -304,6 +369,7 @@ fn confirm_adoption(input: &mut impl BufRead) -> Result<bool, CliError> {
 pub fn verify(args: &[String]) -> Result<Output, CliError> {
     let mut json = false;
     let mut root = None;
+    let mut server = "http://127.0.0.1:8787".to_string();
     let mut index = 0usize;
     while index < args.len() {
         match args[index].as_str() {
@@ -316,6 +382,13 @@ pub fn verify(args: &[String]) -> Result<Output, CliError> {
                         .clone(),
                 ));
             }
+            "--server" => {
+                index += 1;
+                server = args
+                    .get(index)
+                    .ok_or_else(|| error("--server needs a value"))?
+                    .clone();
+            }
             flag if flag.starts_with('-') => return Err(error(format!("unknown flag `{}`", flag))),
             value => root = Some(PathBuf::from(value)),
         }
@@ -327,7 +400,7 @@ pub fn verify(args: &[String]) -> Result<Output, CliError> {
             std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?
         }
     };
-    let report = verify_root(&root)?;
+    let report = verify_root(&root, &server)?;
     if !report.ok {
         return Err(error(if json {
             render_verify_json(&report)
@@ -485,9 +558,14 @@ struct VerifyReport {
     contract_fingerprint_stable: bool,
     live_authority_available: bool,
     application_routes: usize,
+    application: String,
+    upstream: Option<String>,
+    upstream_reachable: bool,
+    application_responded: bool,
+    runtime_running: bool,
 }
 
-fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
+fn verify_root(root: &Path, server: &str) -> Result<VerifyReport, CliError> {
     let application = discover(root);
     let application_routes = application
         .as_ref()
@@ -517,6 +595,30 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
                 || application.existing_authport.manifest
         })
         .unwrap_or(false);
+    let adoption = read_adoption(root);
+    let upstream = adoption.as_ref().and_then(|state| state.upstream.clone());
+    let upstream_reachable = upstream.as_deref().map(upstream_reachable).unwrap_or(false);
+    let application_responded = upstream
+        .as_deref()
+        .and_then(|value| ApplicationUpstream::parse(value).ok())
+        .and_then(|origin| {
+            appport_auth_mesh_server::send_upstream(
+                &origin,
+                &appport_auth_mesh_server::ClientRequest::get("/"),
+            )
+            .ok()
+        })
+        .is_some();
+    let runtime_running = ApplicationUpstream::parse(server)
+        .ok()
+        .and_then(|origin| {
+            appport_auth_mesh_server::send_upstream(
+                &origin,
+                &appport_auth_mesh_server::ClientRequest::get("/auth/providers"),
+            )
+            .ok()
+        })
+        .is_some();
     let report = VerifyReport {
         ok: application.is_some() && boundary_present && runtime_starts,
         application_discovered: application.is_some(),
@@ -528,6 +630,15 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
         contract_fingerprint_stable: runtime_starts,
         live_authority_available: runtime_starts,
         application_routes,
+        application: adoption
+            .as_ref()
+            .map(|state| state.application.clone())
+            .or_else(|| application.as_ref().and_then(|app| app.name.clone()))
+            .unwrap_or_else(|| "(unknown)".to_string()),
+        upstream,
+        upstream_reachable,
+        application_responded,
+        runtime_running,
     };
     Ok(report)
 }
@@ -653,7 +764,7 @@ fn applied_plan_text(plan: &InitPlan, report: &VerifyReport) -> String {
 
 fn render_verify_text(report: &VerifyReport) -> String {
     let mark = |ok| if ok { "✓" } else { "✗" };
-    format!(
+    let mut output = format!(
         "{} application discovered\n{} AuthBoundry configuration present\n{} authority configuration valid\n{} control plane surface derivable\n{} application routes discovered\n{} authority routes derivable\n{} contract fingerprint stable\n{} authority state available\n",
         mark(report.application_discovered),
         mark(report.boundary_present),
@@ -663,7 +774,19 @@ fn render_verify_text(report: &VerifyReport) -> String {
         mark(report.authboundry_routes_respond),
         mark(report.contract_fingerprint_stable),
         mark(report.live_authority_available)
-    )
+    );
+    if let Some(upstream) = &report.upstream {
+        output.push_str(&format!(
+            "\nAuthBoundry · Boundary Verification\nApplication:\n  {}\nUpstream:\n  {}\nConnectivity:\n  {}\nApplication response:\n  {}\nAuthority boundary:\n  ✓ configured\nRuntime protection:\n  {}\n{}",
+            report.application,
+            upstream,
+            if report.upstream_reachable { "✓ reachable" } else { "✗ unreachable" },
+            if report.application_responded { "✓ received" } else { "✗ not received" },
+            if report.runtime_running && report.upstream_reachable { "✓ active" } else { "○ inactive" },
+            if report.runtime_running { "" } else { "Reason:\n  AuthBoundry runtime is not running.\n" }
+        ));
+    }
+    output
 }
 
 fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
@@ -713,7 +836,7 @@ fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
 
 fn render_verify_json(report: &VerifyReport) -> String {
     format!(
-        "{{\"ok\": {}, \"application_discovered\": {}, \"authority_configured\": {}, \"authority_configuration_valid\": {}, \"control_plane_surface_derivable\": {}, \"application_routes_discovered\": {}, \"authority_routes_derivable\": {}, \"contract_fingerprint_stable\": {}, \"authority_state_available\": {}, \"application_routes\": {}}}\n",
+        "{{\"ok\": {}, \"application_discovered\": {}, \"authority_configured\": {}, \"authority_configuration_valid\": {}, \"control_plane_surface_derivable\": {}, \"application_routes_discovered\": {}, \"authority_routes_derivable\": {}, \"contract_fingerprint_stable\": {}, \"authority_state_available\": {}, \"application_routes\": {}, \"application\": \"{}\", \"upstream\": {}, \"upstream_reachable\": {}, \"application_responded\": {}, \"runtime_running\": {}, \"runtime_protection_active\": {}}}\n",
         report.ok,
         report.application_discovered,
         report.boundary_present,
@@ -723,7 +846,13 @@ fn render_verify_json(report: &VerifyReport) -> String {
         report.authboundry_routes_respond,
         report.contract_fingerprint_stable,
         report.live_authority_available,
-        report.application_routes
+        report.application_routes,
+        escape(&report.application),
+        report.upstream.as_ref().map(|value| format!("\"{}\"", escape(value))).unwrap_or_else(|| "null".to_string()),
+        report.upstream_reachable,
+        report.application_responded,
+        report.runtime_running,
+        report.runtime_running && report.upstream_reachable
     )
 }
 
@@ -804,20 +933,14 @@ fn json_usize(source: &str, key: &str) -> Option<usize> {
         .ok()
 }
 
-fn upstream_address(value: &str) -> Result<SocketAddr, CliError> {
-    let address = value
-        .strip_prefix("http://")
-        .unwrap_or(value)
-        .trim_end_matches('/');
-    address.parse().map_err(|_| {
-        error("application upstream must be an explicit HTTP socket, for example http://127.0.0.1:9000")
-    })
+fn upstream_address(value: &str) -> Result<ApplicationUpstream, CliError> {
+    ApplicationUpstream::parse(value).map_err(error)
 }
 
 pub(crate) fn upstream_reachable(value: &str) -> bool {
     upstream_address(value)
         .ok()
-        .and_then(|address| TcpStream::connect_timeout(&address, Duration::from_millis(250)).ok())
+        .and_then(|upstream| upstream.connect(Duration::from_millis(250)).ok())
         .is_some()
 }
 

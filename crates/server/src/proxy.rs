@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 
 use appport_auth_mesh_boundary::{AuthContext, BoundaryRequest, Method, RESERVED_HEADER_PREFIX};
 use appport_auth_mesh_dsl::stable_hash;
 
-use crate::client::{send, ClientRequest};
+use crate::client::{send_upstream, ClientRequest};
 use crate::http::HttpResponse;
 use crate::router::{ApplicationBinding, RouteOutcome, RoutePolicy};
+use crate::upstream::ApplicationUpstream;
 
 /// Header names AuthPort injects into an upstream request.
 pub mod headers {
@@ -32,22 +32,26 @@ pub mod headers {
 /// are looked at, so a client cannot inject the context it wants; the context
 /// forwarded upstream is the one the boundary derived.
 pub struct UpstreamProxy {
-    upstream: SocketAddr,
+    upstream: ApplicationUpstream,
     policy: RoutePolicy,
     secret: String,
 }
 
 impl UpstreamProxy {
-    pub fn new(upstream: SocketAddr, policy: RoutePolicy, secret: impl Into<String>) -> Self {
+    pub fn new(
+        upstream: impl Into<ApplicationUpstream>,
+        policy: RoutePolicy,
+        secret: impl Into<String>,
+    ) -> Self {
         Self {
-            upstream,
+            upstream: upstream.into(),
             policy,
             secret: secret.into(),
         }
     }
 
-    pub fn upstream(&self) -> SocketAddr {
-        self.upstream
+    pub fn upstream(&self) -> &ApplicationUpstream {
+        &self.upstream
     }
 
     /// Sign the injected context.
@@ -144,7 +148,7 @@ impl ApplicationBinding for UpstreamProxy {
             forwarded = forwarded.with_header("content-type", "application/json");
         }
 
-        match send(self.upstream, &forwarded) {
+        match send_upstream(&self.upstream, &forwarded) {
             Ok(response) => response,
             Err(err) => HttpResponse::denied(502, "upstream_unavailable", &err.message),
         }

@@ -20,6 +20,17 @@ use crate::http::{escape, HttpRequest, HttpResponse};
 use crate::router::{ApplicationBinding, RouteOutcome};
 use crate::ui::{render_sign_in, serves_default_screen, CLIENT_JS};
 
+/// Repository-scoped Studio operations supplied by the CLI host. Keeping this
+/// behind a narrow interface prevents the generic authority server from
+/// acquiring filesystem authority.
+pub trait StudioController: Send + Sync {
+    fn handle(&self, request: &HttpRequest) -> Option<HttpResponse>;
+
+    fn page(&self) -> Option<String> {
+        None
+    }
+}
+
 /// The HTTP face of the boundary.
 ///
 /// It translates requests into [`BoundaryRequest`]s, asks the runtime, and
@@ -30,6 +41,7 @@ pub struct AuthPortServer {
     app: Arc<dyn ApplicationBinding>,
     tenants: Vec<String>,
     studio_page: Option<String>,
+    studio_controller: Option<Arc<dyn StudioController>>,
 }
 
 impl AuthPortServer {
@@ -39,6 +51,7 @@ impl AuthPortServer {
             app,
             tenants: Vec::new(),
             studio_page: None,
+            studio_controller: None,
         }
     }
 
@@ -46,6 +59,11 @@ impl AuthPortServer {
     /// repository contract and adoption state; it is not configuration state.
     pub fn with_studio_page(mut self, page: String) -> Self {
         self.studio_page = Some(page);
+        self
+    }
+
+    pub fn with_studio_controller(mut self, controller: Arc<dyn StudioController>) -> Self {
+        self.studio_controller = Some(controller);
         self
     }
 
@@ -66,8 +84,23 @@ impl AuthPortServer {
         let request = http.to_boundary();
 
         if request.method == Method::Get && request.path == "/" {
+            if let Some(page) = self
+                .studio_controller
+                .as_ref()
+                .and_then(|controller| controller.page())
+            {
+                return HttpResponse::html(200, page);
+            }
             if let Some(page) = &self.studio_page {
                 return HttpResponse::html(200, page.clone());
+            }
+        }
+
+        if request.path.starts_with("/_authboundry/application") {
+            if let Some(controller) = &self.studio_controller {
+                if let Some(response) = controller.handle(http) {
+                    return response;
+                }
             }
         }
 

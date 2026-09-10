@@ -6,6 +6,7 @@ use std::time::Duration;
 use appport_auth_mesh_boundary::Method;
 
 use crate::http::{HttpError, HttpResponse};
+use crate::upstream::{ApplicationUpstream, UpstreamScheme};
 
 /// A minimal HTTP client.
 ///
@@ -81,7 +82,50 @@ pub fn send(address: SocketAddr, request: &ClientRequest) -> Result<HttpResponse
     read_response(stream)
 }
 
-fn read_response(stream: TcpStream) -> Result<HttpResponse, HttpError> {
+pub fn send_upstream(
+    upstream: &ApplicationUpstream,
+    request: &ClientRequest,
+) -> Result<HttpResponse, HttpError> {
+    let stream = upstream
+        .connect(Duration::from_secs(3))
+        .map_err(HttpError::new)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| HttpError::new(err.to_string()))?;
+    match upstream.scheme {
+        UpstreamScheme::Http => exchange(stream, &upstream.authority(), request),
+        UpstreamScheme::Https => {
+            let connector = native_tls::TlsConnector::new()
+                .map_err(|err| HttpError::new(format!("TLS setup failed: {}", err)))?;
+            let stream = connector
+                .connect(&upstream.host, stream)
+                .map_err(|err| HttpError::new(format!("TLS connection failed: {}", err)))?;
+            exchange(stream, &upstream.authority(), request)
+        }
+    }
+}
+
+fn exchange<S: Read + Write>(
+    mut stream: S,
+    authority: &str,
+    request: &ClientRequest,
+) -> Result<HttpResponse, HttpError> {
+    let mut head = format!("{} {} HTTP/1.1\r\n", request.method.as_str(), request.path);
+    head.push_str(&format!("host: {}\r\n", authority));
+    for (name, value) in &request.headers {
+        head.push_str(&format!("{}: {}\r\n", name, value));
+    }
+    head.push_str(&format!("content-length: {}\r\n", request.body.len()));
+    head.push_str("connection: close\r\n\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&request.body))
+        .and_then(|_| stream.flush())
+        .map_err(|err| HttpError::new(err.to_string()))?;
+    read_response(stream)
+}
+
+fn read_response(stream: impl Read) -> Result<HttpResponse, HttpError> {
     let mut reader = BufReader::new(stream);
 
     let mut status_line = String::new();

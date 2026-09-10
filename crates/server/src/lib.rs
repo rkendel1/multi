@@ -16,8 +16,9 @@ pub mod proxy;
 pub mod router;
 pub mod server;
 pub mod ui;
+pub mod upstream;
 
-pub use client::{cookie_value, send, ClientRequest};
+pub use client::{cookie_value, send, send_upstream, ClientRequest};
 pub use control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 pub use http::{HttpError, HttpRequest, HttpResponse, JsonValue};
 pub use proxy::UpstreamProxy;
@@ -25,5 +26,6 @@ pub use router::{
     AppHandler, AppRequest, ApplicationBinding, PathPattern, RouteOutcome, RoutePolicy, RouteRule,
     RouterApp,
 };
-pub use server::{serve, status_for, AuthPortServer, HttpHandler, ServerHandle};
+pub use server::{serve, status_for, AuthPortServer, HttpHandler, ServerHandle, StudioController};
 pub use ui::{render_sign_in, CLIENT_JS};
+pub use upstream::{ApplicationUpstream, UpstreamScheme};

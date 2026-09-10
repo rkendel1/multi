@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+native-tls = "0.2"
 appport-auth-mesh-authz = { path = "../authz" }
 appport-auth-mesh-boundary = { path = "../boundary" }
 appport-auth-mesh-contract = { path = "../contract" }
