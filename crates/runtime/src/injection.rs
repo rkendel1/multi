@@ -227,6 +227,7 @@ fn build_runtime_context(
         tenant,
         session_id: Some(appport_auth_mesh_contract::SessionId(session_id)),
         delegation: None,
+        run: None,
         claims,
         capabilities: capability_envelope,
     })

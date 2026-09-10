@@ -8,8 +8,8 @@ use appport_auth_mesh_boundary::{
     StoredProposal,
 };
 use appport_auth_mesh_contract::{
-    AgentState, Claims, ContractVersion, DelegationId, PolicyId, Principal, PrincipalId,
-    PrincipalKind, ResourceScope,
+    AgentRun, AgentState, Capability, ClaimValue, Claims, ContractVersion, DelegationId, PolicyId,
+    Principal, PrincipalId, PrincipalKind, ResourceScope, RunId, TaskId,
 };
 use appport_auth_mesh_discovery::{
     propose_authority, render_drift_json, render_proposal_json, render_reconciliation_json,
@@ -17,7 +17,7 @@ use appport_auth_mesh_discovery::{
     ExistingAuthPort, ProposalHistoryItem, ProposalReviewStatus, RecommendationAction,
     ReconciliationResult,
 };
-use appport_auth_mesh_runtime::DelegationRequest;
+use appport_auth_mesh_runtime::{DelegationRequest, RunCreationRequest};
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -73,6 +73,27 @@ pub fn handle_control_route(
         ("GET", "/_authport/providers") => Some(providers(runtime)),
         ("GET", "/_authport/agents") => Some(agents(runtime, request)),
         ("POST", "/_authport/agents") => Some(create_agent(runtime, request)),
+        _ if method == "GET"
+            && path.starts_with("/_authport/agents/")
+            && path.ends_with("/runs") =>
+        {
+            Some(agent_runs(runtime, path, request))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/agents/")
+            && path.ends_with("/runs") =>
+        {
+            Some(create_agent_run(runtime, path, request))
+        }
+        _ if method == "GET" && path.starts_with("/_authport/runs/") => {
+            Some(agent_run(runtime, path, request))
+        }
+        _ if method == "POST"
+            && path.starts_with("/_authport/runs/")
+            && path.ends_with("/cancel") =>
+        {
+            Some(cancel_agent_run(runtime, path, request))
+        }
         _ if method == "GET" && path.starts_with("/_authport/agents/") => {
             Some(agent(runtime, path, request))
         }
@@ -742,6 +763,54 @@ fn decision_json(decision: &AuthorizationEvidence) -> JsonValue {
             ),
         ),
         (
+            "run_id".to_string(),
+            decision
+                .run_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "task_id".to_string(),
+            decision
+                .task_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "agent_principal".to_string(),
+            decision
+                .agent_principal
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "delegation_id".to_string(),
+            decision
+                .delegation_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "parent_run_id".to_string(),
+            decision
+                .parent_run_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "execution_scope".to_string(),
+            decision
+                .execution_scope
+                .as_ref()
+                .map(resource_scope_json)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
             "authority_revision".to_string(),
             JsonValue::Number(decision.authority_revision as f64),
         ),
@@ -939,6 +1008,128 @@ fn create_agent(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest
     {
         Ok(()) => HttpResponse::ok_json(agent_json(&principal)),
         Err(err) => HttpResponse::bad_request(&err.message),
+    }
+}
+
+fn agent_runs(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(agent_id) = path_id(path, "/_authport/agents/") else {
+        return HttpResponse::bad_request("missing agent id");
+    };
+    let agent_id = agent_id.trim_end_matches("/runs");
+    match runtime.agent_runs(&tenant, &PrincipalId(agent_id.to_string())) {
+        Ok(runs) => HttpResponse::ok_json(JsonValue::Object(vec![(
+            "runs".to_string(),
+            JsonValue::Array(runs.iter().map(run_json).collect()),
+        )])),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn agent_run(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(id) = path_id(path, "/_authport/runs/") else {
+        return HttpResponse::bad_request("missing run id");
+    };
+    match runtime.agent_run(&tenant, &RunId(id.to_string())) {
+        Ok(Some(run)) => HttpResponse::ok_json(run_json(&run)),
+        Ok(None) => HttpResponse::denied(404, "run_not_found", "run not found"),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn create_agent_run(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let body = String::from_utf8_lossy(&request.body);
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(agent_id) = path_id(path, "/_authport/agents/") else {
+        return HttpResponse::bad_request("missing agent id");
+    };
+    let agent_id = agent_id.trim_end_matches("/runs");
+    let Some(delegation_id) = extract_quoted_field(&body, "delegation_id")
+        .or_else(|| extract_quoted_field(&body, "delegation"))
+    else {
+        return HttpResponse::bad_request("missing delegation_id");
+    };
+    let capabilities = capability_fields(&body);
+    if capabilities.is_empty() {
+        return HttpResponse::bad_request("missing capability");
+    }
+    let Some(expires_at) = extract_number_field(&body, "expires_at") else {
+        return HttpResponse::bad_request("missing expires_at");
+    };
+    let task_id = extract_quoted_field(&body, "task_id")
+        .unwrap_or_else(|| format!("task:{}", agent_id.replace(':', "-")));
+    let task_purpose = extract_quoted_field(&body, "purpose")
+        .or_else(|| extract_quoted_field(&body, "task_purpose"))
+        .unwrap_or_else(|| "agent run".to_string());
+    let run_id = extract_quoted_field(&body, "id").map(RunId);
+    let parent_run_id = extract_quoted_field(&body, "parent_run_id").map(RunId);
+    let request = RunCreationRequest {
+        id: run_id,
+        task_id: TaskId(task_id),
+        task_purpose,
+        delegation_id: DelegationId(delegation_id),
+        parent_run_id,
+        capabilities,
+        resource_scope: resource_scope_from_body(&body),
+        expires_at,
+        constraints: Vec::new(),
+    };
+    match runtime.create_agent_run(&tenant, &PrincipalId(agent_id.to_string()), request) {
+        Ok(run) => HttpResponse::ok_json(run_json(&run)),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn cancel_agent_run(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    path: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(tenant) = request_value(request, "tenant") else {
+        return HttpResponse::bad_request("missing tenant");
+    };
+    let Some(id) = path_id(path, "/_authport/runs/") else {
+        return HttpResponse::bad_request("missing run id");
+    };
+    let run_id = id.trim_end_matches("/cancel");
+    match runtime.cancel_agent_run(&tenant, &RunId(run_id.to_string())) {
+        Ok(run) => HttpResponse::ok_json(run_json(&run)),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
     }
 }
 
@@ -1197,6 +1388,163 @@ fn delegation_json(delegation: &appport_auth_mesh_contract::Delegation) -> JsonV
             }),
         ),
     ])
+}
+
+fn run_json(run: &AgentRun) -> JsonValue {
+    JsonValue::Object(vec![
+        ("id".to_string(), JsonValue::String(run.id.to_string())),
+        (
+            "agent_principal".to_string(),
+            JsonValue::String(run.agent_principal.to_string()),
+        ),
+        (
+            "delegator".to_string(),
+            JsonValue::String(run.delegator.to_string()),
+        ),
+        (
+            "delegation_id".to_string(),
+            JsonValue::String(run.delegation_id.to_string()),
+        ),
+        (
+            "delegation_chain".to_string(),
+            JsonValue::Array(
+                run.delegation_chain
+                    .iter()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .collect(),
+            ),
+        ),
+        (
+            "parent_run_id".to_string(),
+            run.parent_run_id
+                .as_ref()
+                .map(|id| JsonValue::String(id.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "task_id".to_string(),
+            JsonValue::String(run.task.id.to_string()),
+        ),
+        (
+            "task_purpose".to_string(),
+            JsonValue::String(run.task.purpose.clone()),
+        ),
+        (
+            "capability_scope".to_string(),
+            JsonValue::Array(
+                run.capability_scope
+                    .iter()
+                    .map(|capability| JsonValue::String(capability.to_string()))
+                    .collect(),
+            ),
+        ),
+        (
+            "resource_scope".to_string(),
+            resource_scope_json(&run.resource_scope),
+        ),
+        (
+            "created_at".to_string(),
+            JsonValue::Number(run.created_at as f64),
+        ),
+        (
+            "expires_at".to_string(),
+            JsonValue::Number(run.expires_at as f64),
+        ),
+        (
+            "status".to_string(),
+            JsonValue::String(run.status.as_str().to_string()),
+        ),
+        (
+            "authority_revision".to_string(),
+            JsonValue::Number(run.authority_revision as f64),
+        ),
+        (
+            "contract_fingerprint".to_string(),
+            JsonValue::String(run.contract_fingerprint.clone()),
+        ),
+        (
+            "execution_credential".to_string(),
+            JsonValue::String(run.execution_credential.to_string()),
+        ),
+    ])
+}
+
+fn resource_scope_json(scope: &ResourceScope) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "resource_type".to_string(),
+            scope
+                .resource_type
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "resource_id".to_string(),
+            scope
+                .resource_id
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "attributes".to_string(),
+            JsonValue::Object(
+                scope
+                    .attributes
+                    .iter()
+                    .map(|(key, value)| (key.clone(), claim_value_json(value)))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn claim_value_json(value: &ClaimValue) -> JsonValue {
+    match value {
+        ClaimValue::Enum(value) | ClaimValue::String(value) => JsonValue::String(value.clone()),
+        ClaimValue::Integer(value) => JsonValue::Number(*value as f64),
+        ClaimValue::Boolean(value) => JsonValue::Bool(*value),
+    }
+}
+
+fn capability_fields(body: &str) -> Vec<Capability> {
+    extract_quoted_field(body, "capabilities")
+        .or_else(|| extract_quoted_field(body, "capability"))
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Capability(value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn resource_scope_from_body(body: &str) -> ResourceScope {
+    let mut scope = match (
+        extract_quoted_field(body, "resource_type"),
+        extract_quoted_field(body, "resource_id"),
+    ) {
+        (Some(resource_type), Some(resource_id)) => {
+            ResourceScope::exact(resource_type, resource_id)
+        }
+        (Some(resource_type), None) => ResourceScope::resource(resource_type),
+        _ => ResourceScope::any(),
+    };
+    if let Some(tenant) = extract_quoted_field(body, "resource_tenant")
+        .or_else(|| extract_quoted_field(body, "tenant_scope"))
+    {
+        scope = scope.with_attribute("tenant", ClaimValue::Enum(tenant));
+    }
+    if let Some(status) = extract_quoted_field(body, "status") {
+        scope = scope.with_attribute("status", ClaimValue::Enum(status));
+    }
+    if let Some(department) = extract_quoted_field(body, "department") {
+        scope = scope.with_attribute("department", ClaimValue::Enum(department));
+    }
+    scope
 }
 
 fn agent_state(state: &AgentState) -> &'static str {

@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use appport_auth_mesh_authz::{AuthorizationDecision, DenialReason};
+use appport_auth_mesh_authz::{
+    Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, DenialReason,
+};
 use appport_auth_mesh_boundary::{
     AuthBoundary, AuthPortRuntime, BoundaryRequest, ClientAuthContext, Method, SignInOutcome,
 };
-use appport_auth_mesh_contract::PrincipalKind;
+use appport_auth_mesh_contract::{Capability, PrincipalKind, RunId};
 use appport_auth_mesh_dsl::UiScreen;
 use appport_auth_mesh_runtime::AuthError;
 use appport_auth_mesh_surface::{AuthMethod, AuthOperation, AuthRoute};
@@ -158,7 +160,23 @@ impl AuthPortServer {
             return HttpResponse::denied(400, "missing_capability", "no capability named");
         };
 
-        match self.runtime.authorize(&context, capability) {
+        let decision = match request.field("run_id") {
+            Some(run_id) => self.runtime.authorize_run_resource(
+                &context,
+                &RunId(run_id.to_string()),
+                AuthorizationRequest {
+                    principal: context.principal.id.clone(),
+                    tenant: context.tenant.tenant_id.clone(),
+                    capability: Capability(capability.to_string()),
+                    action: Action("authorize".to_string()),
+                    resource: None,
+                    context: AuthorizationContext::default(),
+                },
+            ),
+            None => self.runtime.authorize(&context, capability),
+        };
+
+        match decision {
             Ok(AuthorizationDecision::Allow { grant, .. }) => HttpResponse::json(
                 200,
                 format!(

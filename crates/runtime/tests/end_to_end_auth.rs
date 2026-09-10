@@ -14,7 +14,7 @@ use appport_auth_mesh_authz::{
 };
 use appport_auth_mesh_contract::{
     Capability, ClaimValue, Claims, Delegation, DelegationId, Principal, PrincipalId,
-    PrincipalKind, ResourceScope, SessionId, TenantContext,
+    PrincipalKind, ResourceScope, RunId, SessionId, TaskId, TenantContext,
 };
 use appport_auth_mesh_dsl::{parse_auth_block, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -22,7 +22,7 @@ use appport_auth_mesh_providers::{
 };
 use appport_auth_mesh_runtime::{
     AuthError, AuthMesh, AuthenticatedSession, DelegationRequest, MemoryStores, Registration,
-    RuntimeContext,
+    RunCreationRequest, RuntimeContext,
 };
 use appport_auth_mesh_storage::{AuditEventKind, TenantRootStore};
 use appport_auth_mesh_surface::AuthSurface;
@@ -492,6 +492,210 @@ fn delegated_authority_is_limited_by_resource_scope() {
 }
 
 #[test]
+fn agent_runs_are_ephemeral_attenuations_of_delegation_authority() {
+    let stores = MemoryStores::new();
+    provision(&stores);
+    let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
+    let (alice, agent, _bob) = sign_up_cast(&mesh);
+
+    let delegation = mesh
+        .delegate(
+            "tenant-a",
+            DelegationRequest {
+                id: DelegationId("delegation-finance".to_string()),
+                delegator: alice.principal().id.clone(),
+                delegate: agent.principal().id.clone(),
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: ResourceScope::resource("invoice")
+                    .with_attribute("department", ClaimValue::Enum("finance".to_string())),
+                issued_at: NOW,
+                expires_at: Some(NOW + 1_000),
+            },
+            NOW,
+        )
+        .unwrap();
+
+    let err = mesh
+        .create_agent_run(
+            "tenant-a",
+            &agent.principal().id,
+            RunCreationRequest {
+                id: Some(RunId("run-too-wide".to_string())),
+                task_id: TaskId("task-too-wide".to_string()),
+                task_purpose: "agent assertion is not authority".to_string(),
+                delegation_id: delegation.id.clone(),
+                parent_run_id: None,
+                capabilities: vec![capability("reports.export")],
+                resource_scope: ResourceScope::any(),
+                expires_at: NOW + 100,
+                constraints: Vec::new(),
+            },
+            NOW + 1,
+            17,
+            config().fingerprint(),
+        )
+        .unwrap_err();
+    assert_eq!(err.denial, DenialReason::RunExceedsDelegation);
+
+    let run = mesh
+        .create_agent_run(
+            "tenant-a",
+            &agent.principal().id,
+            RunCreationRequest {
+                id: Some(RunId("run-finance".to_string())),
+                task_id: TaskId("task-finance".to_string()),
+                task_purpose: "Create finance invoices".to_string(),
+                delegation_id: delegation.id.clone(),
+                parent_run_id: None,
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: ResourceScope::resource("invoice")
+                    .with_attribute("department", ClaimValue::Enum("finance".to_string())),
+                expires_at: NOW + 100,
+                constraints: Vec::new(),
+            },
+            NOW + 1,
+            17,
+            config().fingerprint(),
+        )
+        .unwrap();
+
+    assert_eq!(run.delegation_id, delegation.id);
+    assert_eq!(run.authority_revision, 17);
+    assert_eq!(run.contract_fingerprint, config().fingerprint());
+    assert_eq!(run.capability_scope, vec![capability("invoice.create")]);
+    assert!(run.execution_credential.as_str().starts_with("exec_"));
+
+    let context = mesh
+        .session_context("tenant-a", &agent.session.id, NOW + 10)
+        .unwrap();
+    let request = appport_auth_mesh_authz::AuthorizationRequest {
+        principal: agent.principal().id.clone(),
+        tenant: "tenant-a".into(),
+        capability: capability("invoice.create"),
+        action: Action("create".to_string()),
+        resource: Some(ResourceRef::new("invoice", "8472", "tenant-a")),
+        context: AuthorizationContext::default(),
+    };
+    let finance_invoice = ResourceAttributes::new()
+        .with_tenant("tenant-a")
+        .with_value("department", ClaimValue::Enum("finance".to_string()));
+    assert!(mesh
+        .authorize_run_request_with_authority_revision(
+            &context,
+            &run.id,
+            &request,
+            Some(&finance_invoice),
+            NOW + 10,
+            18,
+        )
+        .is_allowed());
+
+    let evidence = mesh.recent_decisions().last().cloned().unwrap();
+    assert_eq!(evidence.run_id, Some(run.id.clone()));
+    assert_eq!(evidence.task_id, Some(TaskId("task-finance".to_string())));
+    assert_eq!(evidence.agent_principal, Some(agent.principal().id.clone()));
+    assert_eq!(evidence.delegation_id, Some(run.delegation_id.clone()));
+    assert_eq!(evidence.execution_scope, Some(run.resource_scope.clone()));
+    assert_eq!(evidence.authority_revision, 18);
+
+    let sales_invoice = ResourceAttributes::new()
+        .with_tenant("tenant-a")
+        .with_value("department", ClaimValue::Enum("sales".to_string()));
+    assert_denies(
+        &mesh.authorize_run_request_with_authority_revision(
+            &context,
+            &run.id,
+            &request,
+            Some(&sales_invoice),
+            NOW + 10,
+            18,
+        ),
+        DenialReason::RunScopeDenied,
+    );
+
+    mesh.cancel_agent_run("tenant-a", &run.id, NOW + 20)
+        .expect("runs are independently cancellable");
+    assert_denies(
+        &mesh.authorize_run_request_with_authority_revision(
+            &context,
+            &run.id,
+            &request,
+            Some(&finance_invoice),
+            NOW + 21,
+            19,
+        ),
+        DenialReason::RunCancelled,
+    );
+}
+
+#[test]
+fn child_runs_cannot_widen_parent_run_authority() {
+    let stores = MemoryStores::new();
+    provision(&stores);
+    let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
+    let (alice, agent, _bob) = sign_up_cast(&mesh);
+
+    let delegation = mesh
+        .delegate(
+            "tenant-a",
+            DelegationRequest {
+                id: DelegationId("delegation-multi".to_string()),
+                delegator: alice.principal().id.clone(),
+                delegate: agent.principal().id.clone(),
+                capabilities: vec![capability("invoice.create"), capability("reports.export")],
+                resource_scope: ResourceScope::any(),
+                issued_at: NOW,
+                expires_at: Some(NOW + 1_000),
+            },
+            NOW,
+        )
+        .unwrap();
+
+    let parent = mesh
+        .create_agent_run(
+            "tenant-a",
+            &agent.principal().id,
+            RunCreationRequest {
+                id: Some(RunId("run-parent".to_string())),
+                task_id: TaskId("task-parent".to_string()),
+                task_purpose: "Process invoices".to_string(),
+                delegation_id: delegation.id.clone(),
+                parent_run_id: None,
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: ResourceScope::any(),
+                expires_at: NOW + 100,
+                constraints: Vec::new(),
+            },
+            NOW + 1,
+            17,
+            config().fingerprint(),
+        )
+        .unwrap();
+
+    let err = mesh
+        .create_agent_run(
+            "tenant-a",
+            &agent.principal().id,
+            RunCreationRequest {
+                id: Some(RunId("run-child-too-wide".to_string())),
+                task_id: TaskId("task-child".to_string()),
+                task_purpose: "Export reports".to_string(),
+                delegation_id: delegation.id,
+                parent_run_id: Some(parent.id),
+                capabilities: vec![capability("reports.export")],
+                resource_scope: ResourceScope::any(),
+                expires_at: NOW + 50,
+                constraints: Vec::new(),
+            },
+            NOW + 2,
+            17,
+            config().fingerprint(),
+        )
+        .unwrap_err();
+    assert_eq!(err.denial, DenialReason::ParentRunScopeDenied);
+}
+
+#[test]
 fn chained_delegation_preserves_attenuated_scope_and_evidence() {
     let stores = MemoryStores::new();
     provision(&stores);
@@ -925,6 +1129,7 @@ fn every_unresolved_input_is_denied() {
         tenant: tenant("tenant-a"),
         session_id: None,
         delegation: None,
+        run: None,
         claims: Claims {
             values: Default::default(),
         },

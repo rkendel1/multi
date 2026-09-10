@@ -1,6 +1,6 @@
 use appport_auth_mesh_contract::{
     AuditEventId, Capability, ClaimValue, DelegationId, PolicyId, PrincipalId, PrincipalKind,
-    TenantId,
+    ResourceScope, RunId, TaskId, TenantId,
 };
 use std::collections::BTreeMap;
 
@@ -145,6 +145,11 @@ impl ResourceAttributes {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AuthorizationContext {
     pub values: BTreeMap<String, ClaimValue>,
+    pub run_id: Option<RunId>,
+    pub task_id: Option<TaskId>,
+    pub agent_principal: Option<PrincipalId>,
+    pub delegation_id: Option<DelegationId>,
+    pub delegation_chain: Vec<DelegationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +177,12 @@ pub struct AuthorizationEvidence {
     pub authority: Option<AuthorityBasis>,
     pub delegated_by: Option<PrincipalId>,
     pub delegation_chain: Vec<DelegationId>,
+    pub run_id: Option<RunId>,
+    pub task_id: Option<TaskId>,
+    pub agent_principal: Option<PrincipalId>,
+    pub delegation_id: Option<DelegationId>,
+    pub parent_run_id: Option<RunId>,
+    pub execution_scope: Option<ResourceScope>,
     pub authority_revision: u64,
     pub contract_fingerprint: String,
     pub decision: AuthorizationOutcome,
@@ -429,6 +440,12 @@ pub enum DenialReason {
     DelegationMissing,
     DelegationScopeDenied,
     DelegationExceedsAuthority,
+    RunNotFound,
+    RunCancelled,
+    RunExpired,
+    RunScopeDenied,
+    RunExceedsDelegation,
+    ParentRunScopeDenied,
     AgentRevoked,
     AgentSuspended,
     UnknownCapability,
@@ -459,6 +476,12 @@ impl DenialReason {
             Self::DelegationMissing => "delegation_missing",
             Self::DelegationScopeDenied => "delegation_scope_denied",
             Self::DelegationExceedsAuthority => "delegation_exceeds_authority",
+            Self::RunNotFound => "run_not_found",
+            Self::RunCancelled => "run_cancelled",
+            Self::RunExpired => "run_expired",
+            Self::RunScopeDenied => "run_scope_denied",
+            Self::RunExceedsDelegation => "run_exceeds_delegation",
+            Self::ParentRunScopeDenied => "parent_run_scope_denied",
             Self::AgentRevoked => "agent_revoked",
             Self::AgentSuspended => "agent_suspended",
             Self::UnknownCapability => "unknown_capability",
@@ -489,6 +512,12 @@ pub enum DecisionReason {
     DelegationRevoked,
     DelegationScopeDenied,
     DelegationExceedsAuthority,
+    RunNotFound,
+    RunCancelled,
+    RunExpired,
+    RunScopeDenied,
+    RunExceedsDelegation,
+    ParentRunScopeDenied,
     AgentRevoked,
     AgentSuspended,
     FailClosed,
@@ -512,6 +541,12 @@ impl DecisionReason {
             Self::DelegationRevoked => "delegation_revoked",
             Self::DelegationScopeDenied => "delegation_scope_denied",
             Self::DelegationExceedsAuthority => "delegation_exceeds_authority",
+            Self::RunNotFound => "run_not_found",
+            Self::RunCancelled => "run_cancelled",
+            Self::RunExpired => "run_expired",
+            Self::RunScopeDenied => "run_scope_denied",
+            Self::RunExceedsDelegation => "run_exceeds_delegation",
+            Self::ParentRunScopeDenied => "parent_run_scope_denied",
             Self::AgentRevoked => "agent_revoked",
             Self::AgentSuspended => "agent_suspended",
             Self::FailClosed => "fail_closed",
@@ -567,6 +602,12 @@ impl AuthorizationDecision {
                 DenialReason::DelegationExceedsAuthority => {
                     DecisionReason::DelegationExceedsAuthority
                 }
+                DenialReason::RunNotFound => DecisionReason::RunNotFound,
+                DenialReason::RunCancelled => DecisionReason::RunCancelled,
+                DenialReason::RunExpired => DecisionReason::RunExpired,
+                DenialReason::RunScopeDenied => DecisionReason::RunScopeDenied,
+                DenialReason::RunExceedsDelegation => DecisionReason::RunExceedsDelegation,
+                DenialReason::ParentRunScopeDenied => DecisionReason::ParentRunScopeDenied,
                 DenialReason::AgentRevoked => DecisionReason::AgentRevoked,
                 DenialReason::AgentSuspended => DecisionReason::AgentSuspended,
                 DenialReason::InvalidDelegation
