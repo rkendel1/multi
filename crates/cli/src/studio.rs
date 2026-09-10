@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 
-use appport_auth_mesh_boundary::{AuthContext, BoundaryRequest, Method};
+use appport_auth_mesh_boundary::{AuthContext, AuthPortRuntime, BoundaryRequest, Method};
 use appport_auth_mesh_discovery::discover;
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_server::{
@@ -221,6 +221,7 @@ struct RepositoryStudio {
     binding: Arc<StudioApplication>,
     proposals: Mutex<std::collections::BTreeMap<String, init::AttachmentPlan>>,
     surface: AuthSurface,
+    runtime: RwLock<Option<Arc<AuthPortRuntime>>>,
 }
 
 impl RepositoryStudio {
@@ -230,6 +231,7 @@ impl RepositoryStudio {
             binding,
             proposals: Mutex::new(Default::default()),
             surface,
+            runtime: RwLock::new(None),
         }
     }
 
@@ -256,6 +258,12 @@ impl RepositoryStudio {
 }
 
 impl StudioController for RepositoryStudio {
+    fn attach_runtime(&self, runtime: Arc<AuthPortRuntime>) {
+        if let Ok(mut current) = self.runtime.write() {
+            *current = Some(runtime);
+        }
+    }
+
     fn page(&self) -> Option<String> {
         let upstream = init::adoption_upstream(&self.root);
         self.binding.sync(upstream.as_deref());
@@ -382,6 +390,48 @@ impl StudioController for RepositoryStudio {
                     Err(err) => Self::failure(422, err.message),
                 }
             }
+            (Method::Post, "/_authboundry/application/users") => {
+                let Some(username) = Self::field(request, "username") else {
+                    return Some(Self::failure(400, "username is required"));
+                };
+                let Some(password) = Self::field(request, "password") else {
+                    return Some(Self::failure(400, "password is required"));
+                };
+                let role = Self::field(request, "role").unwrap_or_else(|| "user".to_string());
+                if !matches!(role.as_str(), "admin" | "user") {
+                    return Some(Self::failure(400, "role must be admin or user"));
+                }
+                let email = Self::field(request, "email").filter(|value| !value.trim().is_empty());
+                let Some(runtime) = self.runtime.read().ok()?.clone() else {
+                    return Some(Self::failure(503, "authority runtime is unavailable"));
+                };
+                let mut claims =
+                    std::collections::BTreeMap::from([("role".to_string(), role.clone())]);
+                if let Some(email) = &email {
+                    claims.insert("email".to_string(), email.clone());
+                }
+                match runtime.create_local_user(
+                    "development",
+                    &username,
+                    &password,
+                    email.as_deref(),
+                    claims.clone(),
+                ) {
+                    Ok(()) => {
+                        let account = serve::Account {
+                            tenant: "development".to_string(),
+                            username,
+                            password,
+                            claims,
+                        };
+                        match persist_development_account(&self.root, account) {
+                            Ok(()) => HttpResponse::json(201, "{\"ok\":true,\"created\":true}"),
+                            Err(err) => Self::failure(500, err.message),
+                        }
+                    }
+                    Err(err) => Self::failure(422, err.message),
+                }
+            }
             _ => return None,
         };
         Some(response)
@@ -393,6 +443,47 @@ struct RouteAccess {
     method: String,
     path: String,
     access: String,
+}
+
+fn persist_development_account(
+    root: &std::path::Path,
+    account: serve::Account,
+) -> Result<(), CliError> {
+    let mut accounts = init::development_accounts(root);
+    if accounts
+        .iter()
+        .any(|existing| existing.username == account.username)
+    {
+        return Err(error(format!("user `{}` already exists", account.username)));
+    }
+    accounts.push(account);
+    let proxy_secret = init::development_proxy_secret(root).unwrap_or_default();
+    let rows = accounts
+        .iter()
+        .map(|account| {
+            let claims = account
+                .claims
+                .iter()
+                .map(|(key, value)| format!("{}={}", key, value))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "    {{\"username\": \"{}\", \"password\": \"{}\", \"claims\": \"{}\"}}",
+                json_escape(&account.username),
+                json_escape(&account.password),
+                json_escape(&claims)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    std::fs::write(
+        root.join(".authboundry/development.json"),
+        format!(
+            "{{\n  \"tenant\": \"development\",\n  \"proxy_secret\": \"{}\",\n  \"accounts\": [\n{}\n  ]\n}}\n",
+            json_escape(&proxy_secret), rows
+        ),
+    )
+    .map_err(|err| error(format!("cannot persist development user: {err}")))
 }
 
 fn route_access(root: &std::path::Path) -> Vec<RouteAccess> {
@@ -648,7 +739,7 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
 <section class="card grid"><dl><dt>Authority</dt><dd class="ok">✓ Configured</dd></dl><dl><dt>Application</dt><dd class="{attach_class}">{application}</dd></dl><dl><dt>Protection</dt><dd class="{protect_class}">{protection}</dd></dl><dl><dt>Mode</dt><dd>Standalone</dd></dl></section>
 {attach_callout}<h2>Topology</h2><section class="card grid"><dl><dt>Studio + runtime</dt><dd id="studio-origin"></dd></dl><dl><dt>Protected application upstream</dt><dd>{upstream}</dd></dl></section><h2>Application</h2><section class="card grid"><dl><dt>Language</dt><dd>{language}</dd></dl><dl><dt>Framework</dt><dd>{framework}</dd></dl><dl><dt>Package manager</dt><dd>{package_manager}</dd></dl><dl><dt>Entrypoint</dt><dd>{entrypoint}</dd></dl><dl><dt>Run command</dt><dd>{run_command}</dd></dl><dl><dt>Upstream</dt><dd>{upstream}</dd></dl></section>
 <h2>Authority</h2><section class="card grid"><dl><dt>Providers</dt><dd>{providers}</dd></dl><dl><dt>Principals</dt><dd>Human · Service</dd></dl><dl><dt>Agents / Delegation</dt><dd>Disabled</dd></dl><dl><dt>Sessions · Policies · Audit</dt><dd>Runtime authority</dd></dl></section>
-<h2>Development users</h2><section class="card"><p class="muted">Local-only accounts generated for this repository. Credentials are stored in <code>.authboundry/development.json</code> and excluded from git.</p><table><thead><tr><td>User</td><td>Role</td><td>Password</td></tr></thead><tbody>{account_rows}</tbody></table></section>
+<h2>Development users</h2><section class="card"><p class="muted">Local-only accounts generated for this repository. Credentials are stored in <code>.authboundry/development.json</code> and excluded from git.</p><table><thead><tr><td>User</td><td>Role</td><td>Password</td></tr></thead><tbody>{account_rows}</tbody></table><h3>Create user</h3><form id="create-user"><label>Username<br><input name="username" required></label><label>Email<br><input name="email" type="email" placeholder="optional"></label><label>Password<br><input name="password" type="password" minlength="12" required></label><label>Role<br><select name="role"><option value="user">user</option><option value="admin">admin</option></select></label><br><button type="submit">Create user</button><span id="create-user-status" class="muted"></span></form></section>
 <h2>Routes and access</h2><section class="card"><p class="muted">Choose who may cross the boundary for each route. Changes use AuthBoundry's reviewed proposal pipeline and take effect immediately.</p><table>{route_rows}</table></section><h2>Contract</h2><p class="muted">{fingerprint}</p></main>
 <dialog id="attach-dialog"><h2>Attach Application</h2><div id="attach-step"><p>Find a reachable application runtime. Reachability will not attach it.</p><label>Application upstream<br><input id="upstream" value="{upstream_input}" placeholder="http://127.0.0.1:3000"></label><p id="attach-status" class="muted"></p><button id="discover">Discover</button><button id="test-connection" class="secondary">Test Connection</button><button id="preview">Preview Attachment</button></div><div id="approval" hidden><h2>Attachment Preview</h2><pre id="preview-text"></pre><button id="cancel" class="secondary">Cancel</button><button id="approve">Approve Attachment</button></div></dialog>
 <script>
@@ -657,6 +748,7 @@ document.getElementById('studio-origin').textContent=location.origin;
 const post=async(path,body={{}})=>{{const response=await fetch(path,{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(body)}});const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.reason||'Request failed');return data}};
 const applyChange=async(change)=>{{const proposal=await post('/_authboundry/propose',change);await post('/_authboundry/approve',{{proposal_id:proposal.proposal_id}});return post('/_authboundry/apply',{{proposal_id:proposal.proposal_id}})}};
 const routeCapability=(method,path,access)=>'application.route.'+method.toLowerCase()+'.'+(path==='/'?'root':path.replace(/[^a-zA-Z0-9]+/g,'.').replace(/^\.|\.$/g,'').toLowerCase())+'.'+access;
+document.getElementById('create-user').addEventListener('submit',async(event)=>{{event.preventDefault();const status=document.getElementById('create-user-status');status.textContent='Creating…';try{{await post('/_authboundry/application/users',Object.fromEntries(new FormData(event.target).entries()));status.textContent='✓ User created and active';status.className='ok';setTimeout(()=>location.reload(),500)}}catch(error){{status.textContent=error.message;status.className='warn'}}}});
 document.querySelectorAll('[data-route]').forEach(row=>{{row.querySelector('.save-route').onclick=async()=>{{const status=row.querySelector('.route-status'), access=row.querySelector('.route-access').value, method=row.dataset.method, path=row.dataset.path, capability=routeCapability(method,path,access);status.textContent='Applying…';status.className='route-status muted';try{{if(access==='default'){{await applyChange({{type:'unprotect_route',method,path}})}}else{{const roles=access==='authenticated'?'admin,user':access;await applyChange({{type:'set_capability_policy',capability,policy:'development-policy',roles}});await applyChange({{type:'protect_route',method,path,capability}})}}await post('/_authboundry/application/routes/access',{{method,path,access}});status.textContent='✓ Active and saved';status.className='route-status ok'}}catch(error){{status.textContent=error.message;status.className='route-status warn'}}}}}});
 document.getElementById('open-attachment')?.addEventListener('click',()=>dialog.showModal());
 document.getElementById('discover').onclick=async()=>{{status.textContent='Discovering reachable runtimes…';try{{const data=await post('/_authboundry/application/discover');if(data.reachable){{input.value=data.upstream;status.textContent='✓ Application reachable';status.className='ok'}}else{{status.textContent='No running application was detected.';status.className='warn'}}}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
@@ -741,6 +833,8 @@ mod tests {
         assert!(html.contains("/_authboundry/application/attachment/preview"));
         assert!(html.contains("Approve Attachment"));
         assert!(html.contains("Development users"));
+        assert!(html.contains("Create user"));
+        assert!(html.contains("/_authboundry/application/users"));
         assert!(html.contains("admin-secret"));
         assert!(html.contains("user-secret"));
         assert!(html.contains("<strong>admin</strong>"));

@@ -364,6 +364,14 @@ fn registration_is_closed_unless_the_deployment_opens_it() {
         Some(&ClaimValue::Enum("member".to_string()))
     );
     assert!(!context.holds("invoice.read"));
+
+    // Self-service registration also provisions a brand-new local identity.
+    let new_account = sign_in_request("acme", "new-account", "new-account-secret")
+        .with_field("email", "new-account@example.com");
+    open.sign_up(&new_account)
+        .expect("a new local account can register");
+    open.sign_in(&new_account)
+        .expect("the newly registered account can sign in immediately");
 }
 
 /// The invariant behind the whole PR: where the boundary runs changes nothing
@@ -455,6 +463,45 @@ fn signing_in_requires_a_declared_connector_and_real_credentials() {
             .unwrap_err()
             .denial,
         DenialReason::UnknownTenant
+    );
+}
+
+#[test]
+fn studio_provisioned_local_users_are_immediately_authenticatable() {
+    let stores = stores();
+    let config = parse_auth_block(DECLARATION).unwrap();
+    let directory = Arc::new(LocalConnector::new());
+    let connectors: Vec<Arc<dyn AuthConnector>> = vec![directory];
+    let registry = ConnectorRegistry::from_config_with(&config, connectors).unwrap();
+    let runtime = AuthPortRuntime::new(
+        config,
+        registry,
+        stores.mesh_stores(),
+        BindingMode::Standalone,
+    )
+    .unwrap()
+    .with_clock(Arc::new(TestClock::new(NOW)));
+    runtime
+        .create_local_user(
+            "acme",
+            "new-user",
+            "new-user-secret",
+            Some("new-user@example.com"),
+            std::collections::BTreeMap::from([("role".to_string(), "member".to_string())]),
+        )
+        .unwrap();
+    assert!(runtime
+        .sign_in(&sign_in_request("acme", "new-user", "new-user-secret"))
+        .is_ok());
+    assert_eq!(
+        runtime
+            .mesh()
+            .registry()
+            .get("local")
+            .unwrap()
+            .recovery_address("new-user")
+            .as_deref(),
+        Some("new-user@example.com")
     );
 }
 

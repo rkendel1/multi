@@ -18,13 +18,18 @@ use appport_auth_mesh_surface::{AuthMethod, AuthOperation, AuthRoute};
 
 use crate::http::{escape, HttpRequest, HttpResponse};
 use crate::router::{ApplicationBinding, RouteOutcome};
-use crate::ui::{render_password_reset, render_sign_in, serves_default_screen, CLIENT_JS};
+use crate::ui::{
+    render_password_forgot, render_password_reset, render_sign_in, render_sign_up,
+    serves_default_screen, CLIENT_JS,
+};
 
 /// Repository-scoped Studio operations supplied by the CLI host. Keeping this
 /// behind a narrow interface prevents the generic authority server from
 /// acquiring filesystem authority.
 pub trait StudioController: Send + Sync {
     fn handle(&self, request: &HttpRequest) -> Option<HttpResponse>;
+
+    fn attach_runtime(&self, _runtime: Arc<AuthPortRuntime>) {}
 
     fn page(&self) -> Option<String> {
         None
@@ -63,6 +68,7 @@ impl AuthPortServer {
     }
 
     pub fn with_studio_controller(mut self, controller: Arc<dyn StudioController>) -> Self {
+        controller.attach_runtime(self.runtime.clone());
         self.studio_controller = Some(controller);
         self
     }
@@ -152,6 +158,9 @@ impl AuthPortServer {
                 Ok(()) => HttpResponse::json(200, "{\"changed\": true}"),
                 Err(err) => denial(&err),
             },
+            AuthOperation::PasswordForgot if request.method == Method::Get => {
+                HttpResponse::html(200, render_password_forgot(&self.tenants))
+            }
             AuthOperation::PasswordForgot => {
                 // Recovery requests deliberately have one public result. Neither
                 // account existence nor downstream delivery state crosses this boundary.
@@ -514,7 +523,17 @@ impl AuthPortServer {
     }
 
     fn render_screen(&self, screen: UiScreen) -> HttpResponse {
-        if serves_default_screen(self.runtime.surface(), screen) {
+        if serves_default_screen(self.runtime.surface(), screen.clone()) {
+            if screen == UiScreen::Signup {
+                return HttpResponse::html(
+                    200,
+                    render_sign_up(
+                        self.runtime.surface(),
+                        &self.runtime.effective_password_policy().policy,
+                        &self.tenants,
+                    ),
+                );
+            }
             HttpResponse::html(
                 200,
                 render_sign_in(

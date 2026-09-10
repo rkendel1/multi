@@ -67,6 +67,17 @@ const DEFAULT_DECLARATION: &str = r#"use auth {
     login = "default"
     signup = "default"
     account = "default"
+    password_forgot = "default"
+    password_reset = "default"
+    password_change = "default"
+    email_verification = "default"
+    account_links = "default"
+    profile = "default"
+    devices = "default"
+    sessions = "default"
+    mfa = "default"
+    passkeys = "default"
+    recovery = "default"
     tenant = "default"
     agents = "default"
   }
@@ -92,7 +103,26 @@ const AUTH_OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("experience", "  experience = {\n    sign_in = enabled\n    sign_up = enabled\n    sign_out = enabled\n    password = enabled\n    password_reset = enabled\n    password_change = enabled\n    external_identity = enabled\n    account_linking = enabled\n    email_verification = disabled\n    mfa = disabled\n    passkeys = disabled\n    device_management = disabled\n    session_management = enabled\n    profile = disabled\n    tenant_switching = enabled\n    recovery = disabled\n  }\n"),
     ("password", "  password = {\n    min_length = 12\n    max_length = 128\n    require_uppercase = false\n    require_lowercase = false\n    require_number = false\n    require_special_character = false\n    expiration_days = null\n    history_count = 5\n    allow_password_change = true\n    allow_password_reset = true\n  }\n"),
     ("storage", "  storage = {\n    authority = \"feltdb\"\n    audit = \"feltdb\"\n    reporting = \"authboundry_projection\"\n  }\n"),
-    ("ui", "  ui = {\n    mode = \"generated\"\n    theme = \"authboundry-default\"\n    login = \"default\"\n    signup = \"default\"\n    account = \"default\"\n    tenant = \"default\"\n    agents = \"default\"\n  }\n"),
+    ("ui", "  ui = {\n    mode = \"generated\"\n    theme = \"authboundry-default\"\n    login = \"default\"\n    signup = \"default\"\n    account = \"default\"\n    password_forgot = \"default\"\n    password_reset = \"default\"\n    password_change = \"default\"\n    email_verification = \"default\"\n    account_links = \"default\"\n    profile = \"default\"\n    devices = \"default\"\n    sessions = \"default\"\n    mfa = \"default\"\n    passkeys = \"default\"\n    recovery = \"default\"\n    tenant = \"default\"\n    agents = \"default\"\n  }\n"),
+];
+
+const UI_SCREEN_DEFAULTS: &[&str] = &[
+    "login",
+    "signup",
+    "account",
+    "password_forgot",
+    "password_reset",
+    "password_change",
+    "email_verification",
+    "account_links",
+    "profile",
+    "devices",
+    "sessions",
+    "mfa",
+    "passkeys",
+    "recovery",
+    "tenant",
+    "agents",
 ];
 const MANIFEST_DIR: &str = ".authboundry";
 const MANIFEST_FILE: &str = ".authboundry/adoption.json";
@@ -1110,6 +1140,15 @@ fn config_upgrade_change(root: &Path) -> Option<FileChange> {
             after = insert_auth_declaration(&after, declaration)?;
         }
     }
+    for screen in UI_SCREEN_DEFAULTS {
+        if !named_block_has_field(&after, "ui", screen) {
+            after = insert_named_block_declaration(
+                &after,
+                "ui",
+                &format!("    {screen} = \"default\"\n"),
+            )?;
+        }
+    }
     if !after.contains("use mail") {
         after.push_str("\nuse mail\nmail {\n  identities {\n    auth = \"auth@example.com\"\n  }\n  templates {\n    password_reset = \"./emails/password-reset.html\"\n    email_verification = \"./emails/email-verification.html\"\n  }\n}\n");
     }
@@ -1167,6 +1206,67 @@ fn auth_has_field(source: &str, field: &str) -> bool {
 fn insert_auth_declaration(source: &str, declaration: &str) -> Option<String> {
     let (_, close) = auth_block_bounds(source)?;
     let mut upgraded = String::with_capacity(source.len() + declaration.len() + 1);
+    upgraded.push_str(&source[..close]);
+    if !upgraded.ends_with('\n') {
+        upgraded.push('\n');
+    }
+    upgraded.push_str(declaration);
+    upgraded.push_str(&source[close..]);
+    Some(upgraded)
+}
+
+fn named_block_bounds(source: &str, name: &str) -> Option<(usize, usize)> {
+    let (auth_open, auth_close) = auth_block_bounds(source)?;
+    let body = &source[auth_open + 1..auth_close];
+    for (offset, _) in body.match_indices(name) {
+        let start = auth_open + 1 + offset;
+        let bounded = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        if !bounded {
+            continue;
+        }
+        let open = start + name.len() + source[start + name.len()..auth_close].find('{')?;
+        let prefix = &source[auth_open + 1..open];
+        let depth = prefix.chars().filter(|ch| *ch == '{').count()
+            - prefix.chars().filter(|ch| *ch == '}').count();
+        if depth == 0 {
+            let mut nested = 0usize;
+            for (inner, ch) in source[open..auth_close].char_indices() {
+                match ch {
+                    '{' => nested += 1,
+                    '}' => {
+                        nested = nested.checked_sub(1)?;
+                        if nested == 0 {
+                            return Some((open, open + inner));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+fn named_block_has_field(source: &str, block: &str, field: &str) -> bool {
+    let Some((open, close)) = named_block_bounds(source, block) else {
+        return false;
+    };
+    source[open + 1..close].lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(field)
+            && line[field.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_whitespace() || ch == '=' || ch == ':')
+    })
+}
+
+fn insert_named_block_declaration(source: &str, block: &str, declaration: &str) -> Option<String> {
+    let (_, close) = named_block_bounds(source, block)?;
+    let mut upgraded = String::with_capacity(source.len() + declaration.len());
     upgraded.push_str(&source[..close]);
     if !upgraded.ends_with('\n') {
         upgraded.push('\n');

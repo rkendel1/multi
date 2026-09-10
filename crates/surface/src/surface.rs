@@ -213,7 +213,7 @@ impl AuthRoute {
         {
             routes.push(Self::new(
                 "/auth/password/forgot",
-                &[Post],
+                &[Get, Post],
                 AuthOperation::PasswordForgot,
                 false,
                 AuthFeature::Signup,
@@ -981,6 +981,17 @@ impl AuthUiSurface {
             UiScreenSurface::derive(config, UiScreen::Login),
             UiScreenSurface::derive(config, UiScreen::Signup),
             UiScreenSurface::derive(config, UiScreen::Account),
+            UiScreenSurface::derive(config, UiScreen::PasswordForgot),
+            UiScreenSurface::derive(config, UiScreen::PasswordReset),
+            UiScreenSurface::derive(config, UiScreen::PasswordChange),
+            UiScreenSurface::derive(config, UiScreen::EmailVerification),
+            UiScreenSurface::derive(config, UiScreen::AccountLinks),
+            UiScreenSurface::derive(config, UiScreen::Profile),
+            UiScreenSurface::derive(config, UiScreen::Devices),
+            UiScreenSurface::derive(config, UiScreen::Sessions),
+            UiScreenSurface::derive(config, UiScreen::Mfa),
+            UiScreenSurface::derive(config, UiScreen::Passkeys),
+            UiScreenSurface::derive(config, UiScreen::Recovery),
         ];
         if features.tenants {
             screens.push(UiScreenSurface::derive(config, UiScreen::Tenant));
@@ -1036,13 +1047,27 @@ pub struct UiScreenSurface {
 impl UiScreenSurface {
     fn derive(config: &AuthConfig, screen: UiScreen) -> Self {
         let providers = match screen {
-            UiScreen::Login | UiScreen::Signup | UiScreen::Account => config
+            UiScreen::Login
+            | UiScreen::Signup
+            | UiScreen::Account
+            | UiScreen::PasswordForgot
+            | UiScreen::PasswordReset
+            | UiScreen::PasswordChange
+            | UiScreen::EmailVerification
+            | UiScreen::AccountLinks => config
                 .providers
                 .iter()
                 .filter(|provider| catalog::describe(provider).status.is_supported())
                 .cloned()
                 .collect(),
-            UiScreen::Tenant | UiScreen::Agents => Vec::new(),
+            UiScreen::Profile
+            | UiScreen::Devices
+            | UiScreen::Sessions
+            | UiScreen::Mfa
+            | UiScreen::Passkeys
+            | UiScreen::Recovery
+            | UiScreen::Tenant
+            | UiScreen::Agents => Vec::new(),
         };
 
         Self {

@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appport_auth_mesh_authz::{Condition, Policy, Rule};
-use appport_auth_mesh_boundary::{AuthPortRuntime, BindingMode, MailPort, Method, Requirement};
+use appport_auth_mesh_boundary::{
+    AuthPortRuntime, BindingMode, MailPort, Method, RegistrationPolicy, Requirement,
+};
 use appport_auth_mesh_contract::{Capability, ClaimValue, TenantContext};
-use appport_auth_mesh_dsl::AuthConfig;
+use appport_auth_mesh_dsl::{AuthConfig, AuthExperienceCapability};
 use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{MemoryStores, Registration};
 use appport_auth_mesh_server::{
@@ -148,7 +150,7 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
         options.tenants.clone()
     };
 
-    let mut directory = LocalConnector::new();
+    let directory = LocalConnector::new();
     for account in &options.accounts {
         let mut local = LocalAccount::new(account.username.clone(), account.password.clone());
         for (name, value) in &account.claims {
@@ -185,6 +187,13 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
         BindingMode::Standalone,
     )
     .map_err(|err| error(err.message))?;
+    if runtime
+        .contract()
+        .experience
+        .enabled(AuthExperienceCapability::SignUp)
+    {
+        runtime = runtime.with_registration(RegistrationPolicy::self_service(&[("role", "user")]));
+    }
     let mail_port = match (&options.mail_port, std::env::var("MAILPORT_URL")) {
         (Some(mail), _) => Some(mail.clone()),
         (None, Ok(url)) => Some(Arc::new(

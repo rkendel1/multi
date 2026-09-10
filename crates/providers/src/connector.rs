@@ -35,6 +35,17 @@ pub trait AuthConnector: Send + Sync {
         })
     }
 
+    fn create_account(
+        &self,
+        _username: &str,
+        _password: &str,
+        _attributes: BTreeMap<String, String>,
+    ) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Unsupported {
+            connector: self.id().to_string(),
+        })
+    }
+
     fn change_password(
         &self,
         _tenant_id: &str,

@@ -644,6 +644,8 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     assert!(html.contains("/authboundry/client.js"));
     assert!(html.contains("AuthBoundry.createAuthBoundry"));
     assert!(html.contains("location.assign(returnTo)"));
+    assert!(html.contains("/auth/password/forgot"));
+    assert!(html.contains("/auth/signup"));
     assert!(html.contains("requestedReturn.startsWith(\"/\")"));
     for forbidden in ["authport", "AuthPort", "_authport", "authport_"] {
         assert!(!html.contains(forbidden), "public UI leaked {forbidden}");
@@ -708,6 +710,9 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     let reset_page = server.handle(&request(Method::Get, "/auth/password/reset", &[], ""));
     assert_eq!(reset_page.status, 200);
     assert!(reset_page.body_string().contains("Reset password"));
+    let forgot_page = server.handle(&request(Method::Get, "/auth/password/forgot", &[], ""));
+    assert_eq!(forgot_page.status, 200);
+    assert!(forgot_page.body_string().contains("Send reset link"));
 
     let defaults = server.handle(&request(
         Method::Get,
@@ -755,7 +760,8 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     assert!(live_body.contains("\"authority_revision\": 1"));
 
     let signup = server.handle(&request(Method::Get, "/auth/signup", &[], ""));
-    assert!(signup.body_string().contains("At least 16 characters"));
+    assert!(signup.body_string().contains("Create account"));
+    assert!(signup.body_string().contains("minlength=\"16\""));
     assert!(signup
         .body_string()
         .contains("Contains a special character"));

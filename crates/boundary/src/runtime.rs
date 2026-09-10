@@ -333,6 +333,7 @@ impl AuthPortRuntime {
     ///
     /// The claims come from the deployment's policy, never from the request.
     pub fn sign_up(&self, request: &BoundaryRequest) -> Result<SignInOutcome, AuthError> {
+        let self_service = matches!(self.registration, RegistrationPolicy::SelfService { .. });
         let claims = match &self.registration {
             RegistrationPolicy::Closed => {
                 return Err(AuthError::new(
@@ -358,7 +359,7 @@ impl AuthPortRuntime {
         }
 
         let parameters = connector_parameters(request);
-        let mut auth_request = AuthRequest::new(connector).for_tenant(tenant_id.clone());
+        let mut auth_request = AuthRequest::new(connector.clone()).for_tenant(tenant_id.clone());
         auth_request.parameters = parameters.clone();
 
         let challenge = self.mesh.begin(&tenant_id, &auth_request)?;
@@ -368,6 +369,21 @@ impl AuthPortRuntime {
 
         let mut response = AuthResponse::to_challenge(&challenge).for_tenant(tenant_id.clone());
         response.parameters = parameters;
+
+        if self_service && connector == "local" && connector_impl.authenticate(&response).is_err() {
+            let username = self.required_field(request, "username")?;
+            let password = self.required_field(request, "password")?;
+            let mut attributes = BTreeMap::new();
+            if let Some(email) = request
+                .field("email")
+                .or_else(|| username.contains('@').then_some(username.as_str()))
+            {
+                attributes.insert("email".to_string(), email.to_string());
+            }
+            connector_impl
+                .create_account(&username, &password, attributes)
+                .map_err(to_auth_error)?;
+        }
 
         let mut registration = Registration::human();
         registration.claims = claims;
@@ -384,6 +400,45 @@ impl AuthPortRuntime {
             context,
             credential,
         })
+    }
+
+    /// Provision a local development identity and its authoritative principal.
+    /// This is called by the repository-local Studio control surface, not by
+    /// the public self-service signup route.
+    pub fn create_local_user(
+        &self,
+        tenant_id: &str,
+        username: &str,
+        password: &str,
+        email: Option<&str>,
+        claims: BTreeMap<String, String>,
+    ) -> Result<(), AuthError> {
+        self.validate_password(password)?;
+        let connector = self.mesh.registry().get("local").map_err(to_auth_error)?;
+        let mut attributes = BTreeMap::new();
+        if let Some(email) = email.or_else(|| username.contains('@').then_some(username)) {
+            attributes.insert("email".to_string(), email.to_string());
+        }
+        connector
+            .create_account(username, password, attributes)
+            .map_err(to_auth_error)?;
+
+        let challenge = connector
+            .begin(
+                &AuthRequest::new("local")
+                    .for_tenant(tenant_id)
+                    .with_parameter("username", username),
+            )
+            .map_err(to_auth_error)?;
+        let response = AuthResponse::to_challenge(&challenge)
+            .for_tenant(tenant_id)
+            .with_parameter("username", username)
+            .with_parameter("password", password);
+        let mut registration = Registration::human();
+        registration.claims = claims;
+        self.mesh
+            .sign_up(tenant_id, &response, registration, self.now())?;
+        Ok(())
     }
 
     pub fn change_password(&self, request: &BoundaryRequest) -> Result<(), AuthError> {

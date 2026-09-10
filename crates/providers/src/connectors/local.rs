@@ -46,10 +46,10 @@ impl LocalConnector {
         self
     }
 
-    pub fn register(&mut self, account: LocalAccount) -> Result<(), ConnectorError> {
-        let accounts =
+    pub fn register(&self, account: LocalAccount) -> Result<(), ConnectorError> {
+        let mut accounts =
             self.accounts
-                .get_mut()
+                .lock()
                 .map_err(|_| ConnectorError::PasswordHashingFailed {
                     connector: Self::ID.to_string(),
                 })?;
@@ -204,6 +204,17 @@ impl AuthConnector for LocalConnector {
             .attributes
             .insert("email_verified".to_string(), "true".to_string());
         Ok(())
+    }
+
+    fn create_account(
+        &self,
+        username: &str,
+        password: &str,
+        attributes: BTreeMap<String, String>,
+    ) -> Result<(), ConnectorError> {
+        let mut account = LocalAccount::new(username, password);
+        account.attributes = attributes;
+        self.register(account)
     }
 
     fn change_password(
