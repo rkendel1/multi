@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::model::{
-    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, PolicyClaimCondition,
-    PasswordPolicy, PolicyDef, UiScreen, UiScreenOverride, UiTheme,
+    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, PasswordPolicy,
+    PolicyClaimCondition, PolicyDef, StorageConfig, UiScreen, UiScreenOverride, UiTheme,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +89,7 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             "claims" => config.claims = parse_claims(&value)?,
             "policy" => config.policies = parse_policies(&value)?,
             "password" | "password_policy" => config.password_policy = parse_password(&value)?,
+            "storage" => config.storage = parse_storage(&value)?,
             "agents" => config.agents = expect_bool(&key, &value)?,
             "ui" => config.ui = parse_ui(&value)?,
             _ => return Err(AuthDslError::new(format!("unknown auth field `{}`", key))),
@@ -465,6 +466,39 @@ fn parse_policies(value: &Value) -> Result<Vec<PolicyDef>, AuthDslError> {
     Ok(policies)
 }
 
+fn parse_storage(value: &Value) -> Result<StorageConfig, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("storage must be a `{ ... }` block")),
+    };
+    let mut storage = StorageConfig::default();
+    let mut seen = HashSet::new();
+    for (key, value) in entries {
+        if !seen.insert(key.clone()) {
+            return Err(AuthDslError::new(format!(
+                "duplicate storage field `{}`",
+                key
+            )));
+        }
+        let provider = expect_scalar(key, value)?.to_string();
+        match key.as_str() {
+            "authority" => storage.authority = provider,
+            "audit" => storage.audit = provider,
+            "reporting" => storage.reporting = provider,
+            _ => {
+                return Err(AuthDslError::new(format!(
+                    "unknown storage field `{}`",
+                    key
+                )))
+            }
+        }
+    }
+    storage
+        .validate()
+        .map_err(|err| AuthDslError::new(err.message))?;
+    Ok(storage)
+}
+
 fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
     let entries = match value {
         Value::Block(entries) => entries,
@@ -485,7 +519,9 @@ fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
             "require_uppercase" => policy.require_uppercase = expect_bool(key, value)?,
             "require_lowercase" => policy.require_lowercase = expect_bool(key, value)?,
             "require_number" => policy.require_number = expect_bool(key, value)?,
-            "require_special_character" => policy.require_special_character = expect_bool(key, value)?,
+            "require_special_character" => {
+                policy.require_special_character = expect_bool(key, value)?
+            }
             "expiration_days" | "password_expiration_days" => {
                 policy.password_expiration_days = expect_optional_u32(key, value)?
             }
@@ -494,7 +530,12 @@ fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
             }
             "allow_password_change" => policy.allow_password_change = expect_bool(key, value)?,
             "allow_password_reset" => policy.allow_password_reset = expect_bool(key, value)?,
-            _ => return Err(AuthDslError::new(format!("unknown password field `{}`", key))),
+            _ => {
+                return Err(AuthDslError::new(format!(
+                    "unknown password field `{}`",
+                    key
+                )))
+            }
         }
     }
     policy
@@ -653,6 +694,40 @@ use auth {
         assert_eq!(parsed.password_policy.password_expiration_days, Some(90));
         assert_eq!(parsed.password_policy.password_history_count, 7);
         assert!(parsed.password_policy.allow_password_change);
+    }
+
+    #[test]
+    fn parses_storage_declaration_without_database_configuration() {
+        let parsed = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  storage {
+    authority = "postgresql"
+    audit = "enterprise_audit"
+    reporting = "warehouse"
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.storage.authority, "postgresql");
+        assert_eq!(parsed.storage.audit, "enterprise_audit");
+        assert_eq!(parsed.storage.reporting, "warehouse");
+        assert!(parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  storage {
+    authority = "postgres://example"
+  }
+}
+"#
+        )
+        .unwrap_err()
+        .message
+        .contains("provider capability only"));
     }
 
     #[test]

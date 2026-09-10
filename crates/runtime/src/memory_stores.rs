@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use appport_auth_mesh_storage::memory::{
     MemoryAuditLog, MemoryDelegationStore, MemoryIdentityStore, MemoryPrincipalStore,
-    MemorySessionStore, MemoryTenantRoot,
+    MemoryRunStore, MemorySessionStore, MemoryTenantRoot,
 };
 use appport_auth_mesh_storage::{AuditEvent, AuditLog};
 
@@ -20,6 +20,7 @@ pub struct MemoryStores {
     pub principals: Arc<MemoryPrincipalStore>,
     pub sessions: Arc<MemorySessionStore>,
     pub delegations: Arc<MemoryDelegationStore>,
+    pub runs: Arc<MemoryRunStore>,
     pub policies: Arc<MemoryPolicyStore>,
     audit: Arc<dyn AuditLog + Send + Sync>,
     memory_audit: Option<Arc<MemoryAuditLog>>,
@@ -40,6 +41,7 @@ impl MemoryStores {
             principals: Arc::new(MemoryPrincipalStore::new()),
             sessions: Arc::new(MemorySessionStore::new()),
             delegations: Arc::new(MemoryDelegationStore::new()),
+            runs: Arc::new(MemoryRunStore::new()),
             policies: Arc::new(MemoryPolicyStore::new()),
             audit: memory_audit.clone(),
             memory_audit: Some(memory_audit),
@@ -63,8 +65,10 @@ impl MemoryStores {
             principals: self.principals.clone(),
             sessions: self.sessions.clone(),
             delegations: self.delegations.clone(),
+            runs: self.runs.clone(),
             policies: self.policies.clone(),
             audit: self.audit.clone(),
+            topology: Default::default(),
         }
     }
 

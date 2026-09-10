@@ -18,12 +18,81 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("agent") => agent(&args[1..]),
         Some("runs") => runs(&args[1..]),
         Some("run") => run_command(&args[1..]),
+        Some("audit") => audit(&args[1..]),
+        Some("storage") => storage(&args[1..]),
+        Some("reporting") => reporting(&args[1..]),
         Some("policies") => policies(&args[1..]),
         Some("policy") => policy(&args[1..]),
         Some("password-policy") => password_policy(&args[1..]),
         Some("explain") => explain(&args[1..]),
         _ => Err(error("unknown control command")),
     }
+}
+
+fn audit(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    match filtered.first().map(String::as_str) {
+        None => {
+            let response = http_get(&server, "/_authport/audit")?;
+            Ok(Output {
+                text: format!("audit config from {}\n{}\n", server, response),
+            })
+        }
+        Some("events") => {
+            let tenant = option_value(&filtered, "--tenant")
+                .ok_or_else(|| error("audit events needs --tenant TENANT"))?;
+            let since = option_value(&filtered, "--since")
+                .map(|since| format!("&since={}", escape_path(&since)))
+                .unwrap_or_default();
+            let response = http_get(
+                &server,
+                &format!(
+                    "/_authport/audit/events?tenant={}{}",
+                    escape_path(&tenant),
+                    since
+                ),
+            )?;
+            Ok(Output {
+                text: format!("audit events from {}\n{}\n", server, response),
+            })
+        }
+        Some("export") => {
+            let tenant = option_value(&filtered, "--tenant")
+                .ok_or_else(|| error("audit export needs --tenant TENANT"))?;
+            let since = option_value(&filtered, "--since")
+                .map(|since| format!("&since={}", escape_path(&since)))
+                .unwrap_or_default();
+            let response = http_get(
+                &server,
+                &format!(
+                    "/_authport/audit/export?tenant={}{}",
+                    escape_path(&tenant),
+                    since
+                ),
+            )?;
+            Ok(Output { text: response })
+        }
+        _ => Err(error(
+            "audit command supports `events`, `export`, or no subcommand",
+        )),
+    }
+}
+
+fn storage(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let response = http_get(&server, "/_authport/storage")?;
+    Ok(Output {
+        text: format!("storage from {}\n{}\n", server, response),
+    })
+}
+
+fn reporting(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let response = http_get(&server, "/_authport/reporting")?;
+    Ok(Output {
+        text: format!("reporting from {}\n{}\n", server, response),
+    })
 }
 
 fn connect(args: &[String]) -> Result<Output, CliError> {

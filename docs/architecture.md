@@ -116,6 +116,39 @@ There is no second audit implementation in the HTTP layer.
 
 - `examples/saas_basic/tests/backend_boundary.rs::an_unrecordable_decision_is_denied`.
 
+Audit events use the canonical `authport.audit/v1` shape: id, timestamp, tenant,
+principal, delegator, session, delegation, run, action, resource, decision,
+reason, authority revision, contract fingerprint, durability and metadata.
+Storage implementations append events; they do not update or delete audit rows
+as normal authority operations. `AuditStore` is the durable historical security
+record. `AuditSink` is an optional external integration and is never treated as
+authoritative merely because it receives a copy.
+
+- `crates/storage/tests/storage_conformance.rs::audit_store_is_append_ordered_tenant_scoped_and_exportable`.
+
+## Storage boundary
+
+The domain model depends on storage capabilities, not database brands. The
+storage contract is split by authority semantics: identity, tenant, session,
+credential, policy, delegation, agent, run, audit and reporting. `MeshStores`
+aggregates those capabilities but does not require that they all come from one
+backend. A deployment can therefore use FeltDB for authority, an enterprise
+audit store for historical evidence and a warehouse for reporting projections
+without changing the application authorization model.
+
+FeltDB is the easy default path and has a first-class topology descriptor with
+durable commit, transactions, conditional writes, indexes, history, export/import
+and append-only audit. The PostgreSQL reference topology satisfies the same
+semantic conformance checks to show the authority model survives a different
+storage architecture.
+
+- `crates/storage/tests/storage_conformance.rs::felt_db_and_postgres_reference_topologies_satisfy_authority_semantics`.
+
+Reporting is derived from canonical audit events. Reporting stores and external
+sinks are explicitly non-authoritative; they may support analytics and export,
+but current authority still comes from the authority store and historical
+security evidence still comes from the audit store.
+
 ## Development-only mechanisms
 
 Called out so they are not mistaken for production posture:

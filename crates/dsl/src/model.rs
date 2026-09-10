@@ -14,6 +14,7 @@ pub struct AuthConfig {
     pub policies: Vec<PolicyDef>,
     pub ui: AuthUiConfig,
     pub password_policy: PasswordPolicy,
+    pub storage: StorageConfig,
 }
 
 impl Default for AuthConfig {
@@ -27,6 +28,7 @@ impl Default for AuthConfig {
             policies: Vec::new(),
             ui: AuthUiConfig::default(),
             password_policy: PasswordPolicy::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -56,6 +58,7 @@ impl AuthConfig {
             policies,
             ui: self.ui.canonical(),
             password_policy: self.password_policy.clone(),
+            storage: self.storage.clone(),
         }
     }
 
@@ -129,6 +132,7 @@ impl AuthConfig {
 
         self.ui.validate()?;
         self.password_policy.validate()?;
+        self.storage.validate()?;
 
         Ok(())
     }
@@ -185,6 +189,59 @@ impl AuthConfig {
         }
         self.ui.write_canonical(out);
         self.password_policy.write_canonical(out);
+        self.storage.write_canonical(out);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub authority: String,
+    pub audit: String,
+    pub reporting: String,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            authority: "feltdb".to_string(),
+            audit: "feltdb".to_string(),
+            reporting: "authport_projection".to_string(),
+        }
+    }
+}
+
+impl StorageConfig {
+    pub fn validate(&self) -> Result<(), AuthConfigError> {
+        for (name, value) in [
+            ("authority", &self.authority),
+            ("audit", &self.audit),
+            ("reporting", &self.reporting),
+        ] {
+            if value.trim().is_empty() {
+                return Err(AuthConfigError {
+                    message: format!("storage {} provider cannot be empty", name),
+                });
+            }
+            if value.contains("://") || value.contains('@') {
+                return Err(AuthConfigError {
+                    message: format!(
+                        "storage {} declares provider capability only, not credentials",
+                        name
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(
+            format!(
+                "storage=authority:{},audit:{},reporting:{};",
+                self.authority, self.audit, self.reporting
+            )
+            .as_bytes(),
+        );
     }
 }
 

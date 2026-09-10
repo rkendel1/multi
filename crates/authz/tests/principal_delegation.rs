@@ -9,7 +9,7 @@ use appport_auth_mesh_contract::{
     TenantContext,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
-use appport_auth_mesh_storage::audit_log::{AuditEvent, AuditEventKind, AuditLog};
+use appport_auth_mesh_storage::audit_log::{AuditDurability, AuditEvent, AuditEventKind, AuditLog};
 use appport_auth_mesh_storage::delegation_store::DelegationStore;
 use appport_auth_mesh_storage::identity_store::IdentityStore;
 use appport_auth_mesh_storage::memory::{
@@ -345,10 +345,19 @@ use auth {
                 event_id: audit_event_id("deny-1"),
                 tenant_id: tenant_a.tenant_id.clone(),
                 principal_id: Some(invoice_agent.id.clone()),
+                delegator_id: Some(alice.id.clone()),
                 session_id: None,
                 delegation_id: Some(delegation.id.clone()),
+                run_id: None,
                 kind: AuditEventKind::AuthorizationDenied,
                 timestamp: 30,
+                action: Some("invoice.read".to_string()),
+                resource: Some("invoice:8472".to_string()),
+                decision: Some("deny".to_string()),
+                reason: Some("RevokedDelegation".to_string()),
+                authority_revision: Some(1),
+                contract_fingerprint: Some("test-contract".to_string()),
+                durability: AuditDurability::Required,
                 metadata: HashMap::from([("reason".to_string(), "RevokedDelegation".to_string())]),
             },
         )

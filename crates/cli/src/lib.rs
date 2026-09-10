@@ -45,6 +45,11 @@ USAGE:
     authport agent show ID --tenant TENANT [--server URL]
     authport runs --tenant TENANT --agent AGENT [--server URL]
     authport run show ID --tenant TENANT [--server URL]
+    authport audit [--server URL]
+    authport audit events --tenant TENANT [--server URL]
+    authport audit export --tenant TENANT [--since TIMESTAMP] [--server URL]
+    authport storage [--server URL]
+    authport reporting [--server URL]
     authport policies [--server URL]
     authport policy show ID [--server URL]
     authport explain [DECISION_ID] [--server URL]
@@ -100,7 +105,8 @@ where
 {
     let args: Vec<String> = args.into_iter().collect();
     if args.first().map(String::as_str) == Some("password-policy")
-        && (args.get(1).map(String::as_str) == Some("propose") || args.iter().any(|arg| arg == "--server"))
+        && (args.get(1).map(String::as_str) == Some("propose")
+            || args.iter().any(|arg| arg == "--server"))
     {
         return control::run(&args);
     }
@@ -115,6 +121,9 @@ where
                 | "agent"
                 | "runs"
                 | "run"
+                | "audit"
+                | "storage"
+                | "reporting"
                 | "policies"
                 | "policy"
                 | "explain",

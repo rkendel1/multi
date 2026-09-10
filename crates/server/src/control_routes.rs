@@ -19,6 +19,9 @@ use appport_auth_mesh_discovery::{
 };
 use appport_auth_mesh_dsl::PasswordPolicy;
 use appport_auth_mesh_runtime::{DelegationRequest, RunCreationRequest};
+use appport_auth_mesh_storage::{
+    export_json_lines, AuditEvent, StorageCapability, StoreDescriptor, StoreRole,
+};
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +48,12 @@ pub fn handle_control_route(
         ("GET", "/_authport/password-policy") => {
             Some(HttpResponse::ok_json(password_policy_json(runtime)))
         }
+        ("GET", "/_authport/storage") => Some(storage(runtime)),
+        ("GET", "/_authport/storage/capabilities") => Some(storage_capabilities(runtime)),
+        ("GET", "/_authport/audit") => Some(audit_config(runtime)),
+        ("GET", "/_authport/audit/events") => Some(audit_events(runtime, request)),
+        ("GET", "/_authport/audit/export") => Some(audit_export(runtime, request)),
+        ("GET", "/_authport/reporting") => Some(reporting(runtime)),
         _ if method == "POST"
             && path.starts_with("/_authport/authority-proposal/")
             && path.ends_with("/approve") =>
@@ -437,6 +446,270 @@ fn routes(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
 
     let json = JsonValue::Array(descriptions.iter().map(|d| d.to_json()).collect());
     HttpResponse::ok_json(json)
+}
+
+fn storage(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    let topology = runtime.storage_topology();
+    HttpResponse::ok_json(JsonValue::Object(vec![
+        (
+            "boundary".to_string(),
+            JsonValue::String("storage_adapter_contract".to_string()),
+        ),
+        (
+            "authority_store".to_string(),
+            JsonValue::String(runtime.contract().storage.authority.clone()),
+        ),
+        (
+            "audit_store".to_string(),
+            JsonValue::String(runtime.contract().storage.audit.clone()),
+        ),
+        (
+            "reporting_store".to_string(),
+            JsonValue::String(runtime.contract().storage.reporting.clone()),
+        ),
+        (
+            "stores".to_string(),
+            JsonValue::Array(topology.stores.iter().map(store_descriptor_json).collect()),
+        ),
+    ]))
+}
+
+fn storage_capabilities(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    HttpResponse::ok_json(JsonValue::Object(vec![(
+        "capabilities".to_string(),
+        JsonValue::Array(
+            runtime
+                .storage_topology()
+                .stores
+                .iter()
+                .map(store_descriptor_json)
+                .collect(),
+        ),
+    )]))
+}
+
+fn audit_config(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    HttpResponse::ok_json(JsonValue::Object(vec![
+        (
+            "canonical_event".to_string(),
+            JsonValue::String("authport.audit/v1".to_string()),
+        ),
+        (
+            "durable_store".to_string(),
+            JsonValue::String(runtime.contract().storage.audit.clone()),
+        ),
+        ("sink_is_authoritative".to_string(), JsonValue::Bool(false)),
+        (
+            "required_event_failures".to_string(),
+            JsonValue::String("fail_closed".to_string()),
+        ),
+    ]))
+}
+
+fn audit_events(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let since = request_value(request, "since").and_then(|value| value.parse::<i64>().ok());
+    let limit = request_value(request, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
+    match runtime.audit_events(&tenant, since, limit) {
+        Ok(events) => HttpResponse::ok_json(JsonValue::Object(vec![(
+            "events".to_string(),
+            JsonValue::Array(events.iter().map(audit_event_json).collect()),
+        )])),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn audit_export(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
+    let tenant = match tenant_from_request(runtime, request) {
+        Ok(tenant) => tenant,
+        Err(response) => return response,
+    };
+    let since = request_value(request, "since").and_then(|value| value.parse::<i64>().ok());
+    let limit = request_value(request, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1000);
+    match runtime.audit_events(&tenant, since, limit) {
+        Ok(events) => HttpResponse::new(
+            200,
+            "application/x-ndjson; charset=utf-8",
+            export_json_lines(&events),
+        ),
+        Err(err) => HttpResponse::denied(
+            crate::server::status_for(&err.denial),
+            err.denial.as_str(),
+            &err.message,
+        ),
+    }
+}
+
+fn reporting(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
+    HttpResponse::ok_json(JsonValue::Object(vec![
+        (
+            "source".to_string(),
+            JsonValue::String("canonical_audit_events".to_string()),
+        ),
+        (
+            "store".to_string(),
+            JsonValue::String(runtime.contract().storage.reporting.clone()),
+        ),
+        ("authoritative".to_string(), JsonValue::Bool(false)),
+        (
+            "projections".to_string(),
+            JsonValue::Array(
+                [
+                    "authentication_activity",
+                    "authorization_activity",
+                    "administrative_changes",
+                    "provider_usage",
+                    "failed_authentication",
+                    "denied_authorization",
+                    "agent_activity",
+                    "delegation_history",
+                    "revocation_activity",
+                    "tenant_activity",
+                ]
+                .iter()
+                .map(|value| JsonValue::String((*value).to_string()))
+                .collect(),
+            ),
+        ),
+    ]))
+}
+
+fn store_descriptor_json(store: &StoreDescriptor) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "class".to_string(),
+            JsonValue::String(store.class.as_str().to_string()),
+        ),
+        (
+            "provider".to_string(),
+            JsonValue::String(store.provider.clone()),
+        ),
+        (
+            "role".to_string(),
+            JsonValue::String(store.role.as_str().to_string()),
+        ),
+        (
+            "authoritative".to_string(),
+            JsonValue::Bool(matches!(
+                store.role,
+                StoreRole::Authority | StoreRole::Audit
+            )),
+        ),
+        (
+            "capabilities".to_string(),
+            JsonValue::Array(
+                store
+                    .capabilities
+                    .iter()
+                    .map(storage_capability_json)
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn storage_capability_json(capability: &StorageCapability) -> JsonValue {
+    JsonValue::String(capability.as_str().to_string())
+}
+
+fn audit_event_json(event: &AuditEvent) -> JsonValue {
+    let mut metadata = event.metadata.iter().collect::<Vec<_>>();
+    metadata.sort_by(|a, b| a.0.cmp(b.0));
+    JsonValue::Object(vec![
+        (
+            "id".to_string(),
+            JsonValue::String(event.event_id.to_string()),
+        ),
+        (
+            "timestamp".to_string(),
+            JsonValue::Number(event.timestamp as f64),
+        ),
+        (
+            "tenant".to_string(),
+            JsonValue::String(event.tenant_id.to_string()),
+        ),
+        (
+            "principal".to_string(),
+            optional_id_json(event.principal_id.as_ref().map(|id| id.as_str())),
+        ),
+        (
+            "delegator".to_string(),
+            optional_id_json(event.delegator_id.as_ref().map(|id| id.as_str())),
+        ),
+        (
+            "session_id".to_string(),
+            optional_id_json(event.session_id.as_ref().map(|id| id.as_str())),
+        ),
+        (
+            "delegation_id".to_string(),
+            optional_id_json(event.delegation_id.as_ref().map(|id| id.as_str())),
+        ),
+        (
+            "run_id".to_string(),
+            optional_id_json(event.run_id.as_ref().map(|id| id.as_str())),
+        ),
+        (
+            "kind".to_string(),
+            JsonValue::String(event.kind.as_str().to_string()),
+        ),
+        (
+            "action".to_string(),
+            optional_id_json(event.action.as_deref()),
+        ),
+        (
+            "resource".to_string(),
+            optional_id_json(event.resource.as_deref()),
+        ),
+        (
+            "decision".to_string(),
+            optional_id_json(event.decision.as_deref()),
+        ),
+        (
+            "reason".to_string(),
+            optional_id_json(event.reason.as_deref()),
+        ),
+        (
+            "authority_revision".to_string(),
+            event
+                .authority_revision
+                .map(|revision| JsonValue::Number(revision as f64))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "contract_fingerprint".to_string(),
+            optional_id_json(event.contract_fingerprint.as_deref()),
+        ),
+        (
+            "durability".to_string(),
+            JsonValue::String(event.durability.as_str().to_string()),
+        ),
+        (
+            "metadata".to_string(),
+            JsonValue::Object(
+                metadata
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn optional_id_json(value: Option<&str>) -> JsonValue {
+    value
+        .map(|value| JsonValue::String(value.to_string()))
+        .unwrap_or(JsonValue::Null)
 }
 
 fn policies(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
@@ -1987,7 +2260,9 @@ fn password_policy_from_body(body: &str) -> Result<PasswordPolicy, String> {
     if let Some(value) = extract_bool_field(body, "require_special_character") {
         policy.require_special_character = value;
     }
-    if body.contains("\"expiration_days\": null") || body.contains("\"password_expiration_days\": null") {
+    if body.contains("\"expiration_days\": null")
+        || body.contains("\"password_expiration_days\": null")
+    {
         policy.password_expiration_days = None;
     } else if let Some(value) = extract_number_field(body, "expiration_days")
         .or_else(|| extract_number_field(body, "password_expiration_days"))
@@ -1995,10 +2270,11 @@ fn password_policy_from_body(body: &str) -> Result<PasswordPolicy, String> {
         policy.password_expiration_days =
             Some(u32::try_from(value).map_err(|_| "invalid expiration_days")?);
     }
-    if let Some(value) =
-        extract_number_field(body, "history_count").or_else(|| extract_number_field(body, "password_history_count"))
+    if let Some(value) = extract_number_field(body, "history_count")
+        .or_else(|| extract_number_field(body, "password_history_count"))
     {
-        policy.password_history_count = usize::try_from(value).map_err(|_| "invalid history_count")?;
+        policy.password_history_count =
+            usize::try_from(value).map_err(|_| "invalid history_count")?;
     }
     if let Some(value) = extract_bool_field(body, "allow_password_change") {
         policy.allow_password_change = value;

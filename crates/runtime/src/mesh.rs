@@ -18,8 +18,9 @@ use appport_auth_mesh_providers::{
     AuthChallenge, AuthRequest, AuthResponse, ConnectorError, ConnectorRegistry, ExternalIdentity,
 };
 use appport_auth_mesh_storage::{
-    AuditEvent, AuditEventKind, AuditLog, DelegationStore, ExternalBinding, IdentityStore,
-    PrincipalStore, Session, SessionStore, StorageError, TenantRootStore,
+    AuditDurability, AuditEvent, AuditEventKind, AuditLog, DelegationStore, ExternalBinding,
+    IdentityStore, PrincipalStore, RunStore, Session, SessionStore, StorageError, StorageTopology,
+    TenantRootStore,
 };
 use appport_auth_mesh_surface::{render_text, AuthSurface};
 
@@ -44,8 +45,10 @@ pub struct MeshStores {
     pub principals: Arc<dyn PrincipalStore + Send + Sync>,
     pub sessions: Arc<dyn SessionStore + Send + Sync>,
     pub delegations: Arc<dyn DelegationStore + Send + Sync>,
+    pub runs: Arc<dyn RunStore + Send + Sync>,
     pub policies: Arc<dyn PolicyStore + Send + Sync>,
     pub audit: Arc<dyn AuditLog + Send + Sync>,
+    pub topology: StorageTopology,
 }
 
 /// The auth capability.
@@ -62,7 +65,6 @@ pub struct AuthMesh {
     audit_sequence: AtomicU64,
     run_sequence: AtomicU64,
     decisions: Mutex<Vec<AuthorizationEvidence>>,
-    runs: Mutex<HashMap<RunId, AgentRun>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +220,6 @@ impl AuthMesh {
             audit_sequence: AtomicU64::new(0),
             run_sequence: AtomicU64::new(0),
             decisions: Mutex::new(Vec::new()),
-            runs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -243,6 +244,24 @@ impl AuthMesh {
     /// (listing a tenant's agents, for instance). Every store is tenant-scoped.
     pub fn stores(&self) -> &MeshStores {
         &self.stores
+    }
+
+    pub fn audit_events(
+        &self,
+        tenant: &TenantContext,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, AuthError> {
+        self.stores
+            .audit
+            .events(tenant, since, limit)
+            .map_err(|err| {
+                AuthError::new(
+                    AuthLifecycleStage::RuntimeContext,
+                    err.message,
+                    DenialReason::TenantMismatch,
+                )
+            })
     }
 
     /// The developer-facing view of what this declaration generated.
@@ -817,10 +836,10 @@ impl AuthMesh {
             execution_credential: credential,
             cancelled_at: None,
         };
-        self.runs
-            .lock()
-            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
-            .insert(id, run.clone());
+        self.stores
+            .runs
+            .put_run(run.clone())
+            .map_err(|err| run_error(err.message, DenialReason::RunNotFound))?;
         self.audit(
             &tenant,
             AuditRecord::new(AuditEventKind::AgentRunCreated)
@@ -838,16 +857,10 @@ impl AuthMesh {
         tenant: &TenantContext,
         agent: &PrincipalId,
     ) -> Result<Vec<AgentRun>, AuthError> {
-        let mut runs = self
+        self.stores
             .runs
-            .lock()
-            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
-            .values()
-            .filter(|run| run.tenant_id == tenant.tenant_id && &run.agent_principal == agent)
-            .cloned()
-            .collect::<Vec<_>>();
-        runs.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(runs)
+            .list_runs_for_agent(tenant, agent)
+            .map_err(|err| run_error(err.message, DenialReason::RunNotFound))
     }
 
     pub fn agent_run(
@@ -855,17 +868,10 @@ impl AuthMesh {
         tenant: &TenantContext,
         run_id: &RunId,
     ) -> Result<Option<AgentRun>, AuthError> {
-        let run = self
+        self.stores
             .runs
-            .lock()
-            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
-            .get(run_id)
-            .cloned();
-        match run {
-            Some(run) if run.tenant_id == tenant.tenant_id => Ok(Some(run)),
-            Some(_) => Err(run_error("run tenant mismatch", DenialReason::RunNotFound)),
-            None => Ok(None),
-        }
+            .get_run(tenant, run_id)
+            .map_err(|err| run_error(err.message, DenialReason::RunNotFound))
     }
 
     pub fn agent_run_by_credential(
@@ -873,15 +879,10 @@ impl AuthMesh {
         tenant: &TenantContext,
         credential: &ExecutionCredentialId,
     ) -> Result<Option<AgentRun>, AuthError> {
-        Ok(self
+        self.stores
             .runs
-            .lock()
-            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
-            .values()
-            .find(|run| {
-                run.tenant_id == tenant.tenant_id && &run.execution_credential == credential
-            })
-            .cloned())
+            .find_run_by_credential(tenant, credential)
+            .map_err(|err| run_error(err.message, DenialReason::RunNotFound))
     }
 
     pub fn cancel_agent_run(
@@ -891,21 +892,16 @@ impl AuthMesh {
         now: i64,
     ) -> Result<AgentRun, AuthError> {
         let tenant = self.tenant(tenant_id)?;
-        let run = {
-            let mut runs = self
-                .runs
-                .lock()
-                .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?;
-            let run = runs
-                .get_mut(run_id)
-                .ok_or_else(|| run_error("run not found", DenialReason::RunNotFound))?;
-            if run.tenant_id != tenant.tenant_id {
-                return Err(run_error("run tenant mismatch", DenialReason::RunNotFound));
-            }
-            run.status = RunStatus::Cancelled;
-            run.cancelled_at = Some(now);
-            run.clone()
-        };
+        let mut run = self
+            .agent_run(&tenant, run_id)?
+            .ok_or_else(|| run_error("run not found", DenialReason::RunNotFound))?;
+        run.status = RunStatus::Cancelled;
+        run.cancelled_at = Some(now);
+        let run = self
+            .stores
+            .runs
+            .update_run(&tenant, run)
+            .map_err(|err| run_error(err.message, DenialReason::RunNotFound))?;
         self.audit(
             &tenant,
             AuditRecord::new(AuditEventKind::AgentRunCancelled)
@@ -1457,14 +1453,52 @@ impl AuthMesh {
         record: AuditRecord<'_>,
         now: i64,
     ) -> Result<(), AuthError> {
+        let decision = match &record.kind {
+            AuditEventKind::AuthorizationGranted => Some("allow".to_string()),
+            AuditEventKind::AuthorizationDenied => Some("deny".to_string()),
+            _ => None,
+        };
         let event = AuditEvent {
             event_id: self.next_audit_event_id(tenant),
             tenant_id: tenant.tenant_id.clone(),
             principal_id: record.principal_id.cloned(),
+            delegator_id: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "delegator")
+                .map(|(_, value)| PrincipalId(value.clone())),
             session_id: record.session_id.cloned(),
             delegation_id: record.delegation_id.cloned(),
+            run_id: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "run_id")
+                .map(|(_, value)| RunId(value.clone())),
             kind: record.kind,
             timestamp: now,
+            action: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "action" || key == "capability")
+                .map(|(_, value)| value.clone()),
+            resource: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "resource")
+                .map(|(_, value)| value.clone()),
+            decision,
+            reason: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "reason")
+                .map(|(_, value)| value.clone()),
+            authority_revision: record
+                .metadata
+                .iter()
+                .find(|(key, _)| key == "authority_revision")
+                .and_then(|(_, value)| value.parse().ok()),
+            contract_fingerprint: Some(self.config.fingerprint()),
+            durability: AuditDurability::Required,
             metadata: record.metadata.into_iter().collect::<HashMap<_, _>>(),
         };
 
