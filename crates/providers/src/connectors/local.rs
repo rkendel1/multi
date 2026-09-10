@@ -213,13 +213,25 @@ impl AuthConnector for LocalConnector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocalAccount {
     pub username: String,
     password_hash: String,
     password_history: Vec<String>,
     password_changed_at: i64,
     pub attributes: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for LocalAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalAccount")
+            .field("username", &self.username)
+            .field("password_hash", &"<redacted>")
+            .field("password_history", &format_args!("{} entries", self.password_history.len()))
+            .field("password_changed_at", &self.password_changed_at)
+            .field("attributes", &self.attributes)
+            .finish()
+    }
 }
 
 impl LocalAccount {

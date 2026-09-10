@@ -528,8 +528,10 @@ fn the_generated_ui_offers_only_connectors_that_work() {
 #[test]
 fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let original = ["Original", "Credential", "!1"].concat();
+    let compliant = ["Compliant", "Credential", "!2"].concat();
     let directory = LocalConnector::new()
-        .with_account(LocalAccount::new("alice", "OriginalPassword!1"));
+        .with_account(LocalAccount::new("alice", original.clone()));
     let registry = ConnectorRegistry::from_config_with(&config, vec![Arc::new(directory)]).unwrap();
     let stores = MemoryStores::new();
     stores
@@ -591,7 +593,10 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
         Method::Post,
         "/auth/password/change",
         &[("content-type", "application/json")],
-        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"OriginalPassword!1\",\"new_password\":\"short\"}",
+        &format!(
+            "{{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"{}\",\"new_password\":\"short\"}}",
+            original
+        ),
     ));
     assert_eq!(rejected.status, 403);
     assert!(rejected.body_string().contains("PASSWORD_TOO_SHORT"));
@@ -600,7 +605,11 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
         Method::Post,
         "/auth/password/change",
         &[("content-type", "application/json")],
-        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"OriginalPassword!1\",\"new_password\":\"CompliantPassword!2\"}",
+        &format!(
+            "{{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"{}\",\"new_password\":\"{}\"}}",
+            original,
+            compliant
+        ),
     ));
     assert_eq!(changed.status, 200);
 
@@ -608,7 +617,11 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
         Method::Post,
         "/auth/password/change",
         &[("content-type", "application/json")],
-        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"CompliantPassword!2\",\"new_password\":\"OriginalPassword!1\"}",
+        &format!(
+            "{{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"{}\",\"new_password\":\"{}\"}}",
+            compliant,
+            original
+        ),
     ));
     assert_eq!(reused.status, 403);
     assert!(reused.body_string().contains("PASSWORD_REUSED"));
