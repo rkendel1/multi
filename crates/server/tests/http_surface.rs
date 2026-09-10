@@ -464,6 +464,70 @@ fn approving_stale_proposals_returns_machine_readable_revision_error() {
     assert!(body.contains("\"current_authority_revision\": 1"));
 }
 
+#[test]
+fn bulk_apply_adopts_compatible_approved_proposals_together() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let app = RouterApp::new()
+        .public(
+            Method::Post,
+            "/invoices",
+            Box::new(|_| HttpResponse::text(200, "created")),
+        )
+        .public(
+            Method::Post,
+            "/billing/charge",
+            Box::new(|_| HttpResponse::text(200, "charged")),
+        );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    assert_eq!(
+        server
+            .handle(&request(
+                Method::Get,
+                "/_authport/authority-proposal",
+                &[],
+                "",
+            ))
+            .status,
+        200
+    );
+    let approved = server.handle(&request(
+        Method::Post,
+        "/_authport/authority-proposals/approve",
+        &[("content-type", "application/json")],
+        "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
+    ));
+    assert_eq!(approved.status, 200);
+    let applied = server.handle(&request(
+        Method::Post,
+        "/_authport/authority-proposals/apply",
+        &[("content-type", "application/json")],
+        "{\"proposal_ids\": [\"proposal-1\", \"proposal-2\"]}",
+    ));
+    assert_eq!(applied.status, 200);
+    let body = applied.body_string();
+    assert!(body.contains("\"new_revision\": 1"));
+    assert!(body.contains("\"new_revision\": 2"));
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/billing/charge"),
+        Some("billing.charge".to_string())
+    );
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/invoices"),
+        Some("invoice.create".to_string())
+    );
+}
+
 struct NoApp;
 
 impl appport_auth_mesh_server::ApplicationBinding for NoApp {

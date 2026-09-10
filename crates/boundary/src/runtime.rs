@@ -510,6 +510,82 @@ impl AuthPortRuntime {
         self.apply_stored_proposal(proposal_id, approval)
     }
 
+    pub fn apply_approved_stored_proposals(
+        &self,
+        proposal_ids: &[String],
+    ) -> Result<Vec<(String, String, u64)>, String> {
+        if proposal_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stored = proposal_ids
+            .iter()
+            .map(|id| self.proposals.retrieve_proposal(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        for proposal in &stored {
+            if proposal.status != ProposalStatus::Approved {
+                return Err(format!("proposal `{}` is not approved", proposal.id));
+            }
+        }
+
+        let mut authority = self.authority.write().unwrap();
+        let contract_fingerprint = self.contract.fingerprint();
+        let base_revision = authority.revision;
+        let mut next = authority.clone();
+        let mut records = Vec::new();
+        for (index, proposal) in stored.iter().enumerate() {
+            if proposal.contract_fingerprint != contract_fingerprint {
+                return Err("STALE_AUTHORITY_PROPOSAL: contract fingerprint changed".to_string());
+            }
+            if proposal.revision != base_revision {
+                return Err(format!(
+                    "STALE_AUTHORITY_PROPOSAL: expected authority revision {}, current authority revision {}",
+                    proposal.revision, base_revision
+                ));
+            }
+            let before = next.clone();
+            next = self.preview_authority_change(&next, &proposal.change)?;
+            let change_id = format!(
+                "change-{}-{}-rev{}",
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                index,
+                next.revision
+            );
+            records.push(ChangeRecord {
+                change_id: change_id.clone(),
+                proposal_id: proposal.id.clone(),
+                reverted_change_id: match &proposal.change {
+                    AuthorityChange::Revert { change_id } => Some(change_id.clone()),
+                    _ => None,
+                },
+                change: proposal.change.clone(),
+                previous_state: before,
+                resulting_state: next.clone(),
+                applied_at: SystemTime::now(),
+                applied_by: None,
+            });
+        }
+
+        *authority = next;
+        let mut outcomes = Vec::new();
+        for record in records {
+            self.proposals.mark_applied(
+                &record.proposal_id,
+                record.change_id.clone(),
+                record.resulting_state.revision,
+            )?;
+            self.proposals.store_change_record(record.clone())?;
+            outcomes.push((
+                record.proposal_id,
+                record.change_id,
+                record.resulting_state.revision,
+            ));
+        }
+        Ok(outcomes)
+    }
+
     pub fn history(&self, limit: usize, offset: usize) -> Result<Vec<ChangeRecord>, String> {
         self.proposals.list_change_records(limit, offset)
     }

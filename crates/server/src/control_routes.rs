@@ -423,27 +423,30 @@ fn apply_bulk(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) 
     if ids.is_empty() {
         return HttpResponse::bad_request("missing proposal_ids");
     }
-    let mut applied = Vec::new();
-    for id in ids {
-        match runtime.apply_approved_stored_proposal(&id) {
-            Ok((change_id, new_revision)) => applied.push(JsonValue::Object(vec![
-                ("proposal_id".to_string(), JsonValue::String(id)),
-                (
-                    "applied_change_id".to_string(),
-                    JsonValue::String(change_id),
-                ),
-                (
-                    "new_revision".to_string(),
-                    JsonValue::Number(new_revision as f64),
-                ),
-            ])),
-            Err(msg) => return proposal_error(runtime, &msg),
-        }
+    match runtime.apply_approved_stored_proposals(&ids) {
+        Ok(outcomes) => HttpResponse::ok_json(JsonValue::Object(vec![(
+            "applied".to_string(),
+            JsonValue::Array(
+                outcomes
+                    .into_iter()
+                    .map(|(proposal_id, change_id, new_revision)| {
+                        JsonValue::Object(vec![
+                            ("proposal_id".to_string(), JsonValue::String(proposal_id)),
+                            (
+                                "applied_change_id".to_string(),
+                                JsonValue::String(change_id),
+                            ),
+                            (
+                                "new_revision".to_string(),
+                                JsonValue::Number(new_revision as f64),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        )])),
+        Err(msg) => proposal_error(runtime, &msg),
     }
-    HttpResponse::ok_json(JsonValue::Object(vec![(
-        "applied".to_string(),
-        JsonValue::Array(applied),
-    )]))
 }
 
 fn revert(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
