@@ -163,7 +163,11 @@ fn discover_rust(root: &Path) -> Option<ApplicationCandidate> {
 fn node_entrypoints(root: &Path, package_json: &str) -> Vec<EntrypointCandidate> {
     let mut candidates = Vec::new();
     if let Some(main) = json_string_field(package_json, "main") {
-        candidates.push(entrypoint(root.join(main), EntrypointKind::NodeScript, DiscoveryConfidence::High));
+        candidates.push(entrypoint(
+            root.join(main),
+            EntrypointKind::NodeScript,
+            DiscoveryConfidence::High,
+        ));
     }
     for path in [
         "src/server.ts",
@@ -178,13 +182,21 @@ fn node_entrypoints(root: &Path, package_json: &str) -> Vec<EntrypointCandidate>
     ] {
         let path = root.join(path);
         if path.exists() && !candidates.iter().any(|candidate| candidate.path == path) {
-            candidates.push(entrypoint(path, EntrypointKind::NodeScript, DiscoveryConfidence::Medium));
+            candidates.push(entrypoint(
+                path,
+                EntrypointKind::NodeScript,
+                DiscoveryConfidence::Medium,
+            ));
         }
     }
     candidates
 }
 
-fn entrypoint(path: PathBuf, kind: EntrypointKind, confidence: DiscoveryConfidence) -> EntrypointCandidate {
+fn entrypoint(
+    path: PathBuf,
+    kind: EntrypointKind,
+    confidence: DiscoveryConfidence,
+) -> EntrypointCandidate {
     EntrypointCandidate {
         path,
         kind,
@@ -192,10 +204,7 @@ fn entrypoint(path: PathBuf, kind: EntrypointKind, confidence: DiscoveryConfiden
     }
 }
 
-fn readable_sources(
-    root: &Path,
-    entrypoints: &[EntrypointCandidate],
-) -> Vec<(PathBuf, String)> {
+fn readable_sources(root: &Path, entrypoints: &[EntrypointCandidate]) -> Vec<(PathBuf, String)> {
     let mut files = entrypoints
         .iter()
         .filter_map(|candidate| {
@@ -236,11 +245,7 @@ fn node_servers(package_json: &str) -> Vec<ServerCandidate> {
         .collect()
 }
 
-fn existing_authport(
-    root: &Path,
-    manifest: &str,
-    files: &[(PathBuf, String)],
-) -> ExistingAuthPort {
+fn existing_authport(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> ExistingAuthPort {
     ExistingAuthPort {
         dependency: manifest.contains("\"authport\"") || manifest.contains("appport-auth-mesh"),
         initialization: files.iter().any(|(_, source)| {
@@ -251,9 +256,14 @@ fn existing_authport(
                 || source.contains("app.use(authport")
                 || source.contains("AuthPortServer::new")
         }),
-        configuration: ["authport.toml", "appport.auth", "appport.toml", "auth.appport"]
-            .iter()
-            .any(|name| root.join(name).exists()),
+        configuration: [
+            "authport.toml",
+            "appport.auth",
+            "appport.toml",
+            "auth.appport",
+        ]
+        .iter()
+        .any(|name| root.join(name).exists()),
         manifest: root.join(".authport").join("adoption.json").exists(),
     }
 }

@@ -50,6 +50,11 @@ impl Value {
 }
 
 pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
+    if src.trim() == "use auth" {
+        let mut config = AuthConfig::default();
+        config.providers.push("local".to_string());
+        return Ok(config);
+    }
     if src.matches("use auth").count() > 1 {
         return Err(AuthDslError::new("multiple auth blocks are not allowed"));
     }
@@ -89,7 +94,7 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
     }
 
     if config.providers.is_empty() {
-        return Err(AuthDslError::new("missing providers"));
+        config.providers.push("local".to_string());
     }
 
     config
@@ -750,9 +755,14 @@ use auth {
 
         assert_eq!(
             parse_auth_block("use auth {\n  tenant = true\n}\n")
-                .unwrap_err()
-                .message,
-            "missing providers"
+                .unwrap()
+                .providers,
+            vec!["local"]
+        );
+
+        assert_eq!(
+            parse_auth_block("use auth").unwrap().providers,
+            vec!["local"]
         );
 
         assert_eq!(

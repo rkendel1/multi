@@ -45,7 +45,9 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     let options = parse_options(args)?;
     let root = match &options.root {
         Some(root) => root.clone(),
-        None => std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?,
+        None => {
+            std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?
+        }
     };
     let plan = build_plan(&root, options.mode.unwrap_or(InitMode::Embedded))?;
 
@@ -98,7 +100,9 @@ pub fn verify(args: &[String]) -> Result<Output, CliError> {
     }
     let root = match root {
         Some(root) => root,
-        None => std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?,
+        None => {
+            std::env::current_dir().map_err(|err| error(format!("cannot read cwd: {}", err)))?
+        }
     };
     let report = verify_root(&root)?;
     if !report.ok {
@@ -182,7 +186,9 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
     })
 }
 
-fn node_embedded_change(application: &ApplicationCandidate) -> Result<Option<FileChange>, CliError> {
+fn node_embedded_change(
+    application: &ApplicationCandidate,
+) -> Result<Option<FileChange>, CliError> {
     if application.language.as_deref() != Some("Node")
         || application.framework.as_deref() != Some("Express")
     {
@@ -215,7 +221,9 @@ fn node_embedded_change(application: &ApplicationCandidate) -> Result<Option<Fil
 
 fn integrate_express(source: &str) -> Result<String, CliError> {
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
-    let uses_imports = lines.iter().any(|line| line.trim_start().starts_with("import "));
+    let uses_imports = lines
+        .iter()
+        .any(|line| line.trim_start().starts_with("import "));
     let auth_line = if uses_imports {
         "import { authport } from \"authport\";".to_string()
     } else {
@@ -226,7 +234,8 @@ fn integrate_express(source: &str) -> Result<String, CliError> {
             .iter()
             .rposition(|line| {
                 let trimmed = line.trim_start();
-                trimmed.starts_with("import ") || trimmed.starts_with("const ") && trimmed.contains("require(")
+                trimmed.starts_with("import ")
+                    || trimmed.starts_with("const ") && trimmed.contains("require(")
             })
             .map(|index| index + 1)
             .unwrap_or(0);
@@ -334,7 +343,8 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
         .ok()
         .and_then(|source| appport_auth_mesh_dsl::parse_auth_block(&source).ok())
         .and_then(|config| {
-            let registry = appport_auth_mesh_providers::ConnectorRegistry::from_config(&config).ok()?;
+            let registry =
+                appport_auth_mesh_providers::ConnectorRegistry::from_config(&config).ok()?;
             appport_auth_mesh_boundary::AuthPortRuntime::new(
                 config,
                 registry,
@@ -397,11 +407,17 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
     out.push_str("No application routes will be rewritten.\n");
     out.push_str("Files to modify:\n");
     for change in plan.changes.iter().filter(|change| change.before.is_some()) {
-        out.push_str(&format!("  {}\n", display_path(&change.path, &plan.application.root)));
+        out.push_str(&format!(
+            "  {}\n",
+            display_path(&change.path, &plan.application.root)
+        ));
     }
     out.push_str("Files to create:\n");
     for change in plan.changes.iter().filter(|change| change.before.is_none()) {
-        out.push_str(&format!("  {}\n", display_path(&change.path, &plan.application.root)));
+        out.push_str(&format!(
+            "  {}\n",
+            display_path(&change.path, &plan.application.root)
+        ));
     }
     out.push_str("Files to leave unchanged:\n  application routes\n");
     if preview {
