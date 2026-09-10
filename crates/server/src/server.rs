@@ -112,6 +112,11 @@ impl AuthPortServer {
             },
             AuthOperation::Providers => HttpResponse::json(200, self.providers_json()),
             AuthOperation::Authorize => self.handle_authorize(request),
+            AuthOperation::Policies
+            | AuthOperation::AuthorizationDecisions
+            | AuthOperation::AuthorizationExplain => {
+                HttpResponse::denied(404, "no_route", "control-plane route was not handled")
+            }
             AuthOperation::CurrentTenant => match self.runtime.authenticate(request) {
                 Ok(context) => HttpResponse::json(
                     200,

@@ -64,27 +64,27 @@ fn policy(tenant: &TenantContext) -> Policy {
     Policy {
         id: tenant.policy_id.clone(),
         rules: vec![
-            Rule {
-                capability: Capability("billing.charge".to_string()),
-                condition: Condition::ClaimEquals {
+            Rule::allow(
+                Capability("billing.charge".to_string()),
+                Condition::ClaimEquals {
                     key: "role".to_string(),
                     value: ClaimValue::Enum("admin".to_string()),
                 },
-            },
-            Rule {
-                capability: Capability("reports.export".to_string()),
-                condition: Condition::ClaimEquals {
+            ),
+            Rule::allow(
+                Capability("reports.export".to_string()),
+                Condition::ClaimEquals {
                     key: "plan".to_string(),
                     value: ClaimValue::Enum("pro".to_string()),
                 },
-            },
-            Rule {
-                capability: Capability("invoice.create".to_string()),
-                condition: Condition::ClaimEquals {
+            ),
+            Rule::allow(
+                Capability("invoice.create".to_string()),
+                Condition::ClaimEquals {
                     key: "role".to_string(),
                     value: ClaimValue::Enum("admin".to_string()),
                 },
-            },
+            ),
         ],
     }
 }

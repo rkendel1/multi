@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use appport_auth_mesh_authz::{
-    evaluate_capability, evaluate_with_delegations, AuthorizationDecision, CapabilityEnvelope,
-    DenialReason, Policy,
+    evaluate_authorization_request, evaluate_capability, evaluate_with_delegations,
+    AuthorizationDecision, AuthorizationRequest, CapabilityEnvelope, DenialReason, Policy,
+    ResourceAttributes,
 };
+use appport_auth_mesh_authz::{Action, Condition, Effect, ResourceSelector, Rule};
 use appport_auth_mesh_contract::{
-    AgentState, AuditEventId, Capability, Claims, Delegation, DelegationId, Principal, PrincipalId,
-    PrincipalKind, SessionId, TenantContext, TenantId,
+    AgentState, AuditEventId, Capability, ClaimValue, Claims, Delegation, DelegationId, Principal,
+    PrincipalId, PrincipalKind, SessionId, TenantContext, TenantId,
 };
 use appport_auth_mesh_dsl::{stable_hash, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -57,6 +59,7 @@ pub struct AuthMesh {
     stores: MeshStores,
     session_ttl: i64,
     audit_sequence: AtomicU64,
+    decisions: Mutex<Vec<AuthorizationDecision>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +127,7 @@ struct AuditRecord<'r> {
     principal_id: Option<&'r PrincipalId>,
     session_id: Option<&'r SessionId>,
     delegation_id: Option<&'r DelegationId>,
-    metadata: Vec<(&'r str, &'r str)>,
+    metadata: Vec<(String, String)>,
 }
 
 impl<'r> AuditRecord<'r> {
@@ -153,8 +156,8 @@ impl<'r> AuditRecord<'r> {
         self
     }
 
-    fn meta(mut self, key: &'r str, value: &'r str) -> Self {
-        self.metadata.push((key, value));
+    fn meta(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.push((key.into(), value.into()));
         self
     }
 }
@@ -196,6 +199,7 @@ impl AuthMesh {
             stores,
             session_ttl: DEFAULT_SESSION_TTL_SECONDS,
             audit_sequence: AtomicU64::new(0),
+            decisions: Mutex::new(Vec::new()),
         })
     }
 
@@ -679,10 +683,52 @@ impl AuthMesh {
         );
 
         match self.record_decision(context, capability, &decision, now) {
-            Ok(audit_event_id) => attach_audit_event(decision, audit_event_id),
+            Ok(audit_event_id) => {
+                self.remember_decision(attach_audit_event(decision, audit_event_id))
+            }
             // An authorization that cannot be recorded is not an authorization.
             Err(_) => deny(DenialReason::AuditUnavailable),
         }
+    }
+
+    pub fn authorize_request(
+        &self,
+        context: &RuntimeContext,
+        request: &AuthorizationRequest,
+        resource_attributes: Option<&ResourceAttributes>,
+        now: i64,
+    ) -> AuthorizationDecision {
+        let policy = match self.policy(&context.tenant) {
+            Ok(policy) => policy,
+            Err(_) => return deny(DenialReason::PolicyNotFound),
+        };
+        let delegations = match self.delegations_for(&context.tenant, &context.principal.id) {
+            Ok(delegations) => delegations,
+            Err(_) => return deny(DenialReason::InvalidDelegation),
+        };
+        let delegation = pick_delegation(&delegations, &request.capability, now);
+        let decision = evaluate_authorization_request(
+            Some(&policy),
+            Some(&context.principal),
+            Some(&context.tenant),
+            delegation,
+            request,
+            resource_attributes,
+            now,
+        );
+        match self.record_decision(context, &request.capability, &decision, now) {
+            Ok(audit_event_id) => {
+                self.remember_decision(attach_audit_event(decision, audit_event_id))
+            }
+            Err(_) => deny(DenialReason::AuditUnavailable),
+        }
+    }
+
+    pub fn recent_decisions(&self) -> Vec<AuthorizationDecision> {
+        self.decisions
+            .lock()
+            .map(|decisions| decisions.clone())
+            .unwrap_or_default()
     }
 
     pub fn tenant(&self, tenant_id: &str) -> Result<TenantContext, AuthError> {
@@ -871,6 +917,7 @@ impl AuthMesh {
                     DenialReason::PolicyNotFound,
                 )
             })?
+            .or_else(|| Self::policy_from_config(&self.config, tenant))
             .ok_or_else(|| {
                 AuthError::new(
                     AuthLifecycleStage::PolicyEvaluation,
@@ -878,6 +925,57 @@ impl AuthMesh {
                     DenialReason::PolicyNotFound,
                 )
             })
+    }
+
+    fn policy_from_config(config: &AuthConfig, tenant: &TenantContext) -> Option<Policy> {
+        if config.policies.is_empty() {
+            return None;
+        }
+        Some(Policy {
+            id: tenant.policy_id.clone(),
+            rules: config
+                .policies
+                .iter()
+                .map(|policy| {
+                    let mut conditions = Vec::new();
+                    if policy.tenant_current {
+                        conditions.push(Condition::TenantCurrent);
+                    }
+                    for claim in &policy.claims {
+                        let values = claim
+                            .values
+                            .iter()
+                            .map(|value| ClaimValue::Enum(value.clone()))
+                            .collect::<Vec<_>>();
+                        conditions.push(if values.len() == 1 {
+                            Condition::ClaimEquals {
+                                key: claim.claim.clone(),
+                                value: values[0].clone(),
+                            }
+                        } else {
+                            Condition::ClaimIn {
+                                key: claim.claim.clone(),
+                                values,
+                            }
+                        });
+                    }
+                    Rule {
+                        capability: Capability(policy.capability.clone()),
+                        condition: match conditions.len() {
+                            0 => Condition::Always,
+                            1 => conditions.remove(0),
+                            _ => Condition::All(conditions),
+                        },
+                        resource: policy
+                            .resource
+                            .as_ref()
+                            .map(|resource| ResourceSelector::any(resource.clone())),
+                        action: policy.action.as_ref().map(|action| Action(action.clone())),
+                        effect: Effect::Allow,
+                    }
+                })
+                .collect(),
+        })
     }
 
     fn record_decision(
@@ -911,6 +1009,25 @@ impl AuthMesh {
         if let Some(reason) = reason {
             record = record.meta("reason", reason);
         }
+        match decision {
+            AuthorizationDecision::Allow {
+                resource, action, ..
+            }
+            | AuthorizationDecision::Deny {
+                resource, action, ..
+            } => {
+                if let Some(resource) = resource {
+                    let opaque = resource.opaque();
+                    record = record
+                        .meta("resource", &opaque)
+                        .meta("resource_type", resource.resource_type.as_str())
+                        .meta("resource_tenant", resource.tenant_id.as_str());
+                }
+                if let Some(action) = action {
+                    record = record.meta("action", action.as_str());
+                }
+            }
+        }
 
         self.audit(&context.tenant, record, now)?;
 
@@ -931,11 +1048,7 @@ impl AuthMesh {
             delegation_id: record.delegation_id.cloned(),
             kind: record.kind,
             timestamp: now,
-            metadata: record
-                .metadata
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect::<HashMap<_, _>>(),
+            metadata: record.metadata.into_iter().collect::<HashMap<_, _>>(),
         };
 
         self.stores
@@ -958,6 +1071,16 @@ impl AuthMesh {
     fn last_audit_event_id(&self, tenant: &TenantContext) -> AuditEventId {
         let sequence = self.audit_sequence.load(Ordering::SeqCst).saturating_sub(1);
         audit_event_id(tenant, sequence)
+    }
+
+    fn remember_decision(&self, decision: AuthorizationDecision) -> AuthorizationDecision {
+        if let Ok(mut decisions) = self.decisions.lock() {
+            decisions.push(decision.clone());
+            if decisions.len() > 100 {
+                decisions.remove(0);
+            }
+        }
+        decision
     }
 }
 
@@ -990,12 +1113,34 @@ fn attach_audit_event(
     audit_event_id: AuditEventId,
 ) -> AuthorizationDecision {
     match decision {
-        AuthorizationDecision::Allow { grant, .. } => AuthorizationDecision::Allow {
+        AuthorizationDecision::Allow {
             grant,
+            resource,
+            action,
+            matched_rules,
+            ..
+        } => AuthorizationDecision::Allow {
+            grant,
+            resource,
+            action,
+            matched_rules,
             audit_event_id: Some(audit_event_id),
         },
-        AuthorizationDecision::Deny { reason, .. } => AuthorizationDecision::Deny {
+        AuthorizationDecision::Deny {
             reason,
+            capability,
+            resource,
+            action,
+            policy_id,
+            matched_rules,
+            ..
+        } => AuthorizationDecision::Deny {
+            reason,
+            capability,
+            resource,
+            action,
+            policy_id,
+            matched_rules,
             audit_event_id: Some(audit_event_id),
         },
     }
@@ -1004,6 +1149,11 @@ fn attach_audit_event(
 fn deny(reason: DenialReason) -> AuthorizationDecision {
     AuthorizationDecision::Deny {
         reason,
+        capability: None,
+        resource: None,
+        action: None,
+        policy_id: None,
+        matched_rules: Vec::new(),
         audit_event_id: None,
     }
 }

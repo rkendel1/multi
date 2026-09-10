@@ -1,4 +1,4 @@
-use appport_auth_mesh_authz::CapabilityEnvelope;
+use appport_auth_mesh_authz::{AuthorizationDecision, CapabilityEnvelope};
 use appport_auth_mesh_contract::{
     Capability, ClaimValue, Claims, Delegation, DelegationId, Principal, PrincipalId,
     PrincipalKind, TenantContext,
@@ -25,6 +25,7 @@ pub struct AuthContext {
     pub session: Session,
     pub claims: Claims,
     pub capabilities: CapabilityEnvelope,
+    pub decision: Option<AuthorizationDecision>,
     pub delegation: Option<DelegationContext>,
     runtime: RuntimeContext,
 }
@@ -38,9 +39,15 @@ impl AuthContext {
             session,
             claims: runtime.claims.clone(),
             capabilities: runtime.capabilities.clone(),
+            decision: None,
             delegation,
             runtime,
         }
+    }
+
+    pub(crate) fn with_decision(mut self, decision: AuthorizationDecision) -> Self {
+        self.decision = Some(decision);
+        self
     }
 
     /// The authority view the policy engine evaluates against.

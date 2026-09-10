@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::model::{
-    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, UiScreen,
-    UiScreenOverride, UiTheme,
+    AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, PolicyClaimCondition,
+    PolicyDef, UiScreen, UiScreenOverride, UiTheme,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,7 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             "providers" => config.providers = expect_providers(&value)?,
             "isolation" => config.isolation = parse_isolation(expect_scalar(&key, &value)?)?,
             "claims" => config.claims = parse_claims(&value)?,
+            "policy" => config.policies = parse_policies(&value)?,
             "agents" => config.agents = expect_bool(&key, &value)?,
             "ui" => config.ui = parse_ui(&value)?,
             _ => return Err(AuthDslError::new(format!("unknown auth field `{}`", key))),
@@ -170,16 +171,19 @@ impl Parser {
 
             let key = self.parse_ident()?;
             self.skip_trivia();
-            match self.peek() {
-                Some(':') | Some('=') => self.pos += 1,
+            let value = match self.peek() {
+                Some(':') | Some('=') => {
+                    self.pos += 1;
+                    self.parse_value()?
+                }
+                Some('{') => self.parse_value()?,
                 _ => {
                     return Err(AuthDslError::new(format!(
-                        "expected `:` or `=` after `{}`",
+                        "expected `:`, `=` or `{{` after `{}`",
                         key
                     )))
                 }
-            }
-            let value = self.parse_value()?;
+            };
             entries.push((key, value));
         }
     }
@@ -402,6 +406,63 @@ fn parse_claim_kind(name: &str, value: &Value) -> Result<ClaimKind, AuthDslError
     }
 }
 
+fn parse_policies(value: &Value) -> Result<Vec<PolicyDef>, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("policy must be a `{ ... }` block")),
+    };
+    let mut policies = Vec::new();
+    for (capability, value) in entries {
+        let Value::Block(fields) = value else {
+            return Err(AuthDslError::new(format!(
+                "policy `{}` must be a block",
+                capability
+            )));
+        };
+        let mut policy = PolicyDef {
+            capability: capability.clone(),
+            tenant_current: false,
+            resource: None,
+            action: capability
+                .split_once('.')
+                .map(|(_, action)| action.to_string()),
+            claims: Vec::new(),
+        };
+        for (key, value) in fields {
+            match key.as_str() {
+                "tenant" => {
+                    let tenant = expect_scalar(key, value)?;
+                    if tenant != "current" {
+                        return Err(AuthDslError::new("policy tenant must be `current`"));
+                    }
+                    policy.tenant_current = true;
+                }
+                "resource" => policy.resource = Some(expect_scalar(key, value)?.to_string()),
+                "action" => policy.action = Some(expect_scalar(key, value)?.to_string()),
+                claim => {
+                    let values = match value {
+                        Value::List(values) | Value::Enum(values) => values.clone(),
+                        Value::Scalar(value) => vec![value.clone()],
+                        Value::Block(_) => {
+                            return Err(AuthDslError::new(format!(
+                                "policy claim `{}` cannot be a block",
+                                claim
+                            )))
+                        }
+                    };
+                    policy.claims.push(PolicyClaimCondition {
+                        claim: claim.to_string(),
+                        values,
+                    });
+                }
+            }
+        }
+        policy.claims.sort();
+        policies.push(policy);
+    }
+    Ok(policies)
+}
+
 fn parse_ui(value: &Value) -> Result<AuthUiConfig, AuthDslError> {
     let entries = match value {
         Value::Block(entries) => entries,
@@ -466,6 +527,45 @@ use auth {
         assert_eq!(parsed.isolation, IsolationMode::Strict);
         assert!(!parsed.agents);
         assert_eq!(parsed.ui, AuthUiConfig::default());
+    }
+
+    #[test]
+    fn parses_resource_aware_policy_block() {
+        let parsed = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  tenant = true
+  claims = {
+    role = enum["owner", "admin", "member"]
+  }
+  policy {
+    invoice.read {
+      tenant = current
+      resource = invoice
+    }
+    invoice.update {
+      tenant = current
+      resource = invoice
+      role = ["owner", "admin"]
+    }
+  }
+}
+"#,
+        )
+        .expect("policy DSL should parse");
+
+        assert_eq!(parsed.policies.len(), 2);
+        let update = parsed
+            .policies
+            .iter()
+            .find(|policy| policy.capability == "invoice.update")
+            .unwrap();
+        assert!(update.tenant_current);
+        assert_eq!(update.resource.as_deref(), Some("invoice"));
+        assert_eq!(update.action.as_deref(), Some("update"));
+        assert_eq!(update.claims[0].claim, "role");
+        assert_eq!(update.claims[0].values, vec!["owner", "admin"]);
     }
 
     #[test]

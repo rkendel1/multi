@@ -11,6 +11,7 @@ pub struct AuthConfig {
     pub claims: Vec<ClaimDef>,
     pub isolation: IsolationMode,
     pub agents: bool,
+    pub policies: Vec<PolicyDef>,
     pub ui: AuthUiConfig,
 }
 
@@ -22,6 +23,7 @@ impl Default for AuthConfig {
             claims: Vec::new(),
             isolation: IsolationMode::Strict,
             agents: false,
+            policies: Vec::new(),
             ui: AuthUiConfig::default(),
         }
     }
@@ -40,6 +42,8 @@ impl AuthConfig {
                 values.sort();
             }
         }
+        let mut policies = self.policies.clone();
+        policies.sort_by(|a, b| a.capability.cmp(&b.capability));
 
         Self {
             multi_tenant: self.multi_tenant,
@@ -47,6 +51,7 @@ impl AuthConfig {
             claims,
             isolation: self.isolation.clone(),
             agents: self.agents,
+            policies,
             ui: self.ui.canonical(),
         }
     }
@@ -105,6 +110,20 @@ impl AuthConfig {
             }
         }
 
+        let mut policy_names = HashSet::new();
+        for policy in &self.policies {
+            if policy.capability.trim().is_empty() {
+                return Err(AuthConfigError {
+                    message: "policy capability cannot be empty".to_string(),
+                });
+            }
+            if !policy_names.insert(policy.capability.clone()) {
+                return Err(AuthConfigError {
+                    message: format!("duplicate policy `{}`", policy.capability),
+                });
+            }
+        }
+
         self.ui.validate()?;
 
         Ok(())
@@ -137,6 +156,29 @@ impl AuthConfig {
             out.push(b';');
         }
         out.extend_from_slice(format!("agents={};", self.agents).as_bytes());
+        out.extend_from_slice(b"policies=");
+        for policy in &self.policies {
+            out.extend_from_slice(policy.capability.as_bytes());
+            out.push(b':');
+            if policy.tenant_current {
+                out.extend_from_slice(b"tenant=current;");
+            }
+            if let Some(resource) = &policy.resource {
+                out.extend_from_slice(format!("resource={};", resource).as_bytes());
+            }
+            if let Some(action) = &policy.action {
+                out.extend_from_slice(format!("action={};", action).as_bytes());
+            }
+            for condition in &policy.claims {
+                out.extend_from_slice(condition.claim.as_bytes());
+                out.push(b'=');
+                for value in &condition.values {
+                    out.extend_from_slice(value.as_bytes());
+                    out.push(b',');
+                }
+                out.push(b';');
+            }
+        }
         self.ui.write_canonical(out);
     }
 }
@@ -166,6 +208,21 @@ pub enum ClaimKind {
     String,
     Integer,
     Boolean,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyDef {
+    pub capability: String,
+    pub tenant_current: bool,
+    pub resource: Option<String>,
+    pub action: Option<String>,
+    pub claims: Vec<PolicyClaimCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyClaimCondition {
+    pub claim: String,
+    pub values: Vec<String>,
 }
 
 impl ClaimKind {

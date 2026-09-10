@@ -14,6 +14,8 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("approve") => approve(&args[1..]),
         Some("apply") => apply(&args[1..]),
         Some("reject") => reject(&args[1..]),
+        Some("policies") => policies(&args[1..]),
+        Some("policy") => policy(&args[1..]),
         _ => Err(error("unknown control command")),
     }
 }
@@ -166,6 +168,7 @@ fn reject(args: &[String]) -> Result<Output, CliError> {
                 index += 1;
                 proposal_id = args.get(index).cloned();
             }
+
             "--reason" => {
                 index += 1;
                 reason = args
@@ -190,6 +193,29 @@ fn reject(args: &[String]) -> Result<Output, CliError> {
     let response = http_post(&server, "/_authport/reject", &body)?;
     Ok(Output {
         text: format!("reject response from {}\n{}\n", server, response),
+    })
+}
+
+fn policies(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let response = http_get(&server, "/_authport/policies")?;
+    Ok(Output {
+        text: format!("policies from {}\n{}\n", server, response),
+    })
+}
+
+fn policy(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    if filtered.first().map(String::as_str) != Some("show") {
+        return Err(error("policy command supports `show ID`"));
+    }
+    let id = filtered
+        .get(1)
+        .ok_or_else(|| error("policy show needs an id"))?;
+    let response = http_get(&server, &format!("/_authport/policies/{}", id))?;
+    Ok(Output {
+        text: format!("policy {} from {}\n{}\n", id, server, response),
     })
 }
 

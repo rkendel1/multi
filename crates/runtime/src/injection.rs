@@ -33,13 +33,13 @@ pub fn inject_auth_context(
 
     let policy = Policy {
         id: tenant.policy_id.clone(),
-        rules: vec![Rule {
-            capability: "storage.read".into(),
-            condition: Condition::TimeBound {
+        rules: vec![Rule::allow(
+            "storage.read",
+            Condition::TimeBound {
                 start: 0,
                 end: i64::MAX,
             },
-        }],
+        )],
     };
     let capability_envelope: CapabilityEnvelope =
         evaluate(&policy, &principal, &tenant).map_err(|err| {
