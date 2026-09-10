@@ -7,6 +7,7 @@ edition = "2021"
 appport-auth-mesh-authz = { path = "../authz" }
 appport-auth-mesh-boundary = { path = "../boundary" }
 appport-auth-mesh-contract = { path = "../contract" }
+appport-auth-mesh-discovery = { path = "../discovery" }
 appport-auth-mesh-dsl = { path = "../dsl" }
 appport-auth-mesh-providers = { path = "../providers" }
 appport-auth-mesh-runtime = { path = "../runtime" }

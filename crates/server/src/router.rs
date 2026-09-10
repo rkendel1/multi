@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use appport_auth_mesh_boundary::{AuthContext, BoundaryRequest, Method, Requirement};
+use appport_auth_mesh_discovery::{RouteCandidate, RouteSource};
 
 use crate::http::HttpResponse;
 
@@ -138,6 +139,10 @@ pub trait ApplicationBinding: Send + Sync {
     fn resolve(&self, method: Method, path: &str) -> RouteOutcome;
 
     fn handle(&self, request: &BoundaryRequest, context: Option<&AuthContext>) -> HttpResponse;
+
+    fn observed_routes(&self) -> Vec<RouteCandidate> {
+        Vec::new()
+    }
 }
 
 /// An application whose handlers run in the same process as AuthPort.
@@ -219,5 +224,20 @@ impl ApplicationBinding for RouterApp {
             }),
             None => HttpResponse::denied(404, "no_route", "no such route"),
         }
+    }
+
+    fn observed_routes(&self) -> Vec<RouteCandidate> {
+        self.routes
+            .iter()
+            .map(|(method, path, requirement)| RouteCandidate {
+                method: method.as_str().to_string(),
+                path: path.clone(),
+                source: RouteSource::Embedded,
+                capability: match requirement {
+                    Requirement::Capability(capability) => Some(capability.clone()),
+                    _ => None,
+                },
+            })
+            .collect()
     }
 }

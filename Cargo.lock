@@ -78,6 +78,7 @@ dependencies = [
  "appport-auth-mesh-authz",
  "appport-auth-mesh-boundary",
  "appport-auth-mesh-contract",
+ "appport-auth-mesh-discovery",
  "appport-auth-mesh-dsl",
  "appport-auth-mesh-providers",
  "appport-auth-mesh-runtime",
