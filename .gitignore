@@ -1,3 +1,7 @@
 target/
 .env.local
 *.tgz
+.feltdb/
+state/
+state-test/
+state-test-*
