@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use appport_auth_mesh_authz::Policy;
 use crate::request::Method;
+use appport_auth_mesh_authz::Policy;
+use std::collections::BTreeMap;
 
 /// Route identifier: (method, path) pair
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -74,22 +74,28 @@ pub enum AuthorityChange {
     },
 
     /// Remove route protection
-    UnprotectRoute {
-        method: Method,
-        path: String,
-    },
+    UnprotectRoute { method: Method, path: String },
 
     /// Set policy for a capability
-    SetCapabilityPolicy {
-        capability: String,
-        policy: Policy,
-    },
+    SetCapabilityPolicy { capability: String, policy: Policy },
 
     /// Enable or disable a provider
-    SetProviderEnabled {
-        provider: String,
-        enabled: bool,
-    },
+    SetProviderEnabled { provider: String, enabled: bool },
+
+    /// Revert a previously applied change.
+    Revert { change_id: String },
+}
+
+impl AuthorityChange {
+    pub fn change_type(&self) -> &'static str {
+        match self {
+            Self::ProtectRoute { .. } => "protect_route",
+            Self::UnprotectRoute { .. } => "unprotect_route",
+            Self::SetCapabilityPolicy { .. } => "set_capability_policy",
+            Self::SetProviderEnabled { .. } => "set_provider_enabled",
+            Self::Revert { .. } => "revert",
+        }
+    }
 }
 
 /// Preview of what would change
@@ -163,10 +169,7 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
             method.as_str().hash(&mut hasher);
             path.hash(&mut hasher);
         }
-        AuthorityChange::SetCapabilityPolicy {
-            capability,
-            policy,
-        } => {
+        AuthorityChange::SetCapabilityPolicy { capability, policy } => {
             "SetCapabilityPolicy".hash(&mut hasher);
             capability.hash(&mut hasher);
             format!("{:?}", policy).hash(&mut hasher);
@@ -176,6 +179,10 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
             provider.hash(&mut hasher);
             enabled.hash(&mut hasher);
         }
+        AuthorityChange::Revert { change_id } => {
+            "Revert".hash(&mut hasher);
+            change_id.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -183,6 +190,7 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
 /// Proposed change with validation result
 #[derive(Debug, Clone)]
 pub struct ChangeProposal {
+    pub id: String,
     pub change: AuthorityChange,
     pub preview: Preview,
     pub revision: u64,
@@ -212,6 +220,7 @@ mod tests {
         let after_state = apply_change(&current_state, &change).unwrap();
 
         let proposal = ChangeProposal {
+            id: "proposal-test".to_string(),
             change,
             preview: Preview {
                 before: PreviewState::from(&current_state),
@@ -254,22 +263,35 @@ pub fn apply_change(
             let route_id = RouteId::new(method.clone(), path.clone());
             next.route_protection.remove(&route_id);
         }
-        AuthorityChange::SetCapabilityPolicy {
-            capability,
-            policy,
-        } => {
+        AuthorityChange::SetCapabilityPolicy { capability, policy } => {
             next.capability_policies
                 .insert(capability.clone(), policy.clone());
         }
         AuthorityChange::SetProviderEnabled { provider, enabled } => {
-            next.provider_state.insert(
-                provider.clone(),
-                ProviderState {
-                    enabled: *enabled,
-                },
-            );
+            next.provider_state
+                .insert(provider.clone(), ProviderState { enabled: *enabled });
+        }
+        AuthorityChange::Revert { .. } => {
+            return Err("revert requires an applied change record".to_string());
         }
     }
 
+    Ok(next)
+}
+
+pub fn apply_revert_change(
+    current: &LiveAuthorityState,
+    change_id: &str,
+    record: &crate::proposal_store::ChangeRecord,
+) -> Result<LiveAuthorityState, String> {
+    if record.change_id != change_id {
+        return Err("revert change id does not match the stored record".to_string());
+    }
+    if current.revision < record.resulting_state.revision {
+        return Err("cannot revert against an older authority state".to_string());
+    }
+
+    let mut next = record.previous_state.clone();
+    next.revision = current.next_revision();
     Ok(next)
 }

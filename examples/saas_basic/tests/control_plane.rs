@@ -1,5 +1,5 @@
 use appport_auth_mesh_boundary::{
-    Approval, AuthorityChange, AuthPortRuntime, Method, RegistrationPolicy,
+    Approval, AuthPortRuntime, AuthorityChange, Method, RegistrationPolicy,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
@@ -67,14 +67,18 @@ fn control_plane_proposes_and_applies_protection() {
             .any(|(r, p)| {
                 r.method == Method::Post
                     && r.path == "/invoices"
-                    && p.capability.as_ref().map_or(false, |c| c == "invoice.create")
+                    && p.capability
+                        .as_ref()
+                        .map_or(false, |c| c == "invoice.create")
             }),
         "after: POST /invoices should require invoice.create"
     );
 
     // 3. Apply the proposal with approval
     let approval = Approval::for_proposal(&proposal);
-    let change_id = runtime.apply_change(proposal, approval).expect("apply change");
+    let change_id = runtime
+        .apply_change(proposal, approval)
+        .expect("apply change");
     assert!(!change_id.is_empty(), "should return a change ID");
 
     // 4. Verify the protection is now active
@@ -105,7 +109,9 @@ fn control_plane_approval_token_mismatch() {
         path: "/other".to_string(),
         capability: "other.write".to_string(),
     };
-    let different_proposal = runtime.propose_change(different_change).expect("propose change");
+    let different_proposal = runtime
+        .propose_change(different_change)
+        .expect("propose change");
     let wrong_approval = Approval::for_proposal(&different_proposal);
 
     // Try to apply with wrong approval
@@ -187,10 +193,7 @@ fn control_plane_route_protection_query() {
         runtime.get_route_protection(&Method::Get, "/invoices"),
         None
     );
-    assert_eq!(
-        runtime.get_route_protection(&Method::Post, "/orders"),
-        None
-    );
+    assert_eq!(runtime.get_route_protection(&Method::Post, "/orders"), None);
 }
 
 #[test]
@@ -219,7 +222,9 @@ fn control_plane_unprotect_route() {
         path: "/sensitive".to_string(),
     };
 
-    let p2 = runtime.propose_change(unprotect).expect("propose unprotect");
+    let p2 = runtime
+        .propose_change(unprotect)
+        .expect("propose unprotect");
     let a2 = Approval::for_proposal(&p2);
     runtime.apply_change(p2, a2).expect("apply unprotect");
 
@@ -234,7 +239,10 @@ fn control_plane_provider_enable_disable() {
     let runtime = setup();
 
     // By default, local provider should be enabled
-    assert!(runtime.is_provider_enabled("local"), "local provider should default to enabled");
+    assert!(
+        runtime.is_provider_enabled("local"),
+        "local provider should default to enabled"
+    );
 
     // Disable it
     let disable = AuthorityChange::SetProviderEnabled {
@@ -246,7 +254,10 @@ fn control_plane_provider_enable_disable() {
     let a1 = Approval::for_proposal(&p1);
     runtime.apply_change(p1, a1).expect("apply disable");
 
-    assert!(!runtime.is_provider_enabled("local"), "local provider should be disabled");
+    assert!(
+        !runtime.is_provider_enabled("local"),
+        "local provider should be disabled"
+    );
 
     // Re-enable it
     let enable = AuthorityChange::SetProviderEnabled {
@@ -258,5 +269,66 @@ fn control_plane_provider_enable_disable() {
     let a2 = Approval::for_proposal(&p2);
     runtime.apply_change(p2, a2).expect("apply enable");
 
-    assert!(runtime.is_provider_enabled("local"), "local provider should be enabled again");
+    assert!(
+        runtime.is_provider_enabled("local"),
+        "local provider should be enabled again"
+    );
+}
+
+#[test]
+fn control_plane_persists_proposals_history_and_reverts() {
+    let runtime = setup();
+
+    let proposal = runtime
+        .propose_change(AuthorityChange::ProtectRoute {
+            method: Method::Post,
+            path: "/invoices".to_string(),
+            capability: "invoice.create".to_string(),
+        })
+        .expect("propose protection");
+    let proposal_id = proposal.id.clone();
+
+    let stored = runtime
+        .retrieve_proposal(&proposal_id)
+        .expect("proposal is stored");
+    assert_eq!(stored.id, proposal_id);
+    assert_eq!(stored.revision, 0);
+    assert_eq!(runtime.list_proposals(10, 0).unwrap().len(), 1);
+
+    let approval = Approval::for_proposal(&proposal);
+    let change_id = runtime.apply_change(proposal, approval).expect("apply");
+
+    assert_eq!(runtime.live_authority().revision, 1);
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/invoices"),
+        Some("invoice.create".to_string())
+    );
+
+    let history = runtime.history(10, 0).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].change_id, change_id);
+    assert_eq!(history[0].previous_state.revision, 0);
+    assert_eq!(history[0].resulting_state.revision, 1);
+
+    let revert = runtime
+        .propose_change(AuthorityChange::Revert {
+            change_id: change_id.clone(),
+        })
+        .expect("propose revert");
+    assert_eq!(revert.revision, 1);
+    let approval = Approval::for_proposal(&revert);
+    let revert_id = runtime
+        .apply_change(revert, approval)
+        .expect("apply revert");
+
+    assert_ne!(revert_id, change_id);
+    assert_eq!(runtime.live_authority().revision, 2);
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/invoices"),
+        None
+    );
+
+    let history = runtime.history(10, 0).expect("history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].reverted_change_id, Some(change_id));
 }

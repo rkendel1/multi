@@ -2,13 +2,18 @@
 //! decides nothing on its own.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use appport_auth_mesh_authz::DenialReason;
-use appport_auth_mesh_boundary::{BoundaryRequest, Method, Requirement, RESERVED_HEADER_PREFIX};
+use appport_auth_mesh_boundary::{
+    AuthPortRuntime, BindingMode, BoundaryRequest, Method, Requirement, RESERVED_HEADER_PREFIX,
+};
 use appport_auth_mesh_dsl::parse_auth_block;
+use appport_auth_mesh_providers::ConnectorRegistry;
+use appport_auth_mesh_runtime::MemoryStores;
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
-    render_sign_in, status_for, PathPattern, RouteOutcome, RoutePolicy,
+    render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy,
 };
 use appport_auth_mesh_surface::{AuthSurface, BoundarySurface};
 
@@ -201,4 +206,77 @@ fn the_session_cookie_is_the_one_the_contract_names() {
         surface.route("/auth/sign-out").map(|route| route.operation),
         surface.route("/auth/logout").map(|route| route.operation)
     );
+}
+
+#[test]
+fn control_plane_http_routes_store_apply_and_list_history() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+
+    let proposed = server.handle(&request(
+        Method::Post,
+        "/_authport/propose",
+        &[("content-type", "application/json")],
+        "{\"type\": \"protect_route\", \"method\": \"POST\", \"path\": \"/invoices\", \"capability\": \"invoice.create\"}",
+    ));
+    assert_eq!(proposed.status, 200);
+    let body = proposed.body_string();
+    let proposal_id = json_string_field(&body, "proposal_id").expect("proposal id");
+    assert!(body.contains("\"route_protection\""));
+    assert!(body.contains("\"approval_token\""));
+
+    let listed = server.handle(&request(Method::Get, "/_authport/proposals", &[], ""));
+    assert_eq!(listed.status, 200);
+    assert!(listed.body_string().contains(&proposal_id));
+
+    let applied = server.handle(&request(
+        Method::Post,
+        "/_authport/apply",
+        &[("content-type", "application/json")],
+        &format!("{{\"proposal_id\": \"{}\"}}", proposal_id),
+    ));
+    assert_eq!(applied.status, 200);
+    let body = applied.body_string();
+    assert!(body.contains("\"new_revision\": 1"));
+    let change_id = json_string_field(&body, "applied_change_id").expect("change id");
+
+    let history = server.handle(&request(Method::Get, "/_authport/history", &[], ""));
+    assert_eq!(history.status, 200);
+    assert!(history.body_string().contains(&change_id));
+}
+
+struct NoApp;
+
+impl appport_auth_mesh_server::ApplicationBinding for NoApp {
+    fn resolve(&self, _method: Method, _path: &str) -> RouteOutcome {
+        RouteOutcome::NotFound
+    }
+
+    fn handle(
+        &self,
+        _request: &BoundaryRequest,
+        _context: Option<&appport_auth_mesh_boundary::AuthContext>,
+    ) -> HttpResponse {
+        HttpResponse::denied(404, "no_application", "no application")
+    }
+}
+
+fn json_string_field(json: &str, field: &str) -> Option<String> {
+    let pattern = format!("\"{}\":", field);
+    let rest = json
+        .get(json.find(&pattern)? + pattern.len()..)?
+        .trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }

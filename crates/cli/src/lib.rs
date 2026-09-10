@@ -9,6 +9,7 @@ use appport_auth_mesh_dsl::{parse_auth_block, AuthConfig};
 use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_surface::{render_json_with, render_text, AuthSurface};
 
+pub mod control;
 pub mod serve;
 
 pub const USAGE: &str = "\
@@ -20,6 +21,9 @@ USAGE:
     authport routes [FILE]
     authport providers [FILE]
     authport serve [FILE] [options]
+    authport connect [--server URL] [--output-token]
+    authport propose <change-type> [options] [--server URL] [--dry-run]
+    authport apply [--proposal-id ID] [--server URL] --yes
 
 SERVE OPTIONS:
     --addr ADDRESS              listen address (default 127.0.0.1:8787)
@@ -71,6 +75,12 @@ where
     I: IntoIterator<Item = String>,
 {
     let args: Vec<String> = args.into_iter().collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("connect" | "propose" | "apply")
+    ) {
+        return control::run(&args);
+    }
     let mut command = None;
     let mut file: Option<PathBuf> = None;
     let mut json = false;
