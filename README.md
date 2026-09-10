@@ -65,6 +65,47 @@ pub trait AuthBoundary {
 }
 ```
 
+## Storage, audit and reporting
+
+AuthPort owns the meaning and integrity of authority data, not the customer's
+database choice. The auth contract may name storage providers by capability:
+
+```rust
+use auth {
+  providers = [google, github, email]
+  storage {
+    authority = "feltdb"
+    audit = "feltdb"
+  }
+}
+```
+
+Connection strings, credentials and database-specific deployment details stay
+outside the application authority contract. The storage boundary is split by
+semantics — identity, tenants, sessions, credentials, policies, delegations,
+agents, runs, audit and reporting — so deployments can place different classes
+of data in FeltDB, PostgreSQL, enterprise systems or customer-owned stores.
+FeltDB is the zero-setup default and reference native substrate; PostgreSQL is
+represented by the same storage conformance contract rather than a different
+authority model.
+
+Audit is a durable, append-oriented authority stream, not application logging.
+Required authority/security audit failures fail closed, while external audit
+sinks and reporting projections are non-authoritative integrations. The control
+plane exposes storage and audit status without secrets:
+
+```
+GET /_authport/storage
+GET /_authport/storage/capabilities
+GET /_authport/audit
+GET /_authport/audit/events?tenant=acme
+GET /_authport/audit/export?tenant=acme
+GET /_authport/reporting
+```
+
+`authport audit export --tenant acme` returns canonical JSON Lines suitable for
+enterprise export.
+
 `AuthContext` has no public constructor. Outside the boundary crate you can read
 one, never build one: it exists because AuthPort verified a request.
 
@@ -200,7 +241,7 @@ declarations produce the same canonical contract and the same fingerprint.
 | `dsl` | `use auth { ... }`, canonicalization, contract fingerprint |
 | `providers` | Connector contract, catalog and registry |
 | `surface` | `AuthSurface` derivation, inspection, UI and boundary contract |
-| `storage` | Tenant roots, identities, principals, sessions, delegations, audit |
+| `storage` | Storage boundary, tenant roots, identities, principals, sessions, delegations, runs, audit, reporting/export |
 | `authz` | Policy evaluation and capability provenance |
 | `runtime` | `AuthMesh`: authentication, resolution, sessions, delegation |
 | `boundary` | `AuthPortRuntime`, `AuthContext`, `AuthBoundary`, binding modes |

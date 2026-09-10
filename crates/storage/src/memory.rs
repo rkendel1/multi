@@ -6,13 +6,14 @@ use std::sync::Mutex;
 use appport_auth_mesh_contract::{
     AgentState, AuditEventId, Claims, ContractVersion, Delegation, DelegationId, Identity,
     IdentityId, OfflineSemantics, Principal, PrincipalId, PrincipalKind, ProviderName,
-    ProviderSubject, SessionId, StorageRootId, TenantContext, TenantId,
+    ProviderSubject, RunId, SessionId, StorageRootId, TenantContext, TenantId,
 };
 
 use crate::audit_log::{AuditEvent, AuditLog};
 use crate::delegation_store::DelegationStore;
 use crate::identity_store::IdentityStore;
 use crate::principal_store::{ExternalBinding, PrincipalStore};
+use crate::run_store::RunStore;
 use crate::session_store::{Session, SessionStore};
 use crate::tenant_root::TenantRootStore;
 use crate::StorageError;
@@ -270,6 +271,28 @@ impl AuditLog for MemoryAuditLog {
         }
         self.events.lock().map_err(lock_error)?.push(event);
         Ok(())
+    }
+
+    fn events(
+        &self,
+        tenant: &TenantContext,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, StorageError> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(lock_error)?
+            .iter()
+            .filter(|event| event.tenant_id == tenant.tenant_id)
+            .filter(|event| since.map(|since| event.timestamp >= since).unwrap_or(true))
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|a, b| (a.timestamp, &a.event_id).cmp(&(b.timestamp, &b.event_id)));
+        if limit > 0 {
+            events.truncate(limit);
+        }
+        Ok(events)
     }
 }
 
@@ -574,6 +597,93 @@ impl DelegationStore for MemoryDelegationStore {
         }
         delegation.revoked_at = Some(revoked_at);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemoryRunStore {
+    runs: Mutex<HashMap<RunId, appport_auth_mesh_contract::AgentRun>>,
+}
+
+impl MemoryRunStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl RunStore for MemoryRunStore {
+    fn put_run(
+        &self,
+        run: appport_auth_mesh_contract::AgentRun,
+    ) -> Result<appport_auth_mesh_contract::AgentRun, StorageError> {
+        let mut runs = self.runs.lock().map_err(lock_error)?;
+        if runs.contains_key(&run.id) {
+            return Err(StorageError::new("duplicate run"));
+        }
+        runs.insert(run.id.clone(), run.clone());
+        Ok(run)
+    }
+
+    fn get_run(
+        &self,
+        tenant: &TenantContext,
+        run_id: &RunId,
+    ) -> Result<Option<appport_auth_mesh_contract::AgentRun>, StorageError> {
+        let run = self.runs.lock().map_err(lock_error)?.get(run_id).cloned();
+        match run {
+            Some(run) if run.tenant_id == tenant.tenant_id => Ok(Some(run)),
+            Some(_) => Err(StorageError::new("tenant mismatch")),
+            None => Ok(None),
+        }
+    }
+
+    fn list_runs_for_agent(
+        &self,
+        tenant: &TenantContext,
+        agent: &PrincipalId,
+    ) -> Result<Vec<appport_auth_mesh_contract::AgentRun>, StorageError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(lock_error)?
+            .values()
+            .filter(|run| run.tenant_id == tenant.tenant_id && &run.agent_principal == agent)
+            .cloned()
+            .collect::<Vec<_>>();
+        runs.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(runs)
+    }
+
+    fn find_run_by_credential(
+        &self,
+        tenant: &TenantContext,
+        credential: &appport_auth_mesh_contract::ExecutionCredentialId,
+    ) -> Result<Option<appport_auth_mesh_contract::AgentRun>, StorageError> {
+        Ok(self
+            .runs
+            .lock()
+            .map_err(lock_error)?
+            .values()
+            .find(|run| {
+                run.tenant_id == tenant.tenant_id && &run.execution_credential == credential
+            })
+            .cloned())
+    }
+
+    fn update_run(
+        &self,
+        tenant: &TenantContext,
+        run: appport_auth_mesh_contract::AgentRun,
+    ) -> Result<appport_auth_mesh_contract::AgentRun, StorageError> {
+        if run.tenant_id != tenant.tenant_id {
+            return Err(StorageError::new("tenant mismatch"));
+        }
+        let mut runs = self.runs.lock().map_err(lock_error)?;
+        if !runs.contains_key(&run.id) {
+            return Err(StorageError::new("unknown run"));
+        }
+        runs.insert(run.id.clone(), run.clone());
+        Ok(run)
     }
 }
 

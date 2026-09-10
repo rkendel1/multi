@@ -19,7 +19,9 @@ use appport_auth_mesh_contract::{
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_dsl::PasswordPolicy;
-use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
+use appport_auth_mesh_providers::{
+    AuthConnector, AuthRequest, AuthResponse, ConnectorRegistry, LocalAccount, LocalConnector,
+};
 use appport_auth_mesh_runtime::{DelegationRequest, MemoryStores, RuntimeContext};
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
@@ -230,6 +232,120 @@ fn control_plane_lists_shows_and_creates_agents() {
     ));
     assert_eq!(created.status, 200);
     assert!(created.body_string().contains("\"id\": \"agent:reports\""));
+}
+
+#[test]
+fn control_plane_reports_storage_audit_and_reporting_boundaries() {
+    let config = parse_auth_block(
+        r#"
+use auth {
+  providers = [local]
+  tenant = true
+  storage {
+    authority = "postgresql"
+    audit = "enterprise_audit"
+    reporting = "customer_warehouse"
+  }
+}
+"#,
+    )
+    .unwrap();
+    let registry = ConnectorRegistry::from_config_with(
+        &config,
+        vec![Arc::new(
+            LocalConnector::new().with_account(LocalAccount::new("alice", "secret")),
+        )],
+    )
+    .unwrap();
+    let stores = MemoryStores::new();
+    let tenant = TenantContext {
+        tenant_id: "acme".into(),
+        namespace: "acme".to_string(),
+        policy_id: "acme-policy".into(),
+        storage_root_id: "acme-root".into(),
+    };
+    stores.tenants.put_tenant(tenant.clone()).unwrap();
+    stores
+        .policies
+        .put(Policy {
+            id: tenant.policy_id.clone(),
+            rules: Vec::new(),
+        })
+        .unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            stores.mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
+
+    let storage = server.handle(&request(Method::Get, "/_authport/storage", &[], ""));
+    assert_eq!(storage.status, 200);
+    let storage = storage.body_string();
+    assert!(storage.contains("\"authority_store\": \"postgresql\""));
+    assert!(storage.contains("\"audit_store\": \"enterprise_audit\""));
+    assert!(storage.contains("\"reporting_store\": \"customer_warehouse\""));
+    assert!(!storage.contains("://"));
+
+    let audit_config = server.handle(&request(Method::Get, "/_authport/audit", &[], ""));
+    assert_eq!(audit_config.status, 200);
+    assert!(audit_config
+        .body_string()
+        .contains("\"required_event_failures\": \"fail_closed\""));
+
+    let reporting = server.handle(&request(Method::Get, "/_authport/reporting", &[], ""));
+    assert_eq!(reporting.status, 200);
+    assert!(reporting.body_string().contains("\"authoritative\": false"));
+
+    runtime
+        .mesh()
+        .sign_up(
+            "acme",
+            &AuthResponse::to_challenge(
+                &LocalConnector::new()
+                    .begin(
+                        &AuthRequest::new("local")
+                            .for_tenant("acme")
+                            .with_parameter("username", "alice"),
+                    )
+                    .unwrap(),
+            )
+            .for_tenant("acme")
+            .with_parameter("username", "alice")
+            .with_parameter("password", "secret"),
+            appport_auth_mesh_runtime::Registration::human(),
+            42,
+        )
+        .unwrap();
+
+    let events = server.handle(&request(
+        Method::Get,
+        "/_authport/audit/events?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(events.status, 200);
+    assert!(events
+        .body_string()
+        .contains("\"kind\": \"identity.account_linked\""));
+    assert!(events
+        .body_string()
+        .contains("\"durability\": \"required\""));
+
+    let export = server.handle(&request(
+        Method::Get,
+        "/_authport/audit/export?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(export.status, 200);
+    assert!(export
+        .body_string()
+        .contains("\"kind\":\"identity.account_linked\""));
 }
 
 #[test]
@@ -520,7 +636,11 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     // A single-tenant contract does not ask the visitor to pick one.
     let single =
         AuthSurface::derive(&parse_auth_block("use auth { providers = [local] }").unwrap());
-    let html = render_sign_in(&single, &PasswordPolicy::default(), &["default".to_string()]);
+    let html = render_sign_in(
+        &single,
+        &PasswordPolicy::default(),
+        &["default".to_string()],
+    );
     assert!(!html.contains("<select name=\"tenant\""));
     assert!(html.contains("name=\"tenant\" id=\"tenant\" value=\"default\""));
 }
@@ -530,8 +650,8 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
     let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
     let original = ["Original", "Credential", "!1"].concat();
     let compliant = ["Compliant", "Credential", "!2"].concat();
-    let directory = LocalConnector::new()
-        .with_account(LocalAccount::new("alice", original.clone()));
+    let directory =
+        LocalConnector::new().with_account(LocalAccount::new("alice", original.clone()));
     let registry = ConnectorRegistry::from_config_with(&config, vec![Arc::new(directory)]).unwrap();
     let stores = MemoryStores::new();
     stores
@@ -544,8 +664,13 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
         })
         .unwrap();
     let runtime = Arc::new(
-        AuthPortRuntime::new(config, registry, stores.mesh_stores(), BindingMode::Standalone)
-            .unwrap(),
+        AuthPortRuntime::new(
+            config,
+            registry,
+            stores.mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
     );
     let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
 
@@ -586,7 +711,9 @@ fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
 
     let signup = server.handle(&request(Method::Get, "/auth/signup", &[], ""));
     assert!(signup.body_string().contains("At least 16 characters"));
-    assert!(signup.body_string().contains("Contains a special character"));
+    assert!(signup
+        .body_string()
+        .contains("Contains a special character"));
     assert!(signup.body_string().contains("/_authport/password-policy"));
 
     let rejected = server.handle(&request(

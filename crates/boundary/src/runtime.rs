@@ -7,7 +7,7 @@ use appport_auth_mesh_authz::{
     ResourceAttributes, ResourceRef, ResourceResolver,
 };
 use appport_auth_mesh_contract::{
-    AgentRun, Capability, ExecutionCredentialId, PrincipalId, PrincipalKind, RunId,
+    AgentRun, Capability, ExecutionCredentialId, PrincipalId, PrincipalKind, RunId, TenantContext,
 };
 use appport_auth_mesh_dsl::AuthConfig;
 use appport_auth_mesh_dsl::PasswordPolicy;
@@ -17,6 +17,7 @@ use appport_auth_mesh_providers::{
 use appport_auth_mesh_runtime::{
     AuthError, AuthLifecycleStage, AuthMesh, MeshStores, Registration, RunCreationRequest,
 };
+use appport_auth_mesh_storage::{AuditEvent, StorageTopology};
 use appport_auth_mesh_surface::{AuthSurface, ProviderSurface};
 
 use crate::boundary::{AuthBoundary, Requirement};
@@ -205,6 +206,23 @@ impl AuthPortRuntime {
         &self.mesh
     }
 
+    pub fn storage_topology(&self) -> StorageTopology {
+        StorageTopology::from_declaration(
+            &self.contract.storage.authority,
+            &self.contract.storage.audit,
+            &self.contract.storage.reporting,
+        )
+    }
+
+    pub fn audit_events(
+        &self,
+        tenant: &TenantContext,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, AuthError> {
+        self.mesh.audit_events(tenant, since, limit)
+    }
+
     pub fn now(&self) -> i64 {
         self.clock.now()
     }
@@ -319,7 +337,11 @@ impl AuthPortRuntime {
         let now = self.now();
         let tenant_id = self.required_field(request, "tenant")?;
         let connector = self.required_field(request, "connector")?;
-        let connector_impl = self.mesh.registry().get(&connector).map_err(to_auth_error)?;
+        let connector_impl = self
+            .mesh
+            .registry()
+            .get(&connector)
+            .map_err(to_auth_error)?;
         if connector_impl.supports_password_management() {
             let password = self.required_field(request, "password")?;
             self.validate_password(&password)?;
@@ -366,7 +388,11 @@ impl AuthPortRuntime {
         let current_password = self.required_field(request, "current_password")?;
         let new_password = self.required_field(request, "new_password")?;
         self.validate_password_with(&new_password, &policy)?;
-        let connector = self.mesh.registry().get(&connector_id).map_err(to_auth_error)?;
+        let connector = self
+            .mesh
+            .registry()
+            .get(&connector_id)
+            .map_err(to_auth_error)?;
         connector
             .change_password(
                 &tenant_id,
@@ -395,7 +421,11 @@ impl AuthPortRuntime {
             .required_field(request, "new_password")
             .or_else(|_| self.required_field(request, "password"))?;
         self.validate_password_with(&new_password, &policy)?;
-        let connector = self.mesh.registry().get(&connector_id).map_err(to_auth_error)?;
+        let connector = self
+            .mesh
+            .registry()
+            .get(&connector_id)
+            .map_err(to_auth_error)?;
         connector
             .reset_password(&tenant_id, &username, &new_password, &policy, self.now())
             .map_err(to_auth_error)
@@ -432,10 +462,16 @@ impl AuthPortRuntime {
         policy: &PasswordPolicy,
     ) -> Result<(), AuthError> {
         if password.chars().count() < policy.min_length {
-            return Err(password_error("PASSWORD_TOO_SHORT", DenialReason::PasswordTooShort));
+            return Err(password_error(
+                "PASSWORD_TOO_SHORT",
+                DenialReason::PasswordTooShort,
+            ));
         }
         if password.chars().count() > policy.max_length {
-            return Err(password_error("PASSWORD_TOO_LONG", DenialReason::PasswordTooLong));
+            return Err(password_error(
+                "PASSWORD_TOO_LONG",
+                DenialReason::PasswordTooLong,
+            ));
         }
         if policy.require_uppercase && !password.chars().any(|ch| ch.is_ascii_uppercase()) {
             return Err(password_error(
@@ -485,7 +521,10 @@ impl AuthPortRuntime {
             return Ok(());
         };
         if now.saturating_sub(changed_at) > i64::from(days) * 86_400 {
-            return Err(password_error("PASSWORD_EXPIRED", DenialReason::PasswordExpired));
+            return Err(password_error(
+                "PASSWORD_EXPIRED",
+                DenialReason::PasswordExpired,
+            ));
         }
         Ok(())
     }
