@@ -10,7 +10,7 @@ use appport_auth_mesh_authz::{
 use appport_auth_mesh_authz::{Action, Condition, Effect, ResourceSelector, Rule};
 use appport_auth_mesh_contract::{
     AgentState, AuditEventId, Capability, ClaimValue, Claims, Delegation, DelegationId, Principal,
-    PrincipalId, PrincipalKind, SessionId, TenantContext, TenantId,
+    PrincipalId, PrincipalKind, ResourceScope, SessionId, TenantContext, TenantId,
 };
 use appport_auth_mesh_dsl::{stable_hash, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -117,8 +117,9 @@ pub struct DelegationRequest {
     pub delegator: PrincipalId,
     pub delegate: PrincipalId,
     pub capabilities: Vec<Capability>,
+    pub resource_scope: ResourceScope,
     pub issued_at: i64,
-    pub expires_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 /// One entry in the authority audit trail.
@@ -498,8 +499,12 @@ impl AuthMesh {
         if request.capabilities.is_empty() {
             return Err(delegation_error("delegation must be capability-scoped"));
         }
-        if request.expires_at <= request.issued_at || request.expires_at <= now {
-            return Err(delegation_error("delegation must be time-bound"));
+        if request
+            .expires_at
+            .map(|expires_at| expires_at <= request.issued_at || expires_at <= now)
+            .unwrap_or(false)
+        {
+            return Err(delegation_error("delegation expires before it can be used"));
         }
 
         let delegator = self.principal(&tenant, &request.delegator)?;
@@ -511,15 +516,18 @@ impl AuthMesh {
         self.assert_principal_is_usable(&delegate)?;
 
         let policy = self.policy(&tenant)?;
-        let delegator_envelope = evaluate_with_delegations(&policy, &delegator, &tenant, &[], now)
-            .map_err(|err| {
-                AuthError::new(
-                    AuthLifecycleStage::PolicyEvaluation,
-                    err.message,
-                    DenialReason::PolicyNotFound,
-                )
-            })?;
+        let delegator_delegations = self.delegations_for(&tenant, &delegator.id)?;
+        let delegator_envelope =
+            evaluate_with_delegations(&policy, &delegator, &tenant, &delegator_delegations, now)
+                .map_err(|err| {
+                    AuthError::new(
+                        AuthLifecycleStage::PolicyEvaluation,
+                        err.message,
+                        DenialReason::PolicyNotFound,
+                    )
+                })?;
 
+        let mut chain = Vec::new();
         for capability in &request.capabilities {
             if !delegator_envelope.allows(capability) {
                 return Err(AuthError::new(
@@ -528,8 +536,36 @@ impl AuthMesh {
                         "delegator `{}` does not hold `{}`",
                         request.delegator, capability
                     ),
-                    DenialReason::CapabilityNotGranted,
+                    DenialReason::DelegationExceedsAuthority,
                 ));
+            }
+            if delegator.kind == PrincipalKind::Agent {
+                let parent = delegator_delegations
+                    .iter()
+                    .find(|delegation| {
+                        delegation.is_valid_at(now) && delegation.capabilities.contains(capability)
+                    })
+                    .ok_or_else(|| {
+                        AuthError::new(
+                            AuthLifecycleStage::DelegationManagement,
+                            format!(
+                                "delegator `{}` does not hold `{}`",
+                                request.delegator, capability
+                            ),
+                            DenialReason::DelegationExceedsAuthority,
+                        )
+                    })?;
+                if !request.resource_scope.is_subset_of(&parent.resource_scope) {
+                    return Err(AuthError::new(
+                        AuthLifecycleStage::DelegationManagement,
+                        "delegation scope must narrow the delegator's authority",
+                        DenialReason::DelegationScopeDenied,
+                    ));
+                }
+                if chain.is_empty() {
+                    chain = parent.chain.clone();
+                    chain.push(parent.id.clone());
+                }
             }
         }
 
@@ -542,9 +578,11 @@ impl AuthMesh {
                 delegate: request.delegate,
                 tenant_id: tenant.tenant_id.clone(),
                 capabilities: request.capabilities,
+                resource_scope: request.resource_scope,
                 issued_at: request.issued_at,
                 expires_at: request.expires_at,
                 revoked_at: None,
+                chain,
             })
             .map_err(|err| {
                 AuthError::new(
@@ -624,6 +662,15 @@ impl AuthMesh {
         now: i64,
     ) -> Result<(), AuthError> {
         self.set_agent_state(tenant_id, agent, AgentState::Revoked, now)
+    }
+
+    pub fn retire_agent(
+        &self,
+        tenant_id: &str,
+        agent: &PrincipalId,
+        now: i64,
+    ) -> Result<(), AuthError> {
+        self.set_agent_state(tenant_id, agent, AgentState::Retired, now)
     }
 
     fn set_agent_state(
@@ -1231,6 +1278,8 @@ fn decision_evidence(
             matched_rules: matched_rules.clone(),
             conditions: conditions.clone(),
             authority: Some(grant.authority),
+            delegated_by: grant.delegated_by.clone(),
+            delegation_chain: grant.delegation_chain.clone(),
             authority_revision,
             contract_fingerprint,
             decision: AuthorizationOutcome::Allow,
@@ -1263,6 +1312,8 @@ fn decision_evidence(
             matched_rules: matched_rules.clone(),
             conditions: conditions.clone(),
             authority: None,
+            delegated_by: None,
+            delegation_chain: Vec::new(),
             authority_revision,
             contract_fingerprint,
             decision: AuthorizationOutcome::Deny,

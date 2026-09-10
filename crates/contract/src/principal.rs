@@ -1,4 +1,4 @@
-use crate::{Claims, ContractVersion, PrincipalId, TenantId};
+use crate::{AgentCredentialId, AgentId, Claims, ContractVersion, PrincipalId, TenantId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -14,6 +14,42 @@ pub enum AgentState {
     Suspended,
     Revoked,
     Retired,
+}
+
+pub type AgentStatus = AgentState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    pub id: AgentId,
+    pub principal_id: PrincipalId,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub status: AgentStatus,
+    pub created_by: PrincipalId,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCredential {
+    pub id: AgentCredentialId,
+    pub agent: PrincipalId,
+    pub tenant_id: TenantId,
+    pub secret_hash: String,
+    pub created_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+impl AgentCredential {
+    pub fn is_valid_at(&self, agent: &Principal, now: i64) -> bool {
+        agent.kind == PrincipalKind::Agent
+            && agent.tenant_id == self.tenant_id
+            && agent.id == self.agent
+            && agent.agent_state == Some(AgentState::Active)
+            && self
+                .revoked_at
+                .map(|revoked_at| now < revoked_at)
+                .unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

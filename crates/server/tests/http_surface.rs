@@ -14,8 +14,8 @@ use appport_auth_mesh_boundary::{
     RESERVED_HEADER_PREFIX,
 };
 use appport_auth_mesh_contract::{
-    Capability, ClaimValue, Claims, ContractVersion, Principal, PrincipalId, PrincipalKind,
-    TenantContext,
+    AgentState, Capability, ClaimValue, Claims, ContractVersion, Principal, PrincipalId,
+    PrincipalKind, TenantContext,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
@@ -24,7 +24,7 @@ use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, H
 use appport_auth_mesh_server::{
     render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy, RouterApp,
 };
-use appport_auth_mesh_storage::TenantRootStore;
+use appport_auth_mesh_storage::{PrincipalStore, TenantRootStore};
 use appport_auth_mesh_surface::{AuthSurface, BoundarySurface};
 
 fn request(method: Method, target: &str, headers: &[(&str, &str)], body: &str) -> HttpRequest {
@@ -164,6 +164,71 @@ fn denials_carry_a_status_and_a_reason() {
         .headers
         .iter()
         .any(|(_, value)| value.contains("Max-Age=0")));
+}
+
+#[test]
+fn control_plane_lists_shows_and_creates_agents() {
+    let config =
+        parse_auth_block("use auth { providers = [local] tenant = true agents = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let stores = MemoryStores::new();
+    let tenant = TenantContext {
+        tenant_id: "acme".into(),
+        namespace: "acme".to_string(),
+        policy_id: "acme-policy".into(),
+        storage_root_id: "acme-root".into(),
+    };
+    stores.tenants.put_tenant(tenant.clone()).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            stores.mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    stores
+        .principals
+        .put_principal(Principal::agent(
+            PrincipalId("agent:invoice".to_string()),
+            tenant.tenant_id.clone(),
+            Claims {
+                values: HashMap::new(),
+            },
+            ContractVersion { major: 1, minor: 0 },
+            AgentState::Active,
+        ))
+        .unwrap();
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+
+    let listed = server.handle(&request(
+        Method::Get,
+        "/_authport/agents?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(listed.status, 200);
+    assert!(listed.body_string().contains("\"id\": \"agent:invoice\""));
+    assert!(listed.body_string().contains("\"status\": \"active\""));
+
+    let shown = server.handle(&request(
+        Method::Get,
+        "/_authport/agents/agent:invoice?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(shown.status, 200);
+    assert!(shown.body_string().contains("\"kind\": \"agent\""));
+
+    let created = server.handle(&request(
+        Method::Post,
+        "/_authport/agents",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"name\":\"reports\",\"id\":\"agent:reports\"}",
+    ));
+    assert_eq!(created.status, 200);
+    assert!(created.body_string().contains("\"id\": \"agent:reports\""));
 }
 
 #[test]

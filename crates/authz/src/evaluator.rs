@@ -1,5 +1,6 @@
 use appport_auth_mesh_contract::{
-    AgentState, Capability, Delegation, Principal, PrincipalKind, TenantContext,
+    AgentState, Capability, ClaimValue, Delegation, Principal, PrincipalKind, ResourceScope,
+    TenantContext,
 };
 
 use crate::policy::{
@@ -72,6 +73,7 @@ pub fn evaluate_with_delegations(
                 authority: AuthorityBasis::Claim,
                 claim_basis: claim_basis(&rule.condition),
                 delegation_id: None,
+                delegation_chain: Vec::new(),
                 delegated_by: None,
             });
         }
@@ -118,8 +120,15 @@ fn delegated_grant(
         authority: AuthorityBasis::Delegated,
         claim_basis: vec![format!("delegation:{}", delegation.delegator)],
         delegation_id: Some(delegation.id.clone()),
+        delegation_chain: delegation_chain(delegation),
         delegated_by: Some(delegation.delegator.clone()),
     }
+}
+
+fn delegation_chain(delegation: &Delegation) -> Vec<appport_auth_mesh_contract::DelegationId> {
+    let mut chain = delegation.chain.clone();
+    chain.push(delegation.id.clone());
+    chain
 }
 
 pub fn evaluate_capability(
@@ -174,6 +183,7 @@ pub fn evaluate_capability(
                     authority: AuthorityBasis::Claim,
                     claim_basis: claim_basis(&rule.condition),
                     delegation_id: None,
+                    delegation_chain: Vec::new(),
                     delegated_by: None,
                 },
                 None,
@@ -187,7 +197,7 @@ pub fn evaluate_capability(
     if principal.kind == PrincipalKind::Agent {
         let delegation = match delegation {
             Some(delegation) => delegation,
-            None => return deny(DenialReason::CapabilityNotGranted),
+            None => return deny(DenialReason::DelegationMissing),
         };
         if delegation.tenant_id != tenant.tenant_id || delegation.delegate != principal.id {
             return deny(DenialReason::InvalidDelegation);
@@ -199,7 +209,7 @@ pub fn evaluate_capability(
             return deny(DenialReason::ExpiredDelegation);
         }
         if !delegation.capabilities.iter().any(|c| c == capability) {
-            return deny(DenialReason::CapabilityNotGranted);
+            return deny(DenialReason::DelegationMissing);
         }
         return allow(
             delegated_grant(policy, principal, tenant, delegation, capability),
@@ -316,6 +326,7 @@ pub fn evaluate_authorization_request(
                 authority: AuthorityBasis::Claim,
                 claim_basis: claim_basis(&rule.condition),
                 delegation_id: None,
+                delegation_chain: Vec::new(),
                 delegated_by: None,
             },
             request.resource.clone(),
@@ -328,7 +339,7 @@ pub fn evaluate_authorization_request(
     if principal.kind == PrincipalKind::Agent {
         let delegation = match delegation {
             Some(delegation) => delegation,
-            None => return deny_for(request, DenialReason::CapabilityNotGranted, Some(policy)),
+            None => return deny_for(request, DenialReason::DelegationMissing, Some(policy)),
         };
         if delegation.tenant_id != tenant.tenant_id || delegation.delegate != principal.id {
             return deny_for(request, DenialReason::InvalidDelegation, Some(policy));
@@ -344,7 +355,10 @@ pub fn evaluate_authorization_request(
             .iter()
             .any(|capability| capability == &request.capability)
         {
-            return deny_for(request, DenialReason::CapabilityNotGranted, Some(policy));
+            return deny_for(request, DenialReason::DelegationMissing, Some(policy));
+        }
+        if !delegation_scope_matches(&delegation.resource_scope, request, resource_attributes) {
+            return deny_for(request, DenialReason::DelegationScopeDenied, Some(policy));
         }
         return allow(
             delegated_grant(policy, principal, tenant, delegation, &request.capability),
@@ -420,6 +434,42 @@ fn allow(
         matched_rules,
         conditions,
         audit_event_id: None,
+    }
+}
+
+fn delegation_scope_matches(
+    scope: &ResourceScope,
+    request: &AuthorizationRequest,
+    resource_attributes: Option<&ResourceAttributes>,
+) -> bool {
+    if scope.is_unconstrained() {
+        return true;
+    }
+    let Some(resource) = &request.resource else {
+        return false;
+    };
+    if let Some(resource_type) = &scope.resource_type {
+        if resource_type != &resource.resource_type {
+            return false;
+        }
+    }
+    if let Some(resource_id) = &scope.resource_id {
+        if resource_id != "*" && resource_id != &resource.resource_id {
+            return false;
+        }
+    }
+    scope.attributes.iter().all(|(key, expected)| {
+        if key == "tenant" || key == "tenant_id" {
+            return matches_tenant(expected, &resource.tenant_id.0);
+        }
+        resource_attributes.and_then(|attributes| attributes.values.get(key)) == Some(expected)
+    })
+}
+
+fn matches_tenant(value: &ClaimValue, tenant_id: &str) -> bool {
+    match value {
+        ClaimValue::Enum(value) | ClaimValue::String(value) => value == tenant_id,
+        _ => false,
     }
 }
 

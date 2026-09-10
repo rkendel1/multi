@@ -14,6 +14,8 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("approve") => approve(&args[1..]),
         Some("apply") => apply(&args[1..]),
         Some("reject") => reject(&args[1..]),
+        Some("agents") => agents(&args[1..]),
+        Some("agent") => agent(&args[1..]),
         Some("policies") => policies(&args[1..]),
         Some("policy") => policy(&args[1..]),
         Some("explain") => explain(&args[1..]),
@@ -195,6 +197,64 @@ fn reject(args: &[String]) -> Result<Output, CliError> {
     Ok(Output {
         text: format!("reject response from {}\n{}\n", server, response),
     })
+}
+
+fn agents(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let tenant =
+        option_value(args, "--tenant").ok_or_else(|| error("agents needs --tenant TENANT"))?;
+    let response = http_get(
+        &server,
+        &format!("/_authport/agents?tenant={}", escape_path(&tenant)),
+    )?;
+    Ok(Output {
+        text: format!("agents from {}\n{}\n", server, response),
+    })
+}
+
+fn agent(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    match filtered.first().map(String::as_str) {
+        Some("create") => {
+            let tenant = option_value(&filtered, "--tenant")
+                .ok_or_else(|| error("agent create needs --tenant TENANT"))?;
+            let name = option_value(&filtered, "--name")
+                .ok_or_else(|| error("agent create needs --name NAME"))?;
+            let id = option_value(&filtered, "--id")
+                .map(|id| format!(", \"id\": \"{}\"", escape(&id)))
+                .unwrap_or_default();
+            let body = format!(
+                "{{\"tenant\": \"{}\", \"name\": \"{}\"{}}}",
+                escape(&tenant),
+                escape(&name),
+                id
+            );
+            let response = http_post(&server, "/_authport/agents", &body)?;
+            Ok(Output {
+                text: format!("agent create response from {}\n{}\n", server, response),
+            })
+        }
+        Some("show") => {
+            let id = filtered
+                .get(1)
+                .ok_or_else(|| error("agent show needs an id"))?;
+            let tenant = option_value(&filtered, "--tenant")
+                .ok_or_else(|| error("agent show needs --tenant TENANT"))?;
+            let response = http_get(
+                &server,
+                &format!(
+                    "/_authport/agents/{}?tenant={}",
+                    escape_path(id),
+                    escape_path(&tenant)
+                ),
+            )?;
+            Ok(Output {
+                text: format!("agent {} from {}\n{}\n", id, server, response),
+            })
+        }
+        _ => Err(error("agent command supports `create` and `show ID`")),
+    }
 }
 
 fn policies(args: &[String]) -> Result<Output, CliError> {
@@ -511,6 +571,10 @@ fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn escape_path(value: &str) -> String {
+    value.replace(' ', "%20")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +623,18 @@ mod tests {
             explain_path(&strings(&["evt_1"])),
             "/_authport/authorization/decisions/evt_1/explain".to_string()
         );
+    }
+
+    #[test]
+    fn agent_commands_validate_required_arguments_before_network_io() {
+        assert!(agent(&strings(&["create", "--tenant", "acme"]))
+            .unwrap_err()
+            .message
+            .contains("--name"));
+        assert!(agent(&strings(&["show", "agent:invoice"]))
+            .unwrap_err()
+            .message
+            .contains("--tenant"));
+        assert_eq!(escape_path("invoice agent"), "invoice%20agent");
     }
 }

@@ -137,7 +137,7 @@ impl DelegationContext {
         &self.delegation.id
     }
 
-    pub fn expires_at(&self) -> i64 {
+    pub fn expires_at(&self) -> Option<i64> {
         self.delegation.expires_at
     }
 }

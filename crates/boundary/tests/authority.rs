@@ -304,7 +304,7 @@ fn a_capability_requirement_is_decided_by_the_policy_engine() {
             .enforce(&request, &Requirement::capability("invoice.read"))
             .unwrap_err()
             .denial,
-        DenialReason::CapabilityNotGranted
+        DenialReason::ConditionFailed
     );
     // ... and the session is still perfectly valid.
     assert!(runtime

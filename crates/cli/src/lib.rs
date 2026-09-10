@@ -37,6 +37,9 @@ USAGE:
     authport approve [--proposal-id ID|--all] [--server URL] --yes
     authport apply [--proposal-id ID|--all] [--server URL] --yes
     authport reject [--proposal-id ID] [--reason TEXT] [--server URL]
+    authport agents [--tenant TENANT] [--server URL]
+    authport agent create --tenant TENANT --name NAME [--id ID] [--server URL]
+    authport agent show ID --tenant TENANT [--server URL]
     authport policies [--server URL]
     authport policy show ID [--server URL]
     authport explain [DECISION_ID] [--server URL]
@@ -93,7 +96,17 @@ where
     let args: Vec<String> = args.into_iter().collect();
     if matches!(
         args.first().map(String::as_str),
-        Some("connect" | "approve" | "apply" | "reject" | "policies" | "policy" | "explain")
+        Some(
+            "connect"
+                | "approve"
+                | "apply"
+                | "reject"
+                | "agents"
+                | "agent"
+                | "policies"
+                | "policy"
+                | "explain",
+        )
     ) || is_control_propose(&args)
     {
         return control::run(&args);
