@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use appport_auth_mesh_dsl::PasswordPolicy;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
+use rand_core::OsRng;
 
 use crate::catalog;
 use crate::connector::{
-    challenge_state, stable_hash, AuthChallenge, AuthConnector, AuthRequest, AuthResponse,
-    ChallengeKind, ConnectorError, ConnectorMetadata, ExternalIdentity,
+    challenge_state, AuthChallenge, AuthConnector, AuthRequest, AuthResponse, ChallengeKind,
+    ConnectorError, ConnectorMetadata, ExternalIdentity,
 };
 
 /// The one connector with real behaviour in this revision.
@@ -14,7 +20,7 @@ use crate::connector::{
 /// hash, not a password-storage scheme; a production credential connector
 /// belongs behind the same trait with real key derivation.
 pub struct LocalConnector {
-    accounts: BTreeMap<String, LocalAccount>,
+    accounts: Mutex<BTreeMap<String, LocalAccount>>,
 }
 
 impl Default for LocalConnector {
@@ -28,28 +34,40 @@ impl LocalConnector {
 
     pub fn new() -> Self {
         Self {
-            accounts: BTreeMap::new(),
+            accounts: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub fn with_account(mut self, account: LocalAccount) -> Self {
-        self.accounts.insert(account.username.clone(), account);
+        self.accounts
+            .get_mut()
+            .expect("local account mutex should not be poisoned")
+            .insert(account.username.clone(), account);
         self
     }
 
     pub fn register(&mut self, account: LocalAccount) -> Result<(), ConnectorError> {
-        if self.accounts.contains_key(&account.username) {
+        let accounts = self
+            .accounts
+            .get_mut()
+            .map_err(|_| ConnectorError::PasswordHashingFailed {
+                connector: Self::ID.to_string(),
+            })?;
+        if accounts.contains_key(&account.username) {
             return Err(ConnectorError::InvalidRequest {
                 connector: Self::ID.to_string(),
                 message: format!("account `{}` already exists", account.username),
             });
         }
-        self.accounts.insert(account.username.clone(), account);
+        accounts.insert(account.username.clone(), account);
         Ok(())
     }
 
     pub fn usernames(&self) -> Vec<String> {
-        self.accounts.keys().cloned().collect()
+        self.accounts
+            .lock()
+            .map(|accounts| accounts.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn invalid_credentials() -> ConnectorError {
@@ -126,34 +144,94 @@ impl AuthConnector for LocalConnector {
             });
         }
 
-        let account = self
+        let accounts = self
             .accounts
+            .lock()
+            .map_err(|_| ConnectorError::PasswordHashingFailed {
+                connector: Self::ID.to_string(),
+            })?;
+        let account = accounts
             .get(username)
             .ok_or_else(Self::invalid_credentials)?;
-        if account.digest != LocalAccount::digest(username, password) {
+        if !account.verify_password(password) {
             return Err(Self::invalid_credentials());
         }
 
         let mut identity = ExternalIdentity::new(Self::ID, username);
         identity.attributes = account.attributes.clone();
+        identity.attributes.insert(
+            "password_changed_at".to_string(),
+            account.password_changed_at.to_string(),
+        );
         Ok(identity)
+    }
+
+    fn supports_password_management(&self) -> bool {
+        true
+    }
+
+    fn change_password(
+        &self,
+        _tenant_id: &str,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        now: i64,
+    ) -> Result<(), ConnectorError> {
+        let mut accounts = self.accounts.lock().map_err(|_| {
+            ConnectorError::PasswordHashingFailed {
+                connector: Self::ID.to_string(),
+            }
+        })?;
+        let account = accounts
+            .get_mut(username)
+            .ok_or_else(Self::invalid_credentials)?;
+        if !account.verify_password(current_password) {
+            return Err(Self::invalid_credentials());
+        }
+        account.set_password(new_password, policy, now)
+    }
+
+    fn reset_password(
+        &self,
+        _tenant_id: &str,
+        username: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        now: i64,
+    ) -> Result<(), ConnectorError> {
+        let mut accounts = self.accounts.lock().map_err(|_| {
+            ConnectorError::PasswordHashingFailed {
+                connector: Self::ID.to_string(),
+            }
+        })?;
+        let account = accounts
+            .get_mut(username)
+            .ok_or_else(Self::invalid_credentials)?;
+        account.set_password(new_password, policy, now)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalAccount {
     pub username: String,
-    digest: u64,
+    password_hash: String,
+    password_history: Vec<String>,
+    password_changed_at: i64,
     pub attributes: BTreeMap<String, String>,
 }
 
 impl LocalAccount {
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         let username = username.into();
-        let digest = Self::digest(&username, &password.into());
+        let password_hash = Self::hash_password(&password.into())
+            .expect("argon2 password hashing should work for local test accounts");
         Self {
             username,
-            digest,
+            password_hash,
+            password_history: Vec::new(),
+            password_changed_at: 0,
             attributes: BTreeMap::new(),
         }
     }
@@ -163,7 +241,55 @@ impl LocalAccount {
         self
     }
 
-    fn digest(username: &str, password: &str) -> u64 {
-        stable_hash(format!("authport|local|{}|{}", username, password).as_bytes())
+    fn verify_password(&self, password: &str) -> bool {
+        PasswordHash::new(&self.password_hash)
+            .ok()
+            .and_then(|hash| Argon2::default().verify_password(password.as_bytes(), &hash).ok())
+            .is_some()
+    }
+
+    fn set_password(
+        &mut self,
+        password: &str,
+        policy: &PasswordPolicy,
+        now: i64,
+    ) -> Result<(), ConnectorError> {
+        if self.matches_current_or_history(password, policy.password_history_count) {
+            return Err(ConnectorError::PasswordReused {
+                connector: LocalConnector::ID.to_string(),
+            });
+        }
+        let previous = std::mem::replace(
+            &mut self.password_hash,
+            Self::hash_password(password).map_err(|_| ConnectorError::PasswordHashingFailed {
+                connector: LocalConnector::ID.to_string(),
+            })?,
+        );
+        self.password_history.insert(0, previous);
+        self.password_history.truncate(policy.password_history_count);
+        self.password_changed_at = now;
+        Ok(())
+    }
+
+    fn matches_current_or_history(&self, password: &str, history_count: usize) -> bool {
+        std::iter::once(&self.password_hash)
+            .chain(self.password_history.iter().take(history_count))
+            .any(|hash| {
+                PasswordHash::new(hash)
+                    .ok()
+                    .and_then(|parsed| {
+                        Argon2::default()
+                            .verify_password(password.as_bytes(), &parsed)
+                            .ok()
+                    })
+                    .is_some()
+            })
+    }
+
+    fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
     }
 }

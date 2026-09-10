@@ -10,8 +10,9 @@ use appport_auth_mesh_contract::{
     AgentRun, Capability, ExecutionCredentialId, PrincipalId, PrincipalKind, RunId,
 };
 use appport_auth_mesh_dsl::AuthConfig;
+use appport_auth_mesh_dsl::PasswordPolicy;
 use appport_auth_mesh_providers::{
-    AuthChallenge, AuthRequest, AuthResponse, ChallengeKind, ConnectorRegistry,
+    AuthChallenge, AuthRequest, AuthResponse, ChallengeKind, ConnectorError, ConnectorRegistry,
 };
 use appport_auth_mesh_runtime::{
     AuthError, AuthLifecycleStage, AuthMesh, MeshStores, Registration, RunCreationRequest,
@@ -94,6 +95,14 @@ pub enum SignInOutcome {
     /// The connector needs the caller to go elsewhere first (an OAuth
     /// redirect, an emailed link). Nothing has been authenticated yet.
     Challenge(Box<AuthChallenge>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePasswordPolicy {
+    pub policy: PasswordPolicy,
+    pub authority_revision: u64,
+    pub contract_fingerprint: String,
+    pub policy_revision: u64,
 }
 
 /// The AuthPort runtime: the authoritative execution boundary.
@@ -205,6 +214,20 @@ impl AuthPortRuntime {
         &self.surface.providers
     }
 
+    pub fn effective_password_policy(&self) -> EffectivePasswordPolicy {
+        let authority = self.authority.read().unwrap();
+        let policy = authority
+            .password_policy
+            .clone()
+            .unwrap_or_else(|| self.contract.password_policy.clone());
+        EffectivePasswordPolicy {
+            policy_revision: authority.revision,
+            authority_revision: authority.revision,
+            contract_fingerprint: self.contract.fingerprint(),
+            policy,
+        }
+    }
+
     /// Resolve a request against what a route demands.
     ///
     /// This is the single enforcement path: an embedded middleware and the
@@ -269,6 +292,7 @@ impl AuthPortRuntime {
         response.parameters = parameters;
 
         let authenticated = self.mesh.sign_in(&tenant_id, &response, now)?;
+        self.ensure_password_not_expired(&authenticated.external, now)?;
         let context = AuthContext::new(authenticated.session, authenticated.context);
         let credential = context.credential();
         Ok(SignInOutcome::Authenticated {
@@ -295,6 +319,11 @@ impl AuthPortRuntime {
         let now = self.now();
         let tenant_id = self.required_field(request, "tenant")?;
         let connector = self.required_field(request, "connector")?;
+        let connector_impl = self.mesh.registry().get(&connector).map_err(to_auth_error)?;
+        if connector_impl.supports_password_management() {
+            let password = self.required_field(request, "password")?;
+            self.validate_password(&password)?;
+        }
 
         let parameters = connector_parameters(request);
         let mut auth_request = AuthRequest::new(connector).for_tenant(tenant_id.clone());
@@ -322,6 +351,56 @@ impl AuthPortRuntime {
         })
     }
 
+    pub fn change_password(&self, request: &BoundaryRequest) -> Result<(), AuthError> {
+        let policy = self.effective_password_policy().policy;
+        if !policy.allow_password_change {
+            return Err(AuthError::new(
+                AuthLifecycleStage::ProviderAuthentication,
+                "password changes are disabled",
+                DenialReason::PolicyDenied,
+            ));
+        }
+        let tenant_id = self.required_field(request, "tenant")?;
+        let connector_id = self.required_field(request, "connector")?;
+        let username = self.required_field(request, "username")?;
+        let current_password = self.required_field(request, "current_password")?;
+        let new_password = self.required_field(request, "new_password")?;
+        self.validate_password_with(&new_password, &policy)?;
+        let connector = self.mesh.registry().get(&connector_id).map_err(to_auth_error)?;
+        connector
+            .change_password(
+                &tenant_id,
+                &username,
+                &current_password,
+                &new_password,
+                &policy,
+                self.now(),
+            )
+            .map_err(to_auth_error)
+    }
+
+    pub fn reset_password(&self, request: &BoundaryRequest) -> Result<(), AuthError> {
+        let policy = self.effective_password_policy().policy;
+        if !policy.allow_password_reset {
+            return Err(AuthError::new(
+                AuthLifecycleStage::ProviderAuthentication,
+                "password resets are disabled",
+                DenialReason::PolicyDenied,
+            ));
+        }
+        let tenant_id = self.required_field(request, "tenant")?;
+        let connector_id = self.required_field(request, "connector")?;
+        let username = self.required_field(request, "username")?;
+        let new_password = self
+            .required_field(request, "new_password")
+            .or_else(|_| self.required_field(request, "password"))?;
+        self.validate_password_with(&new_password, &policy)?;
+        let connector = self.mesh.registry().get(&connector_id).map_err(to_auth_error)?;
+        connector
+            .reset_password(&tenant_id, &username, &new_password, &policy, self.now())
+            .map_err(to_auth_error)
+    }
+
     /// End the session the request presented. Nothing else about the request
     /// decides whose session is ended.
     pub fn sign_out(&self, request: &BoundaryRequest) -> Result<(), AuthError> {
@@ -341,6 +420,74 @@ impl AuthPortRuntime {
                 DenialReason::MissingCredential,
             )
         })
+    }
+
+    fn validate_password(&self, password: &str) -> Result<(), AuthError> {
+        self.validate_password_with(password, &self.effective_password_policy().policy)
+    }
+
+    fn validate_password_with(
+        &self,
+        password: &str,
+        policy: &PasswordPolicy,
+    ) -> Result<(), AuthError> {
+        if password.chars().count() < policy.min_length {
+            return Err(password_error("PASSWORD_TOO_SHORT", DenialReason::PasswordTooShort));
+        }
+        if password.chars().count() > policy.max_length {
+            return Err(password_error("PASSWORD_TOO_LONG", DenialReason::PasswordTooLong));
+        }
+        if policy.require_uppercase && !password.chars().any(|ch| ch.is_ascii_uppercase()) {
+            return Err(password_error(
+                "PASSWORD_MISSING_UPPERCASE",
+                DenialReason::PasswordMissingUppercase,
+            ));
+        }
+        if policy.require_lowercase && !password.chars().any(|ch| ch.is_ascii_lowercase()) {
+            return Err(password_error(
+                "PASSWORD_MISSING_LOWERCASE",
+                DenialReason::PasswordMissingLowercase,
+            ));
+        }
+        if policy.require_number && !password.chars().any(|ch| ch.is_ascii_digit()) {
+            return Err(password_error(
+                "PASSWORD_MISSING_NUMBER",
+                DenialReason::PasswordMissingNumber,
+            ));
+        }
+        if policy.require_special_character
+            && !password
+                .chars()
+                .any(|ch| !ch.is_ascii_alphanumeric() && !ch.is_whitespace())
+        {
+            return Err(password_error(
+                "PASSWORD_MISSING_SPECIAL_CHARACTER",
+                DenialReason::PasswordMissingSpecialCharacter,
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_password_not_expired(
+        &self,
+        external: &appport_auth_mesh_providers::ExternalIdentity,
+        now: i64,
+    ) -> Result<(), AuthError> {
+        let policy = self.effective_password_policy().policy;
+        let Some(days) = policy.password_expiration_days else {
+            return Ok(());
+        };
+        let Some(changed_at) = external
+            .attributes
+            .get("password_changed_at")
+            .and_then(|value| value.parse::<i64>().ok())
+        else {
+            return Ok(());
+        };
+        if now.saturating_sub(changed_at) > i64::from(days) * 86_400 {
+            return Err(password_error("PASSWORD_EXPIRED", DenialReason::PasswordExpired));
+        }
+        Ok(())
     }
 
     /// Get the current live authority state
@@ -678,6 +825,35 @@ impl AuthPortRuntime {
             .map(|p| p.enabled)
             .unwrap_or(true) // Providers default to enabled if not explicitly disabled
     }
+}
+
+fn password_error(message: &str, denial: DenialReason) -> AuthError {
+    AuthError::new(
+        AuthLifecycleStage::ProviderAuthentication,
+        message.to_string(),
+        denial,
+    )
+}
+
+fn to_auth_error(err: ConnectorError) -> AuthError {
+    let denial = match err {
+        ConnectorError::PasswordReused { .. } => DenialReason::PasswordReused,
+        ConnectorError::UnknownConnector { .. } | ConnectorError::Unsupported { .. } => {
+            DenialReason::UnsupportedConnector
+        }
+        ConnectorError::InvalidCredentials { .. } | ConnectorError::ChallengeMismatch { .. } => {
+            DenialReason::MissingCredential
+        }
+        ConnectorError::NotDeclared { .. }
+        | ConnectorError::DuplicateConnector { .. }
+        | ConnectorError::InvalidRequest { .. }
+        | ConnectorError::PasswordHashingFailed { .. } => DenialReason::PolicyDenied,
+    };
+    AuthError::new(
+        AuthLifecycleStage::ProviderAuthentication,
+        err.to_string(),
+        denial,
+    )
 }
 
 impl AuthBoundary for AuthPortRuntime {

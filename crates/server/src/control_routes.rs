@@ -17,6 +17,7 @@ use appport_auth_mesh_discovery::{
     ExistingAuthPort, ProposalHistoryItem, ProposalReviewStatus, RecommendationAction,
     ReconciliationResult,
 };
+use appport_auth_mesh_dsl::PasswordPolicy;
 use appport_auth_mesh_runtime::{DelegationRequest, RunCreationRequest};
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,6 +42,9 @@ pub fn handle_control_route(
             Some(authority_reconciliation(runtime, app))
         }
         ("GET", "/_authport/authority-drift") => Some(authority_drift(runtime, app)),
+        ("GET", "/_authport/password-policy") => {
+            Some(HttpResponse::ok_json(password_policy_json(runtime)))
+        }
         _ if method == "POST"
             && path.starts_with("/_authport/authority-proposal/")
             && path.ends_with("/approve") =>
@@ -498,6 +502,68 @@ fn policies(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     ]);
 
     HttpResponse::ok_json(json)
+}
+
+pub fn password_policy_json(runtime: &std::sync::Arc<AuthPortRuntime>) -> JsonValue {
+    let effective = runtime.effective_password_policy();
+    let policy = effective.policy;
+    JsonValue::Object(vec![
+        (
+            "min_length".to_string(),
+            JsonValue::Number(policy.min_length as f64),
+        ),
+        (
+            "max_length".to_string(),
+            JsonValue::Number(policy.max_length as f64),
+        ),
+        (
+            "require_uppercase".to_string(),
+            JsonValue::Bool(policy.require_uppercase),
+        ),
+        (
+            "require_lowercase".to_string(),
+            JsonValue::Bool(policy.require_lowercase),
+        ),
+        (
+            "require_number".to_string(),
+            JsonValue::Bool(policy.require_number),
+        ),
+        (
+            "require_special_character".to_string(),
+            JsonValue::Bool(policy.require_special_character),
+        ),
+        (
+            "expiration_days".to_string(),
+            policy
+                .password_expiration_days
+                .map(|days| JsonValue::Number(days as f64))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "history_count".to_string(),
+            JsonValue::Number(policy.password_history_count as f64),
+        ),
+        (
+            "allow_password_change".to_string(),
+            JsonValue::Bool(policy.allow_password_change),
+        ),
+        (
+            "allow_password_reset".to_string(),
+            JsonValue::Bool(policy.allow_password_reset),
+        ),
+        (
+            "authority_revision".to_string(),
+            JsonValue::Number(effective.authority_revision as f64),
+        ),
+        (
+            "contract_fingerprint".to_string(),
+            JsonValue::String(effective.contract_fingerprint),
+        ),
+        (
+            "policy_revision".to_string(),
+            JsonValue::Number(effective.policy_revision as f64),
+        ),
+    ])
 }
 
 fn policy(runtime: &std::sync::Arc<AuthPortRuntime>, path: &str) -> HttpResponse {
@@ -1889,11 +1955,71 @@ fn parse_authority_change(request: &HttpRequest) -> Result<AuthorityChange, Stri
             body_str.contains("\"enabled\": true") || body_str.contains("enable_provider");
 
         Ok(AuthorityChange::SetProviderEnabled { provider, enabled })
+    } else if body_str.contains("password_policy") || body_str.contains("set_password_policy") {
+        Ok(AuthorityChange::SetPasswordPolicy {
+            policy: password_policy_from_body(&body_str)?,
+        })
     } else if body_str.contains("revert") {
         let change_id = extract_quoted_field(&body_str, "change_id").ok_or("missing change_id")?;
         Ok(AuthorityChange::Revert { change_id })
     } else {
         Err("unknown action".to_string())
+    }
+}
+
+fn password_policy_from_body(body: &str) -> Result<PasswordPolicy, String> {
+    let mut policy = PasswordPolicy::default();
+    if let Some(value) = extract_number_field(body, "min_length") {
+        policy.min_length = usize::try_from(value).map_err(|_| "invalid min_length")?;
+    }
+    if let Some(value) = extract_number_field(body, "max_length") {
+        policy.max_length = usize::try_from(value).map_err(|_| "invalid max_length")?;
+    }
+    if let Some(value) = extract_bool_field(body, "require_uppercase") {
+        policy.require_uppercase = value;
+    }
+    if let Some(value) = extract_bool_field(body, "require_lowercase") {
+        policy.require_lowercase = value;
+    }
+    if let Some(value) = extract_bool_field(body, "require_number") {
+        policy.require_number = value;
+    }
+    if let Some(value) = extract_bool_field(body, "require_special_character") {
+        policy.require_special_character = value;
+    }
+    if body.contains("\"expiration_days\": null") || body.contains("\"password_expiration_days\": null") {
+        policy.password_expiration_days = None;
+    } else if let Some(value) = extract_number_field(body, "expiration_days")
+        .or_else(|| extract_number_field(body, "password_expiration_days"))
+    {
+        policy.password_expiration_days =
+            Some(u32::try_from(value).map_err(|_| "invalid expiration_days")?);
+    }
+    if let Some(value) =
+        extract_number_field(body, "history_count").or_else(|| extract_number_field(body, "password_history_count"))
+    {
+        policy.password_history_count = usize::try_from(value).map_err(|_| "invalid history_count")?;
+    }
+    if let Some(value) = extract_bool_field(body, "allow_password_change") {
+        policy.allow_password_change = value;
+    }
+    if let Some(value) = extract_bool_field(body, "allow_password_reset") {
+        policy.allow_password_reset = value;
+    }
+    policy.validate().map_err(|err| err.message)?;
+    Ok(policy)
+}
+
+fn extract_bool_field(json: &str, field: &str) -> Option<bool> {
+    let pattern = format!("\"{}\":", field);
+    let start = json.find(&pattern)? + pattern.len();
+    let rest = json[start..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -2155,6 +2281,14 @@ fn preview_state_to_json(state: &appport_auth_mesh_boundary::control::PreviewSta
                     .collect(),
             ),
         ),
+        (
+            "password_policy".to_string(),
+            state
+                .password_policy
+                .as_ref()
+                .map(password_policy_json_value)
+                .unwrap_or(JsonValue::Null),
+        ),
     ])
 }
 
@@ -2236,6 +2370,13 @@ fn change_to_json(change: &AuthorityChange) -> JsonValue {
             ("provider".to_string(), JsonValue::String(provider.clone())),
             ("enabled".to_string(), JsonValue::Bool(*enabled)),
         ]),
+        AuthorityChange::SetPasswordPolicy { policy } => JsonValue::Object(vec![
+            (
+                "type".to_string(),
+                JsonValue::String("set_password_policy".to_string()),
+            ),
+            ("policy".to_string(), password_policy_json_value(policy)),
+        ]),
         AuthorityChange::Revert { change_id } => JsonValue::Object(vec![
             ("type".to_string(), JsonValue::String("revert".to_string())),
             (
@@ -2244,6 +2385,46 @@ fn change_to_json(change: &AuthorityChange) -> JsonValue {
             ),
         ]),
     }
+}
+
+fn password_policy_json_value(policy: &PasswordPolicy) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "min_length".to_string(),
+            JsonValue::Number(policy.min_length as f64),
+        ),
+        (
+            "max_length".to_string(),
+            JsonValue::Number(policy.max_length as f64),
+        ),
+        (
+            "require_uppercase".to_string(),
+            JsonValue::Bool(policy.require_uppercase),
+        ),
+        (
+            "require_lowercase".to_string(),
+            JsonValue::Bool(policy.require_lowercase),
+        ),
+        (
+            "require_number".to_string(),
+            JsonValue::Bool(policy.require_number),
+        ),
+        (
+            "require_special_character".to_string(),
+            JsonValue::Bool(policy.require_special_character),
+        ),
+        (
+            "expiration_days".to_string(),
+            policy
+                .password_expiration_days
+                .map(|days| JsonValue::Number(days as f64))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "history_count".to_string(),
+            JsonValue::Number(policy.password_history_count as f64),
+        ),
+    ])
 }
 
 fn extract_quoted_field(json: &str, field: &str) -> Option<String> {

@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 appport-auth-mesh-dsl = { path = "../dsl" }
+argon2 = "0.5.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }

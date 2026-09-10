@@ -18,7 +18,8 @@ use appport_auth_mesh_contract::{
     PrincipalId, PrincipalKind, ResourceScope, TenantContext,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
-use appport_auth_mesh_providers::ConnectorRegistry;
+use appport_auth_mesh_dsl::PasswordPolicy;
+use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{DelegationRequest, MemoryStores, RuntimeContext};
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
@@ -496,7 +497,11 @@ fn the_generated_ui_offers_only_connectors_that_work() {
         &parse_auth_block("use auth { providers = [local, google] tenant = true }").unwrap(),
     );
 
-    let html = render_sign_in(&surface, &["acme".to_string(), "globex".to_string()]);
+    let html = render_sign_in(
+        &surface,
+        &PasswordPolicy::default(),
+        &["acme".to_string(), "globex".to_string()],
+    );
 
     // The one provider that can authenticate is offered...
     assert!(html.contains("<option value=\"local\">Local Directory</option>"));
@@ -515,9 +520,98 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     // A single-tenant contract does not ask the visitor to pick one.
     let single =
         AuthSurface::derive(&parse_auth_block("use auth { providers = [local] }").unwrap());
-    let html = render_sign_in(&single, &["default".to_string()]);
+    let html = render_sign_in(&single, &PasswordPolicy::default(), &["default".to_string()]);
     assert!(!html.contains("<select name=\"tenant\""));
     assert!(html.contains("name=\"tenant\" id=\"tenant\" value=\"default\""));
+}
+
+#[test]
+fn password_policy_is_live_authority_for_api_ui_and_password_operations() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let directory = LocalConnector::new()
+        .with_account(LocalAccount::new("alice", "OriginalPassword!1"));
+    let registry = ConnectorRegistry::from_config_with(&config, vec![Arc::new(directory)]).unwrap();
+    let stores = MemoryStores::new();
+    stores
+        .tenants
+        .put_tenant(TenantContext {
+            tenant_id: "acme".into(),
+            namespace: "acme".to_string(),
+            policy_id: "acme-policy".into(),
+            storage_root_id: "acme-root".into(),
+        })
+        .unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(config, registry, stores.mesh_stores(), BindingMode::Standalone)
+            .unwrap(),
+    );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(NoApp));
+
+    let defaults = server.handle(&request(Method::Get, "/_authport/password-policy", &[], ""));
+    assert_eq!(defaults.status, 200);
+    assert!(defaults.body_string().contains("\"min_length\": 12"));
+    assert!(defaults.body_string().contains("\"history_count\": 5"));
+
+    let proposed = server.handle(&request(
+        Method::Post,
+        "/_authport/propose",
+        &[("content-type", "application/json")],
+        "{\"type\":\"set_password_policy\",\"min_length\":16,\"require_special_character\":true,\"expiration_days\":90,\"history_count\":5}",
+    ));
+    assert_eq!(proposed.status, 200);
+    let proposal_id = json_string_field(&proposed.body_string(), "proposal_id").unwrap();
+    let approved = server.handle(&request(
+        Method::Post,
+        "/_authport/approve",
+        &[("content-type", "application/json")],
+        &format!("{{\"proposal_id\":\"{}\"}}", proposal_id),
+    ));
+    assert_eq!(approved.status, 200);
+    let applied = server.handle(&request(
+        Method::Post,
+        "/_authport/apply",
+        &[("content-type", "application/json")],
+        &format!("{{\"proposal_id\":\"{}\"}}", proposal_id),
+    ));
+    assert_eq!(applied.status, 200);
+
+    let live = server.handle(&request(Method::Get, "/_authport/password-policy", &[], ""));
+    let live_body = live.body_string();
+    assert!(live_body.contains("\"min_length\": 16"));
+    assert!(live_body.contains("\"require_special_character\": true"));
+    assert!(live_body.contains("\"expiration_days\": 90"));
+    assert!(live_body.contains("\"authority_revision\": 1"));
+
+    let signup = server.handle(&request(Method::Get, "/auth/signup", &[], ""));
+    assert!(signup.body_string().contains("At least 16 characters"));
+    assert!(signup.body_string().contains("Contains a special character"));
+    assert!(signup.body_string().contains("/_authport/password-policy"));
+
+    let rejected = server.handle(&request(
+        Method::Post,
+        "/auth/password/change",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"OriginalPassword!1\",\"new_password\":\"short\"}",
+    ));
+    assert_eq!(rejected.status, 403);
+    assert!(rejected.body_string().contains("PASSWORD_TOO_SHORT"));
+
+    let changed = server.handle(&request(
+        Method::Post,
+        "/auth/password/change",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"OriginalPassword!1\",\"new_password\":\"CompliantPassword!2\"}",
+    ));
+    assert_eq!(changed.status, 200);
+
+    let reused = server.handle(&request(
+        Method::Post,
+        "/auth/password/change",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\",\"connector\":\"local\",\"username\":\"alice\",\"current_password\":\"CompliantPassword!2\",\"new_password\":\"OriginalPassword!1\"}",
+    ));
+    assert_eq!(reused.status, 403);
+    assert!(reused.body_string().contains("PASSWORD_REUSED"));
 }
 
 #[test]

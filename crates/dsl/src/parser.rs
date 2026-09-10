@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::model::{
     AuthConfig, AuthUiConfig, AuthUiMode, ClaimDef, ClaimKind, IsolationMode, PolicyClaimCondition,
-    PolicyDef, UiScreen, UiScreenOverride, UiTheme,
+    PasswordPolicy, PolicyDef, UiScreen, UiScreenOverride, UiTheme,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +88,7 @@ pub fn parse_auth_block(src: &str) -> Result<AuthConfig, AuthDslError> {
             "isolation" => config.isolation = parse_isolation(expect_scalar(&key, &value)?)?,
             "claims" => config.claims = parse_claims(&value)?,
             "policy" => config.policies = parse_policies(&value)?,
+            "password" | "password_policy" => config.password_policy = parse_password(&value)?,
             "agents" => config.agents = expect_bool(&key, &value)?,
             "ui" => config.ui = parse_ui(&value)?,
             _ => return Err(AuthDslError::new(format!("unknown auth field `{}`", key))),
@@ -435,6 +436,7 @@ fn parse_policies(value: &Value) -> Result<Vec<PolicyDef>, AuthDslError> {
                     if tenant != "current" {
                         return Err(AuthDslError::new("policy tenant must be `current`"));
                     }
+
                     policy.tenant_current = true;
                 }
                 "resource" => policy.resource = Some(expect_scalar(key, value)?.to_string()),
@@ -461,6 +463,61 @@ fn parse_policies(value: &Value) -> Result<Vec<PolicyDef>, AuthDslError> {
         policies.push(policy);
     }
     Ok(policies)
+}
+
+fn parse_password(value: &Value) -> Result<PasswordPolicy, AuthDslError> {
+    let entries = match value {
+        Value::Block(entries) => entries,
+        _ => return Err(AuthDslError::new("password must be a `{ ... }` block")),
+    };
+    let mut policy = PasswordPolicy::default();
+    let mut seen = HashSet::new();
+    for (key, value) in entries {
+        if !seen.insert(key.clone()) {
+            return Err(AuthDslError::new(format!(
+                "duplicate password field `{}`",
+                key
+            )));
+        }
+        match key.as_str() {
+            "min_length" => policy.min_length = expect_usize(key, value)?,
+            "max_length" => policy.max_length = expect_usize(key, value)?,
+            "require_uppercase" => policy.require_uppercase = expect_bool(key, value)?,
+            "require_lowercase" => policy.require_lowercase = expect_bool(key, value)?,
+            "require_number" => policy.require_number = expect_bool(key, value)?,
+            "require_special_character" => policy.require_special_character = expect_bool(key, value)?,
+            "expiration_days" | "password_expiration_days" => {
+                policy.password_expiration_days = expect_optional_u32(key, value)?
+            }
+            "history_count" | "password_history_count" => {
+                policy.password_history_count = expect_usize(key, value)?
+            }
+            "allow_password_change" => policy.allow_password_change = expect_bool(key, value)?,
+            "allow_password_reset" => policy.allow_password_reset = expect_bool(key, value)?,
+            _ => return Err(AuthDslError::new(format!("unknown password field `{}`", key))),
+        }
+    }
+    policy
+        .validate()
+        .map_err(|err| AuthDslError::new(err.message))?;
+    Ok(policy)
+}
+
+fn expect_usize(key: &str, value: &Value) -> Result<usize, AuthDslError> {
+    expect_scalar(key, value)?
+        .parse()
+        .map_err(|_| AuthDslError::new(format!("{} must be a non-negative integer", key)))
+}
+
+fn expect_optional_u32(key: &str, value: &Value) -> Result<Option<u32>, AuthDslError> {
+    let scalar = expect_scalar(key, value)?;
+    if scalar == "null" {
+        return Ok(None);
+    }
+    scalar
+        .parse()
+        .map(Some)
+        .map_err(|_| AuthDslError::new(format!("{} must be an integer or null", key)))
 }
 
 fn parse_ui(value: &Value) -> Result<AuthUiConfig, AuthDslError> {
@@ -566,6 +623,36 @@ use auth {
         assert_eq!(update.action.as_deref(), Some("update"));
         assert_eq!(update.claims[0].claim, "role");
         assert_eq!(update.claims[0].values, vec!["owner", "admin"]);
+    }
+
+    #[test]
+    fn parses_password_policy_with_modern_defaults() {
+        let defaulted = parse_auth_block("use auth { providers = [local] }").unwrap();
+        assert_eq!(defaulted.password_policy, PasswordPolicy::default());
+
+        let parsed = parse_auth_block(
+            r#"
+use auth {
+  providers = [local]
+  password {
+    min_length = 16
+    max_length = 128
+    require_number = true
+    require_special_character = true
+    expiration_days = 90
+    history_count = 7
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.password_policy.min_length, 16);
+        assert!(parsed.password_policy.require_number);
+        assert!(parsed.password_policy.require_special_character);
+        assert_eq!(parsed.password_policy.password_expiration_days, Some(90));
+        assert_eq!(parsed.password_policy.password_history_count, 7);
+        assert!(parsed.password_policy.allow_password_change);
     }
 
     #[test]

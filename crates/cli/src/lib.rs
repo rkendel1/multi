@@ -28,6 +28,9 @@ USAGE:
     authport fingerprint [FILE]
     authport routes [FILE]
     authport providers [FILE]
+    authport password-policy [FILE] [--json]
+    authport password-policy --server URL [--json]
+    authport password-policy propose [options] [--server URL] [--dry-run]
     authport serve [FILE] [options]
     authport connect [--server URL] [--output-token]
     authport propose [FILE] [--json]
@@ -96,6 +99,11 @@ where
     I: IntoIterator<Item = String>,
 {
     let args: Vec<String> = args.into_iter().collect();
+    if args.first().map(String::as_str) == Some("password-policy")
+        && (args.get(1).map(String::as_str) == Some("propose") || args.iter().any(|arg| arg == "--server"))
+    {
+        return control::run(&args);
+    }
     if matches!(
         args.first().map(String::as_str),
         Some(
@@ -327,11 +335,66 @@ where
             out
         }
         "providers" => describe_providers(&config)?,
+        "password-policy" => {
+            if args.iter().any(|arg| arg == "--server") {
+                return control::run(&args);
+            }
+            if args.get(1).map(String::as_str) == Some("propose") {
+                return control::run(&args);
+            }
+            describe_password_policy(&config, json)
+        }
         "serve" => return run_server(config, &serve_options),
         other => return Err(error(format!("unknown command `{}`\n\n{}", other, USAGE))),
     };
 
     Ok(Output { text })
+}
+
+fn describe_password_policy(config: &AuthConfig, json: bool) -> String {
+    let policy = &config.password_policy;
+    if json {
+        return format!(
+            "{{\"min_length\": {}, \"max_length\": {}, \"require_uppercase\": {}, \"require_lowercase\": {}, \"require_number\": {}, \"require_special_character\": {}, \"expiration_days\": {}, \"history_count\": {}, \"allow_password_change\": {}, \"allow_password_reset\": {}, \"contract_fingerprint\": \"{}\", \"policy_revision\": \"{}\"}}\n",
+            policy.min_length,
+            policy.max_length,
+            policy.require_uppercase,
+            policy.require_lowercase,
+            policy.require_number,
+            policy.require_special_character,
+            policy
+                .password_expiration_days
+                .map(|days| days.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            policy.password_history_count,
+            policy.allow_password_change,
+            policy.allow_password_reset,
+            config.fingerprint(),
+            policy.revision_fingerprint()
+        );
+    }
+    format!(
+        "Password Policy\n  Minimum length       {}\n  Maximum length       {}\n  Uppercase            {}\n  Lowercase            {}\n  Number               {}\n  Special character    {}\n  Password expiration  {}\n  Password history     {} passwords\n",
+        policy.min_length,
+        policy.max_length,
+        required(policy.require_uppercase),
+        required(policy.require_lowercase),
+        required(policy.require_number),
+        required(policy.require_special_character),
+        policy
+            .password_expiration_days
+            .map(|days| format!("{} days", days))
+            .unwrap_or_else(|| "Disabled".to_string()),
+        policy.password_history_count
+    )
+}
+
+fn required(value: bool) -> &'static str {
+    if value {
+        "Required"
+    } else {
+        "Not required"
+    }
 }
 
 fn local_reconciliation(
