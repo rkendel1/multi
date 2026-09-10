@@ -152,7 +152,17 @@ impl ApplicationBinding for UpstreamProxy {
         // own vocabulary, plus the context the boundary derived.
         for (name, value) in &request.headers {
             if name.starts_with(RESERVED_HEADER_PREFIX)
-                || matches!(name.as_str(), "content-length" | "connection" | "host")
+                || matches!(
+                    name.as_str(),
+                    "content-length"
+                        | "connection"
+                        | "host"
+                        | "if-none-match"
+                        | "if-modified-since"
+                        | "if-match"
+                        | "if-unmodified-since"
+                        | "if-range"
+                )
             {
                 continue;
             }
@@ -168,7 +178,20 @@ impl ApplicationBinding for UpstreamProxy {
         }
 
         match send_upstream(&self.upstream, &forwarded) {
-            Ok(response) => response,
+            Ok(mut response) => {
+                if request.path.starts_with("/src/")
+                    || request.path.starts_with("/@vite/")
+                    || request.path.starts_with("/node_modules/")
+                {
+                    response.headers.retain(|(name, _)| {
+                        !matches!(name.as_str(), "etag" | "last-modified" | "cache-control")
+                    });
+                    response
+                        .headers
+                        .push(("cache-control".to_string(), "no-store".to_string()));
+                }
+                response
+            }
             Err(err) => HttpResponse::denied(502, "upstream_unavailable", &err.message),
         }
     }
