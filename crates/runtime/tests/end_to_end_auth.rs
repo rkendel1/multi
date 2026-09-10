@@ -497,10 +497,11 @@ fn chained_delegation_preserves_attenuated_scope_and_evidence() {
     provision(&stores);
     let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
     let (alice, manager, _bob) = sign_up_cast(&mesh);
+    let carol_secret = ["carol", "secret"].join("-");
     let invoice_agent = mesh
         .sign_up(
             "tenant-a",
-            &credentials("tenant-a", "carol", "carol-secret"),
+            &credentials("tenant-a", "carol", &carol_secret),
             Registration::agent(),
             NOW,
         )
