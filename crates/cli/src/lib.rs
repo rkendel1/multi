@@ -10,6 +10,7 @@ use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_surface::{render_json_with, render_text, AuthSurface};
 
 pub mod control;
+pub mod init;
 pub mod serve;
 
 pub const USAGE: &str = "\
@@ -17,6 +18,8 @@ authport — the AuthPort authority boundary
 
 USAGE:
     authport inspect [FILE] [--json] [--mode embedded|standalone]
+    authport init [PATH] [--dry-run] [--json] [--yes] [--standalone]
+    authport verify [PATH] [--json]
     authport fingerprint [FILE]
     authport routes [FILE]
     authport providers [FILE]
@@ -80,6 +83,12 @@ where
         Some("connect" | "propose" | "apply")
     ) {
         return control::run(&args);
+    }
+    if matches!(args.first().map(String::as_str), Some("init")) {
+        return init::run(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("verify")) {
+        return init::verify(&args[1..]);
     }
     let mut command = None;
     let mut file: Option<PathBuf> = None;
@@ -180,19 +189,28 @@ where
             config.fingerprint(),
             AuthSurface::derive(&config).fingerprint()
         ),
-        "routes" => AuthSurface::derive(&config)
-            .routes
-            .iter()
-            .map(|route| {
+        "routes" => {
+            let mut out = String::from("METHOD             PATH                  AUTHORITY\n");
+            for route in &AuthSurface::derive(&config).routes {
                 let methods = route
                     .methods
                     .iter()
                     .map(|method| method.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{:<18} {}\n", methods, route.path)
-            })
-            .collect(),
+                out.push_str(&format!("{:<18} {:<21} AuthPort\n", methods, route.path));
+            }
+            let root = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            if let Some(routes) = init::discovered_routes(root) {
+                for route in routes {
+                    out.push_str(&format!(
+                        "{:<18} {:<21} unprotected\n",
+                        route.method, route.path
+                    ));
+                }
+            }
+            out
+        }
         "providers" => describe_providers(&config)?,
         "serve" => return run_server(config, &serve_options),
         other => return Err(error(format!("unknown command `{}`\n\n{}", other, USAGE))),
