@@ -164,7 +164,7 @@ fn authority_proposal(
 ) -> HttpResponse {
     let application = ApplicationCandidate {
         root: std::path::PathBuf::new(),
-        name: Some("AuthPort".to_string()),
+        name: Some("AuthBoundry".to_string()),
         language: None,
         framework: None,
         package_manager: None,
@@ -241,7 +241,7 @@ fn reconciliation_result(
 fn live_application(app: &dyn ApplicationBinding) -> ApplicationCandidate {
     ApplicationCandidate {
         root: std::path::PathBuf::new(),
-        name: Some("AuthPort".to_string()),
+        name: Some("AuthBoundry".to_string()),
         language: None,
         framework: None,
         package_manager: None,
@@ -390,7 +390,7 @@ fn overview(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     let uptime = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
     let desc = ApplicationDescription {
-        name: "AuthPort".to_string(),
+        name: "AuthBoundry".to_string(),
         deployment_mode: runtime.mode().as_str().to_string(),
         contract_fingerprint: runtime.contract().fingerprint(),
         surface_fingerprint: AuthSurface::derive(runtime.contract()).fingerprint(),

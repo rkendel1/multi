@@ -1,5 +1,5 @@
 /**
- * The AuthPort client.
+ * The AuthBoundry client.
  *
  * This is a projection of server authority, never the security mechanism.
  * Everything it exposes was decided by the backend boundary; editing any of it
@@ -11,7 +11,7 @@
   if (typeof module === "object" && module.exports) {
     module.exports = api;
   } else {
-    root.AuthPort = api;
+    root.AuthBoundry = api;
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   const ANONYMOUS = Object.freeze({
@@ -24,12 +24,12 @@
     delegation: null,
   });
 
-  function createAuthPort(options) {
+  function createAuthBoundry(options) {
     const settings = options || {};
     const baseUrl = (settings.baseUrl || "").replace(/\/$/, "");
     const fetchImpl = settings.fetch || (typeof fetch !== "undefined" ? fetch : null);
     if (!fetchImpl) {
-      throw new Error("AuthPort: no fetch implementation available");
+      throw new Error("AuthBoundry: no fetch implementation available");
     }
 
     let state = { loading: true, auth: ANONYMOUS };
@@ -134,14 +134,14 @@
    * React binding, created against whichever React the host app already has,
    * so this file stays dependency-free and build-step-free.
    *
-   *   const { AuthPort, useAuth } = createAuthPortReact(React);
-   *   <AuthPort><App /></AuthPort>
+   *   const { AuthBoundry, useAuth } = createAuthBoundryReact(React);
+   *   <AuthBoundry><App /></AuthBoundry>
    */
-  function createAuthPortReact(React, options) {
-    const client = (options && options.client) || createAuthPort(options);
+  function createAuthBoundryReact(React, options) {
+    const client = (options && options.client) || createAuthBoundry(options);
     const Context = React.createContext(null);
 
-    function AuthPortProvider(props) {
+    function AuthBoundryProvider(props) {
       const [state, setState] = React.useState(client.state);
       React.useEffect(() => {
         const unsubscribe = client.subscribe(setState);
@@ -170,13 +170,13 @@
     function useAuth() {
       const value = React.useContext(Context);
       if (!value) {
-        throw new Error("useAuth() must be used inside <AuthPort>");
+        throw new Error("useAuth() must be used inside <AuthBoundry>");
       }
       return value;
     }
 
-    return { AuthPort: AuthPortProvider, useAuth, client };
+    return { AuthBoundry: AuthBoundryProvider, useAuth, client };
   }
 
-  return { createAuthPort, createAuthPortReact, ANONYMOUS };
+  return { createAuthBoundry, createAuthBoundryReact, ANONYMOUS };
 });

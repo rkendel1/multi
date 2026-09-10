@@ -1,2 +1,2 @@
-export { ANONYMOUS, createAuthPort } from "./client.js";
-export type { AuthPortClient, AuthPortOptions, AuthPortState, AuthProjection, Principal, Tenant, Session, Delegation } from "./client.js";
+export { ANONYMOUS, createAuthBoundry } from "./client.js";
+export type { AuthBoundryClient, AuthBoundryOptions, AuthBoundryState, AuthProjection, Principal, Tenant, Session, Delegation } from "./client.js";

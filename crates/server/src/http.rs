@@ -135,7 +135,7 @@ impl HttpRequest {
     /// Translate into the framework-neutral request the boundary consumes.
     ///
     /// Reserved headers are dropped here, so nothing a client sends can
-    /// impersonate the context AuthPort injects downstream.
+    /// impersonate the context AuthBoundry injects downstream.
     pub fn to_boundary(&self) -> BoundaryRequest {
         BoundaryRequest {
             method: self.method,

@@ -1,314 +1,260 @@
-# AuthPort
+# AuthBoundry
 
-AuthPort is the authority boundary for an application.
+The authority boundary for an application.
 
-Embed it when you own the application server. Run it in front of the application
-when you don't. Either way the application gets the same identity, tenancy,
-authorization, agent, delegation and session model — and the developer
-integrates AuthPort once.
+AuthBoundry turns identity, tenancy, authorization, delegation, sessions,
+humans, agents and services into one authoritative model. Use it inside an
+application you own, or place it in front of an application you cannot modify.
+Declare the authority model once. AuthBoundry derives and enforces the boundary.
+
+```text
+Browser -> AuthBoundry -> Application
+
+┌──────────────────────────────────┐
+│            AuthBoundry           │
+│ identity       tenancy           │
+│ claims         sessions          │
+│ delegation     capabilities      │
+│ authorization  agents      audit │
+└──────────────────────────────────┘
+                 |
+                 v
+            Application
+```
+
+Your application should not have to implement its own authority system.
+
+## Quick start
 
 ```sh
 npm install authboundry
-npx authport --help
+npx authboundry inspect app.auth
 ```
 
-```
+The first example is an authority declaration:
+
+```text
 use auth {
   providers = [google, github, email]
-
   tenant = true
-
   claims = {
     role = enum["owner", "admin", "member"]
     plan = enum["free", "pro"]
   }
-
   agents = true
 }
 ```
 
-From that declaration AuthPort derives the identity model, sessions, tenancy,
-authorization, the agent and delegation model, the HTTP surface and the default
-UI. The application never declares session tables, user tables, token storage,
-provider middleware, callback plumbing, authorization middleware, email delivery
-or tenant lookup.
+This declares the application's authority model. AuthBoundry derives its
+identity and tenant models, claims, sessions, delegation, agent principals,
+authorization and HTTP surfaces, client projection and default UI. A declared
+connector is available only when its implementation exists.
 
-Humans and agents are both first-class principals under one authority model. An
-agent is not a user with a special role.
-
-## The boundary
-
-```
-request
-  |
-  v
-credential -> AuthPort -> principal -> tenant -> claims
-                              |
-                        delegation -> capabilities -> authorization
-                                                          |
-                                                          v
-                                                application handler
+```text
+declare authority -> inspect authority -> run AuthBoundry -> connect application
 ```
 
-Everything a client sends is a hint. The authoritative principal, tenant,
-claims and capabilities are reconstructed from AuthPort's own state, which is
-why a browser cannot argue its way into authority:
+## Why an authority boundary?
 
-```
-client says:  principal = Alice, capability = billing.charge
-server says:  no
-```
+Applications traditionally assemble authority from an identity provider,
+session middleware, user, tenant and membership tables, roles, permission
+checks, service accounts, API keys, agent identities, delegation and audit.
+Authority becomes distributed throughout application code.
 
-The core interface is framework-neutral — no Axum, Express or FastAPI in the
-authority model:
+The application then answers: Who is this? Which tenant? Which permissions? Can
+this service or agent act? Who delegated the capability? Was it revoked?
+AuthBoundry moves those questions to one authoritative boundary. The application
+receives an already-derived authority context.
 
-```rust
-pub trait AuthBoundary {
-    fn authenticate(&self, request: &BoundaryRequest) -> Result<AuthContext, AuthError>;
-    fn authorize(&self, context: &AuthContext, capability: &str)
-        -> Result<AuthorizationDecision, AuthError>;
-}
-```
-
-## Storage, audit and reporting
-
-AuthPort owns the meaning and integrity of authority data, not the customer's
-database choice. The auth contract may name storage providers by capability:
-
-```rust
-use auth {
-  providers = [google, github, email]
-  storage {
-    authority = "feltdb"
-    audit = "feltdb"
-  }
-}
+```text
+request -> credential -> AuthBoundry
+                           |-> principal
+                           |-> tenant
+                           |-> claims
+                           |-> delegation
+                           |-> capabilities
+                           v
+                  authorization decision -> application
 ```
 
-Connection strings, credentials and database-specific deployment details stay
-outside the application authority contract. The storage boundary is split by
-semantics — identity, tenants, sessions, credentials, policies, delegations,
-agents, runs, audit and reporting — so deployments can place different classes
-of data in FeltDB, PostgreSQL, enterprise systems or customer-owned stores.
-FeltDB is the zero-setup default and reference native substrate; PostgreSQL is
-represented by the same storage conformance contract rather than a different
-authority model.
+Authentication answers “Who are you?” AuthBoundry answers who is acting, for
+which tenant, under whose delegation, with which capabilities, and whether the
+request is authorized. Identity providers are connectors into the boundary;
+they do not define the application's authority model.
 
-Audit is a durable, append-oriented authority stream, not application logging.
-Required authority/security audit failures fail closed, while external audit
-sinks and reporting projections are non-authoritative integrations. The control
-plane exposes storage and audit status without secrets:
-
-```
-GET /_authport/storage
-GET /_authport/storage/capabilities
-GET /_authport/audit
-GET /_authport/audit/events?tenant=acme
-GET /_authport/audit/export?tenant=acme
-GET /_authport/reporting
+```text
+Your application -> asks AuthBoundry -> “Is X authorized?”
+                         |
+                         v
+              AuthBoundry derives the answer -> handler
 ```
 
-`authport audit export --tenant acme` returns canonical JSON Lines suitable for
-enterprise export.
+Everything a client supplies is a hint. The boundary reconstructs authority
+from verified state rather than accepting client claims.
 
-`AuthContext` has no public constructor. Outside the boundary crate you can read
-one, never build one: it exists because AuthPort verified a request.
+## One authority model. Two boundaries.
 
-## Two placements, one model
-
-```
-AuthPort Runtime
-|
-+-- Embedded      bound to the application's server
-|
-+-- Standalone    owns the server; the application sits behind it
+```text
+Embedded                       Standalone
+Application Server             Browser
+       |                           |
+   AuthBoundry                  AuthBoundry
+       |                           |
+   Application              Existing Application
 ```
 
-Embedded — handlers run in the same process, and the boundary resolves authority
-before one is ever called:
+The placement changes. The authority model does not.
 
-```rust
-let server = AuthPortServer::new(
-    runtime,
-    Arc::new(
-        RouterApp::new()
-            .public(Method::Get, "/public", handler)
-            .authenticated(Method::Get, "/profile", handler)
-            .require(Method::Get, "/invoices", "invoice.read", handler)
-            .require(Method::Post, "/invoices", "invoice.create", handler),
-    ),
-);
+Embedded mode binds the boundary to an application-owned server. Standalone
+mode owns the socket, authenticates and authorizes requests, strips inbound
+`x-authport-*` authority headers, and forwards only explicitly governed routes.
+See [embedded](docs/deployment/embedded.md) and
+[standalone](docs/deployment/standalone.md) deployment.
+
+## Protect an application without rewriting it
+
+An existing application can remain unaware of providers, sessions, user
+databases, tenant resolution, authorization middleware, delegation and agent
+identity. AuthBoundry can establish the authority boundary in front of it.
+
+```text
+                  AuthBoundry
+                 /           \
+           authenticate    authorize
+                 \           /
+                  Existing App
 ```
 
-Standalone — AuthPort owns the socket, authenticates, and forwards the derived
-context to an application that implements no authentication at all:
-
-```
-Browser -> AuthPort -> Example Application
-```
-
-```
-authport serve --addr 127.0.0.1:8787 \
-  --tenant acme --account alice:secret:role=owner,plan=pro \
-  --grant invoice.read=role:owner \
+```sh
+npx authboundry serve app.auth \
+  --tenant acme --account alice:secret:role=owner@acme \
+  --grant invoice.create=role:owner \
   --upstream 127.0.0.1:9000 --public /health
 ```
 
-Inbound `x-authport-*` headers are stripped before the request is looked at, and
-a path with no route policy is refused rather than forwarded.
+The local account and in-memory storage mechanisms are development references.
 
-## The generated HTTP surface
+## Humans and agents are principals
 
-Derived from the contract, not hand-mounted:
+An agent is not a user with a special role. Humans, agents and services are
+first-class principals, and delegated execution is explicit.
 
+```text
+Human -> delegates -> Agent -> invokes -> Capability -> Application
+
+delegation granted -> agent authorized -> delegation revoked -> agent denied
+
+Alice
+  |-- invoice.read
+  |-- invoice.create
+  `-- delegates invoice.create -> Invoice Agent
+
+Invoice Agent
+  |-- invoice.create   ✓
+  `-- billing.charge   ✗
 ```
-POST   /auth/login      (also /auth/sign-in)     GET renders the default UI
-POST   /auth/signup                              closed unless the deployment opens it
-POST   /auth/logout     (also /auth/sign-out)
-GET    /auth/session                             the client projection
-GET    /auth/providers
-POST   /auth/authorize                           the server's answer, not the client's
-GET    /auth/tenant, /auth/tenants               when tenancy is declared
-GET    /auth/agents, /auth/delegations           when agents are declared
-```
 
-## The client
+Delegation cannot grant authority the delegating principal does not possess.
+Revocation removes delegated authority at the boundary.
 
-The browser side is a projection of server authority, never the security
-mechanism:
+## The client is a projection
+
+The browser client projects what the server decided. It cannot manufacture an
+authority context.
 
 ```js
-import { createAuthPort } from "authboundry";
+import { createAuthBoundry } from "authboundry";
 
-const authport = createAuthPort();
-const auth = await authport.session();
-await authport.authorize("invoice.create"); // asks the authority boundary
+const client = createAuthBoundry();
+const auth = await client.session();
+auth.principal; auth.tenant; auth.claims; auth.capabilities; auth.session;
+await client.authorize("invoice.create"); // asks the server
+client.can("invoice.create");             // UI rendering hint only
 ```
-
-The same client has an optional React adapter; React is supplied by the host
-application and is not installed as an AuthPort dependency:
 
 ```js
-import { createAuthPortReact } from "authboundry/react";
-
-const { AuthPort, useAuth } = createAuthPortReact(React);
-
-// <AuthPort><App /></AuthPort>
-
-const auth = useAuth();
-auth.principal;  auth.tenant;  auth.claims;  auth.capabilities;  auth.session;
-await auth.signIn({ tenant: "acme", connector: "local", username, password });
-await auth.authorize("invoice.create");   // asks the server
-auth.can("invoice.create");               // rendering hint only
+import { createAuthBoundryReact } from "authboundry/react";
+const { AuthBoundry, useAuth } = createAuthBoundryReact(React);
+// <AuthBoundry><App /></AuthBoundry>
 ```
 
-The `authboundry/client` entry point is dependency-free and build-step-free. The
-generated sign-in page and npm client speak the same server-derived HTTP
-contract; neither can establish authority independently.
+The server remains authoritative.
 
-## Inspecting a contract
+## The boundary is authoritative
 
-```
-$ authport inspect examples/saas_basic/appport.auth
+```text
+client:       principal=Alice tenant=acme capability=billing.charge
+AuthBoundry:  No.
 
-AuthPort · Auth
-────────────────────────
-
-Multi-tenant: yes
-Isolation: strict
-Contract: cd3a693ead706fb2
-Surface: 898d494c0619d131
-
-Providers:
-  ✓ local
-
-Claims:
-  billing: manager | none
-  plan: free | pro
-  role: admin | member | owner
-
-Principals:
-  human
-  agent
-  service
-
-Agents:
-  enabled
-
-Delegation:
-  enabled
-
-Runtime boundary:
-  contract: authport.boundary/v1
-  modes: embedded, standalone
-  session credential: cookie:authport_session
-
-Generated surfaces:
-  /auth/login  (also /auth/sign-in)
-  ...
+credential -> verified session -> principal -> tenant -> claims
+    -> delegation -> capabilities -> authorization
 ```
 
-`authport` also has `serve`, `fingerprint`, `routes`, `providers` and
-`inspect --json [--mode embedded|standalone]`. Semantically identical
-declarations produce the same canonical contract and the same fingerprint.
+AuthBoundry denies missing or invalid credentials; expired or revoked sessions;
+unknown or wrong tenants; revoked agents; expired or revoked delegations;
+ungranted capabilities; missing policies or claims; unsupported connectors;
+unknown route policies; and unauditable decisions. See the
+[security model](docs/security/model.md).
 
-## Crates
+## Storage and audit boundaries
 
-| Crate | Responsibility |
-| --- | --- |
-| `contract` | Principals, tenants, identities, claims, delegations, ids |
-| `dsl` | `use auth { ... }`, canonicalization, contract fingerprint |
-| `providers` | Connector contract, catalog and registry |
-| `surface` | `AuthSurface` derivation, inspection, UI and boundary contract |
-| `storage` | Storage boundary, tenant roots, identities, principals, sessions, delegations, runs, audit, reporting/export |
-| `authz` | Policy evaluation and capability provenance |
-| `runtime` | `AuthMesh`: authentication, resolution, sessions, delegation |
-| `boundary` | `AuthPortRuntime`, `AuthContext`, `AuthBoundary`, binding modes |
-| `server` | The HTTP surface, the embedded router, the standalone proxy, the UI |
-| `cli` | `authport` |
+AuthBoundry owns the semantics and integrity of authority state, not the
+physical database. Storage is replaceable; the authority model is not. Current
+code does not claim production-ready PostgreSQL or customer-system adapters.
 
-## Security posture
+```text
+application logs != AuthBoundry audit != reporting projection
+```
 
-Everything fails closed — missing credential, invalid, expired or revoked
-session, unknown tenant or principal, wrong tenant, revoked agent, expired or
-revoked delegation, ungranted capability, missing policy, missing claim,
-unsupported connector, a path with no route policy, and a decision that cannot
-be audited. There is no fallback authentication, no implicit tenant, no
-anonymous escalation, and no capability inferred from provider identity alone.
+Audit records what the authority boundary decided and why. Business data does
+not become the source of authority decisions.
 
-The full invariant list, with the tests that hold each one, is in
-[docs/architecture.md](docs/architecture.md).
+## What AuthBoundry is not
+
+AuthBoundry is not another login widget, an OAuth SDK, a user-table abstraction,
+role-checking middleware, a frontend authorization library, or an application
+gateway with authentication bolted on. Authentication is one input. The product
+is the authority boundary.
+
+If all you need is “sign in with Google,” AuthBoundry may be more infrastructure
+than you need. That is intentional.
+
+## The difference
+
+```text
+identity + sessions + users + tenants + roles + permissions + service accounts
+         + delegation + audit = application-owned authority system
+
+authority declaration -> AuthBoundry -> authoritative application context
+```
+
+AuthBoundry does not replace every identity provider or policy engine. It
+provides the boundary in which they become one application authority model.
+
+## AuthBoundry, AppPort and AppBoundry
+
+AppPort describes an application protocol/contract. AppBoundry is the related
+application platform/control-plane concept. AuthBoundry focuses specifically on
+application authority. They are complementary; this package adds no
+cross-product runtime dependency and does not claim to be an AppPort protocol.
 
 ## Production status
 
-Production OAuth (Google, GitHub, Microsoft, Apple), SAML, SCIM, MFA, passkeys,
-password reset, production email delivery, production key infrastructure,
-Postgres, Redis, distributed sessions, a polished component library, TLS
-termination and production proxy features. The local connector's credential
-digest, the session id source and the proxy's context signature are development
-mechanisms, documented as such in `docs/architecture.md`.
+This release does not provide production implementations for Google OAuth,
+GitHub OAuth, Microsoft, Apple, SAML, SCIM, MFA, passkeys, password reset,
+production email delivery, production key infrastructure, PostgreSQL, Redis,
+distributed sessions, a polished component library, TLS termination or
+production-grade proxy features. Local identity, storage, session-id and proxy
+signature mechanisms are for development. The packaged native CLI currently
+supports macOS on Apple silicon.
 
-Version 1.0.0 stabilizes the JavaScript projection and packaged CLI surface; it
-does not mean those integrations are production-ready. The packaged native CLI
-runtime currently supports macOS on Apple silicon. Other platforms can use the
-JavaScript client, but `npx authport` will report that no native runtime is
-packaged.
+## Development
 
-## Running
-
-```
-cargo test --workspace                 # 78 tests
-node --test clients/js/authport.test.js
-
-cargo run -p saas_basic                # both modes, side by side
-cargo run -p saas_basic -- serve       # standalone: browser -> AuthPort -> app
-cargo run -p saas_basic -- embedded    # AuthPort bound to the app's own server
-cargo run -p appport-auth-mesh-cli -- inspect examples/saas_basic/appport.auth
+```sh
+cargo test --workspace
+node --test clients/js/authboundry.test.js
+npm run verify:package
 ```
 
-`examples/saas_basic` is the reference application: Alice (owner, tenant A) can
-read and create invoices but cannot charge billing; she delegates invoice
-capabilities to an invoice agent that authenticates through the same boundary
-and cannot exceed them; Bob is isolated in tenant B; revoking the delegation,
-the agent or the session removes authority immediately. Its entire auth
-integration is one file.
+Read the [documentation index](docs/README.md) and
+[architecture invariants](docs/architecture.md).

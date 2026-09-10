@@ -594,7 +594,7 @@ fn http_post(server: &str, path: &str, body: &str) -> Result<String, CliError> {
 fn http_request(server: &str, method: &str, path: &str, body: &str) -> Result<String, CliError> {
     let (host, port) = parse_http_url(server)?;
     let mut stream = TcpStream::connect((host.as_str(), port))
-        .map_err(|err| error(format!("could not connect to AuthPort server: {}", err)))?;
+        .map_err(|err| error(format!("could not connect to AuthBoundry server: {}", err)))?;
     let request = format!(
         "{} {} HTTP/1.1\r\nhost: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         method,
@@ -619,7 +619,7 @@ fn http_request(server: &str, method: &str, path: &str, body: &str) -> Result<St
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| error("malformed response from AuthPort server"))?;
+        .ok_or_else(|| error("malformed response from AuthBoundry server"))?;
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -652,7 +652,7 @@ fn http_request(server: &str, method: &str, path: &str, body: &str) -> Result<St
     }
     let body = String::from_utf8_lossy(&body_bytes).to_string();
     if !(200..300).contains(&status) {
-        return Err(error(format!("AuthPort returned {}: {}", status, body)));
+        return Err(error(format!("AuthBoundry returned {}: {}", status, body)));
     }
     Ok(body)
 }
@@ -721,7 +721,7 @@ fn proposals_dir() -> Result<PathBuf, CliError> {
 
 fn authport_dir() -> Result<PathBuf, CliError> {
     let home = std::env::var("HOME").map_err(|_| error("HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".authport"))
+    Ok(PathBuf::from(home).join(".authboundry"))
 }
 
 fn extract_quoted_field(json: &str, field: &str) -> Option<String> {

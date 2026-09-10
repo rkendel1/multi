@@ -1,4 +1,4 @@
-//! Wiring AuthPort into the application — the whole of it.
+//! Wiring AuthBoundry into the application — the whole of it.
 //!
 //! A declaration, a directory of accounts, a policy, and the tenants the
 //! application serves. There is no authentication code below this file.

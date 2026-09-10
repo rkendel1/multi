@@ -3,7 +3,7 @@ use appport_auth_mesh_surface::AuthSurface;
 
 /// The client library, served to the browser. It is the same file the JS
 /// package ships, so there is one client implementation.
-pub const CLIENT_JS: &str = include_str!("../../../clients/js/authport.js");
+pub const CLIENT_JS: &str = include_str!("../../../clients/js/authboundry.js");
 
 /// The default sign-in page, generated from the auth contract.
 ///
@@ -81,7 +81,7 @@ pub fn render_sign_in(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · AuthPort</title>
+  <title>Sign in · AuthBoundry</title>
   <style>
     :root {{ color-scheme: light dark; }}
     body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center; min-height: 100vh; }}
@@ -102,7 +102,7 @@ pub fn render_sign_in(
 <body>
   <main>
     <h1>Sign in</h1>
-    <p class="sub">AuthPort · contract {fingerprint}</p>
+    <p class="sub">AuthBoundry · authority contract {fingerprint}</p>
     <form id="signin">
       {tenant_field}
       <label>Provider
@@ -129,9 +129,9 @@ pub fn render_sign_in(
     </ul>
     <pre id="status"></pre>
   </main>
-  <script src="/authport/client.js"></script>
+  <script src="/authboundry/client.js"></script>
   <script>
-    const auth = AuthPort.createAuthPort({{}});
+    const auth = AuthBoundry.createAuthBoundry({{}});
     const status = document.getElementById("status");
 
     auth.subscribe((state) => {{

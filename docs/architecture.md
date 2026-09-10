@@ -1,4 +1,12 @@
-# AuthPort architecture invariants
+# AuthBoundry architecture invariants
+
+AuthBoundry is the authority boundary for an application. Authentication is an
+input; the boundary derives the application authority context.
+
+```text
+request -> credential -> AuthBoundry -> principal -> tenant -> claims
+    -> delegation -> capabilities -> authorization decision -> application
+```
 
 These are the properties the system is built to hold. Each one names the tests
 that would fail if it stopped being true.
@@ -28,7 +36,7 @@ AuthConfig -> AuthMesh -> AuthPortRuntime -> AuthBoundary -> AuthContext
 
 Client state is never authoritative. A request contributes a credential; the
 principal, tenant, claims, capabilities and delegation are read back from
-AuthPort's own state.
+AuthBoundry's own state.
 
 - `AuthContext` has a private field and no public constructor: outside the
   boundary crate it cannot be built, only received.
@@ -58,7 +66,7 @@ inspection and the fingerprint. There is no second provider list.
 
 ## One identity model
 
-Connectors prove external identity. AuthPort owns application principals, and
+Connectors prove external identity. AuthBoundry owns application principals, and
 `(tenant, connector, external_subject)` resolves to exactly one of them.
 
 - `crates/runtime/tests/end_to_end_auth.rs::external_identities_resolve_deterministically_and_uniquely`.
@@ -80,7 +88,7 @@ resolution, claims resolution, authorization or delegation of its own.
 `examples/saas_basic` contains exactly one file of auth wiring (`bootstrap.rs`:
 the declaration, the account directory, the policy, the tenants). Handlers
 receive a context they did not assemble. In standalone mode the upstream
-application's only security rule is "refuse anything AuthPort did not vouch
+application's only security rule is "refuse anything AuthBoundry did not vouch
 for".
 
 ## Fail closed

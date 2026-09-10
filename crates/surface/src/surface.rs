@@ -1056,7 +1056,7 @@ pub struct BoundarySurface {
 }
 
 impl BoundarySurface {
-    pub const CONTRACT: &'static str = "authport.boundary/v1";
+    pub const CONTRACT: &'static str = "authboundry.boundary/v1";
     /// The cookie the boundary issues and reads. It is an opaque server-issued
     /// handle: nothing inside it is trusted without being re-verified.
     pub const SESSION_COOKIE: &'static str = "authport_session";

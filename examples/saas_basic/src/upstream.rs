@@ -1,11 +1,11 @@
 //! The application server, in standalone deployments.
 //!
 //! ```text
-//! Browser -> AuthPort -> this
+//! Browser -> AuthBoundry -> this
 //! ```
 //!
 //! It has no connectors, no sessions, no policy and no user table. It reads the
-//! context AuthPort injected and refuses anything that did not come through the
+//! context AuthBoundry injected and refuses anything that did not come through the
 //! boundary.
 
 use std::sync::Arc;
@@ -70,12 +70,12 @@ impl HttpHandler for UpstreamApp {
     }
 }
 
-/// The application's only security rule: if AuthPort did not vouch for this
+/// The application's only security rule: if AuthBoundry did not vouch for this
 /// request, it is not served.
 fn unauthenticated() -> HttpResponse {
     HttpResponse::denied(
         403,
         "no_authport_context",
-        "this application is only reachable through AuthPort",
+        "this application is only reachable through AuthBoundry",
     )
 }

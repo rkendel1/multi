@@ -8,9 +8,10 @@ use appport_auth_mesh_discovery::{
 use crate::{error, CliError, Output};
 
 const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n}\n";
-const MANIFEST_DIR: &str = ".authport";
-const MANIFEST_FILE: &str = ".authport/adoption.json";
+const MANIFEST_DIR: &str = ".authboundry";
+const MANIFEST_FILE: &str = ".authboundry/adoption.json";
 const DEFAULT_FILES: &[&str] = &[
+    "authboundry.toml",
     "authport.toml",
     "appport.auth",
     "appport.toml",
@@ -79,7 +80,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
     apply_plan(&plan)?;
     let verified = verify_root(&root)?;
     if !verified.ok {
-        return Err(error("AuthPort initialization verification failed"));
+        return Err(error("AuthBoundry initialization verification failed"));
     }
     Ok(Output {
         text: first_run_text(&plan, &verified),
@@ -221,7 +222,7 @@ fn node_dependency_change(
     let path = application.root.join("package.json");
     let before = fs::read_to_string(&path)
         .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
-    if before.contains("\"authport\"") {
+    if before.contains("\"authboundry\"") {
         return Ok(None);
     }
     Ok(Some(FileChange {
@@ -246,9 +247,9 @@ fn add_authport_dependency(package_json: &str) -> Result<String, CliError> {
             .ok_or_else(|| error("package.json dependencies field is not an object"))?;
         let inside = &package_json[object_start + 1..object_end];
         let insertion = if inside.trim().is_empty() {
-            "\"authport\":\"latest\"".to_string()
+            "\"authboundry\":\"latest\"".to_string()
         } else {
-            ",\"authport\":\"latest\"".to_string()
+            ",\"authboundry\":\"latest\"".to_string()
         };
         return Ok(format!(
             "{}{}{}",
@@ -268,7 +269,7 @@ fn add_authport_dependency(package_json: &str) -> Result<String, CliError> {
         ","
     };
     Ok(format!(
-        "{}{}\"dependencies\":{{\"authport\":\"latest\"}}{}",
+        "{}{}\"dependencies\":{{\"authboundry\":\"latest\"}}{}",
         prefix,
         separator,
         &package_json[root_end..]
@@ -330,7 +331,7 @@ fn node_embedded_change(
             err
         ))
     })?;
-    if before.contains("authport()") || before.contains("app.use(authport") {
+    if before.contains("authboundry()") || before.contains("app.use(authboundry") {
         return Ok(None);
     }
     let after = integrate_express(&before)?;
@@ -347,11 +348,11 @@ fn integrate_express(source: &str) -> Result<String, CliError> {
         .iter()
         .any(|line| line.trim_start().starts_with("import "));
     let auth_line = if uses_imports {
-        "import { authport } from \"authport\";".to_string()
+        "import { authboundry } from \"authboundry\";".to_string()
     } else {
-        "const { authport } = require(\"authport\");".to_string()
+        "const { authboundry } = require(\"authboundry\");".to_string()
     };
-    if !lines.iter().any(|line| line.contains("authport")) {
+    if !lines.iter().any(|line| line.contains("authboundry")) {
         let insert_at = lines
             .iter()
             .rposition(|line| {
@@ -367,7 +368,7 @@ fn integrate_express(source: &str) -> Result<String, CliError> {
         .iter()
         .position(|line| line.contains("express()"))
         .ok_or_else(|| error("Express entrypoint has no `express()` application to mount"))?;
-    lines.insert(app_index + 1, "app.use(authport());".to_string());
+    lines.insert(app_index + 1, "app.use(authboundry());".to_string());
     let mut out = lines.join("\n");
     if source.ends_with('\n') {
         out.push('\n');
@@ -376,7 +377,7 @@ fn integrate_express(source: &str) -> Result<String, CliError> {
 }
 
 fn config_change(root: &Path) -> FileChange {
-    let path = root.join("authport.toml");
+    let path = root.join("authboundry.toml");
     FileChange {
         before: fs::read_to_string(&path).ok(),
         path,
@@ -409,7 +410,7 @@ fn apply_plan(plan: &InitPlan) -> Result<(), CliError> {
         if plan
             .application
             .root
-            .join(".authport-fail-after-write")
+            .join(".authboundry-fail-after-write")
             .exists()
         {
             rollback(&written);
@@ -420,7 +421,7 @@ fn apply_plan(plan: &InitPlan) -> Result<(), CliError> {
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<(), CliError> {
-    let tmp = path.with_extension("authport-tmp");
+    let tmp = path.with_extension("authboundry-tmp");
     fs::write(&tmp, contents)
         .map_err(|err| error(format!("cannot write `{}`: {}", tmp.display(), err)))?;
     fs::rename(&tmp, path)
@@ -511,9 +512,9 @@ fn resolve_config(root: &Path) -> Result<PathBuf, CliError> {
 fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
     let mut out = String::new();
     if plan.already_integrated {
-        out.push_str("AuthPort already detected.\n");
+        out.push_str("AuthBoundry already detected.\n");
     } else {
-        out.push_str("AuthPort found your application.\n");
+        out.push_str("AuthBoundry found your application.\n");
     }
     out.push_str(&format!(
         "Application:\n  {}\nLanguage:\n  {}\nFramework:\n  {}\nPackage manager:\n  {}\nEntrypoint:\n  {}\nRun command:\n  {}\n",
@@ -554,16 +555,16 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
         for provider in &plan.application.providers {
             out.push_str(&format!("  {}\n", provider.display_name));
         }
-        out.push_str("Available to AuthPort:\n");
+        out.push_str("Available to AuthBoundry:\n");
         for provider in &plan.application.providers {
             out.push_str(&format!("  {}\n", provider.id));
         }
     }
     out.push_str("Proposed integration:\n");
     if plan.mode == InitMode::Standalone {
-        out.push_str("  + write standalone AuthPort adoption manifest\n");
+        out.push_str("  + write standalone AuthBoundry adoption manifest\n");
     } else if plan.integration_supported {
-        out.push_str("  + initialize AuthPort\n  + mount AuthPort boundary\n  + preserve existing application routes\n");
+        out.push_str("  + initialize AuthBoundry\n  + mount AuthBoundry boundary\n  + preserve existing application routes\n");
     } else {
         out.push_str("  (automatic source integration is not supported for this application)\n");
     }
@@ -588,14 +589,14 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
         for change in &plan.changes {
             out.push_str(&render_patch(change, &plan.application.root));
         }
-        out.push_str("Run `authport init --yes` to apply.\n");
+        out.push_str("Run `authboundry init --yes` to apply.\n");
     }
     out
 }
 
 fn first_run_text(plan: &InitPlan, report: &VerifyReport) -> String {
     format!(
-        "✓ Application detected\n✓ AuthPort integrated\n✓ Runtime boundary configured\n✓ {} application routes discovered\n✓ AuthPort surface available\nNext:\n  authport serve\n  authport inspect\n  authport routes\n",
+        "✓ Application detected\n✓ AuthBoundry integrated\n✓ Runtime boundary configured\n✓ {} application routes discovered\n✓ AuthBoundry surface available\nNext:\n  authboundry serve\n  authboundry inspect\n  authboundry routes\n",
         report.application_routes.max(plan.application.routes.len())
     )
 }
@@ -603,7 +604,7 @@ fn first_run_text(plan: &InitPlan, report: &VerifyReport) -> String {
 fn render_verify_text(report: &VerifyReport) -> String {
     let mark = |ok| if ok { "✓" } else { "✗" };
     format!(
-        "{} application discovered\n{} AuthPort boundary present\n{} runtime starts\n{} control plane responds\n{} application routes remain reachable\n{} AuthPort routes respond\n{} contract fingerprint stable\n{} live authority state available\n",
+        "{} application discovered\n{} AuthBoundry boundary present\n{} runtime starts\n{} control plane responds\n{} application routes remain reachable\n{} AuthBoundry routes respond\n{} contract fingerprint stable\n{} live authority state available\n",
         mark(report.application_discovered),
         mark(report.boundary_present),
         mark(report.runtime_starts),

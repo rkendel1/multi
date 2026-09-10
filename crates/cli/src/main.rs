@@ -1,4 +1,4 @@
-//! `authport` — inspect what a declaration generates, without running the app.
+//! `authboundry` — inspect the application's authority boundary.
 
 use std::process::ExitCode;
 
@@ -11,7 +11,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("authport: {}", err);
+            eprintln!("authboundry: {}", err);
             ExitCode::FAILURE
         }
     }

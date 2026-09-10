@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run -p saas_basic            # both modes, side by side
-//! cargo run -p saas_basic -- serve   # standalone AuthPort on a real socket
+//! cargo run -p saas_basic -- serve   # standalone AuthBoundry on a real socket
 //! ```
 
 use std::sync::Arc;
@@ -39,7 +39,7 @@ fn main() {
     }
 }
 
-/// Standalone: AuthPort owns the socket, the application sits behind it.
+/// Standalone: AuthBoundry owns the socket, the application sits behind it.
 fn run_server(address: &str) -> Result<(), Box<dyn std::error::Error>> {
     let deployment = bootstrap_live(appport_auth_mesh_boundary::BindingMode::Standalone)?;
     let invoices = Arc::new(Invoices::default());
@@ -59,7 +59,7 @@ fn run_server(address: &str) -> Result<(), Box<dyn std::error::Error>> {
     let handle = serve(server, address)?;
 
     println!(
-        "AuthPort (standalone) listening on http://{}",
+        "AuthBoundry (standalone) listening on http://{}",
         handle.address()
     );
     println!(
@@ -87,7 +87,7 @@ fn run_embedded(address: &str) -> Result<(), Box<dyn std::error::Error>> {
     let handle = serve(server, address)?;
 
     println!(
-        "AuthPort (embedded) listening on http://{}",
+        "AuthBoundry (embedded) listening on http://{}",
         handle.address()
     );
     println!(

@@ -10,11 +10,11 @@ const ANONYMOUS_VALUE = {
 
 export const ANONYMOUS = Object.freeze(ANONYMOUS_VALUE);
 
-/** Create a dependency-free projection of the AuthPort server authority. */
-export function createAuthPort(options = {}) {
+/** Create a dependency-free projection of the AuthBoundry server authority. */
+export function createAuthBoundry(options = {}) {
   const baseUrl = (options.baseUrl || "").replace(/\/$/, "");
   const fetchImpl = options.fetch || globalThis.fetch;
-  if (!fetchImpl) throw new Error("AuthPort: no fetch implementation available");
+  if (!fetchImpl) throw new Error("AuthBoundry: no fetch implementation available");
 
   let state = { loading: true, auth: ANONYMOUS };
   const listeners = new Set();

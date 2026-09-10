@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { createAuthPort } = require("./authport.js");
+const { createAuthBoundry } = require("./authboundry.js");
 
 function stubFetch(routes) {
   const calls = [];
@@ -33,7 +33,7 @@ const ALICE = {
 
 test("session() reflects what the server says", async () => {
   const { fetchImpl } = stubFetch({ "GET /auth/session": { status: 200, body: ALICE } });
-  const auth = createAuthPort({ fetch: fetchImpl });
+  const auth = createAuthBoundry({ fetch: fetchImpl });
 
   const context = await auth.session();
 
@@ -45,7 +45,7 @@ test("an unauthenticated browser holds no authority", async () => {
   const { fetchImpl } = stubFetch({
     "GET /auth/session": { status: 401, body: { error: "unauthenticated" } },
   });
-  const auth = createAuthPort({ fetch: fetchImpl });
+  const auth = createAuthBoundry({ fetch: fetchImpl });
 
   const context = await auth.session();
 
@@ -60,7 +60,7 @@ test("client state is a projection: the server still decides", async () => {
     // The server refuses billing.charge no matter what the page believes.
     "POST /auth/authorize": { status: 200, body: { allowed: false, reason: "capability_not_granted" } },
   });
-  const auth = createAuthPort({ fetch: fetchImpl });
+  const auth = createAuthBoundry({ fetch: fetchImpl });
   await auth.session();
 
   // A page can lie to itself...
@@ -77,7 +77,7 @@ test("sign-in failures leave the client anonymous", async () => {
   const { fetchImpl } = stubFetch({
     "POST /auth/sign-in": { status: 401, body: { reason: "invalid_credentials", message: "no" } },
   });
-  const auth = createAuthPort({ fetch: fetchImpl });
+  const auth = createAuthBoundry({ fetch: fetchImpl });
 
   await assert.rejects(() => auth.signIn({ tenant: "acme", connector: "local" }), /no/);
   assert.equal(auth.auth.authenticated, false);
@@ -88,7 +88,7 @@ test("subscribers see every authority change", async () => {
     "GET /auth/session": { status: 200, body: ALICE },
     "POST /auth/sign-out": { status: 200, body: {} },
   });
-  const auth = createAuthPort({ fetch: fetchImpl });
+  const auth = createAuthBoundry({ fetch: fetchImpl });
   const seen = [];
   auth.subscribe((state) => seen.push(state.auth.authenticated));
 

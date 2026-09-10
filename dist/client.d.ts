@@ -11,13 +11,13 @@ export interface AuthProjection {
   session: Session | null;
   delegation: Delegation | null;
 }
-export interface AuthPortState { loading: boolean; auth: AuthProjection }
-export interface AuthPortOptions {
+export interface AuthBoundryState { loading: boolean; auth: AuthProjection }
+export interface AuthBoundryOptions {
   baseUrl?: string;
   fetch?: typeof fetch;
 }
-export interface AuthPortClient {
-  readonly state: AuthPortState;
+export interface AuthBoundryClient {
+  readonly state: AuthBoundryState;
   readonly auth: AuthProjection;
   session(): Promise<AuthProjection>;
   providers(): Promise<unknown[]>;
@@ -26,8 +26,8 @@ export interface AuthPortClient {
   authorize(capability: string): Promise<boolean>;
   /** Rendering hint only; the server remains authoritative. */
   can(capability: string): boolean;
-  subscribe(listener: (state: AuthPortState) => void): () => void;
+  subscribe(listener: (state: AuthBoundryState) => void): () => void;
   readonly ANONYMOUS: AuthProjection;
 }
 export declare const ANONYMOUS: Readonly<AuthProjection>;
-export declare function createAuthPort(options?: AuthPortOptions): AuthPortClient;
+export declare function createAuthBoundry(options?: AuthBoundryOptions): AuthBoundryClient;

@@ -1,7 +1,7 @@
 use crate::http::JsonValue;
 use std::time::SystemTime;
 
-/// Description of a running AuthPort application
+/// Description of a running AuthBoundry application
 #[derive(Debug, Clone)]
 pub struct ApplicationDescription {
     pub name: String,
@@ -69,7 +69,7 @@ impl RouteProtection {
     }
 }
 
-/// Description of an AuthPort route
+/// Description of an AuthBoundry route
 #[derive(Debug, Clone)]
 pub struct RouteDescription {
     pub path: String,

@@ -1,4 +1,4 @@
-//! `authport serve` — run AuthPort as its own authority service.
+//! `authboundry serve` — run AuthBoundry as its own authority service.
 //!
 //! The deployment details a contract does not own (which tenants exist, which
 //! accounts the local directory holds, what the policy grants, where the
@@ -205,7 +205,7 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
             );
             AuthPortServer::new(runtime, Arc::new(proxy)).with_tenants(&tenant_names)
         }
-        // With no application behind it, AuthPort still serves its own surface:
+        // With no application behind it, AuthBoundry still serves its own surface:
         // sign-in, session, providers and authorization.
         None => AuthPortServer::new(runtime, Arc::new(AuthOnly)).with_tenants(&tenant_names),
     };
@@ -316,7 +316,7 @@ impl appport_auth_mesh_server::ApplicationBinding for AuthOnly {
         appport_auth_mesh_server::HttpResponse::denied(
             404,
             "no_application",
-            "this AuthPort deployment serves the auth surface only",
+            "this AuthBoundry deployment serves the authority surface only",
         )
     }
 }

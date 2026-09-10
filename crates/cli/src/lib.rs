@@ -19,56 +19,57 @@ pub mod init;
 pub mod serve;
 
 pub const USAGE: &str = "\
-authport — the AuthPort authority boundary
+authboundry — the application authority boundary
 
 USAGE:
-    authport inspect [FILE] [--json] [--mode embedded|standalone]
-    authport init [PATH] [--dry-run] [--json] [--yes] [--standalone]
-    authport verify [PATH] [--json]
-    authport fingerprint [FILE]
-    authport routes [FILE]
-    authport providers [FILE]
-    authport password-policy [FILE] [--json]
-    authport password-policy --server URL [--json]
-    authport password-policy propose [options] [--server URL] [--dry-run]
-    authport serve [FILE] [options]
-    authport connect [--server URL] [--output-token]
-    authport propose [FILE] [--json]
-    authport reconcile [FILE] [--json] [--check]
-    authport drift [FILE] [--json] [--check]
-    authport propose <change-type> [options] [--server URL] [--dry-run]
-    authport approve [--proposal-id ID|--all] [--server URL] --yes
-    authport apply [--proposal-id ID|--all] [--server URL] --yes
-    authport reject [--proposal-id ID] [--reason TEXT] [--server URL]
-    authport agents [--tenant TENANT] [--server URL]
-    authport agent create --tenant TENANT --name NAME [--id ID] [--server URL]
-    authport agent show ID --tenant TENANT [--server URL]
-    authport runs --tenant TENANT --agent AGENT [--server URL]
-    authport run show ID --tenant TENANT [--server URL]
-    authport audit [--server URL]
-    authport audit events --tenant TENANT [--server URL]
-    authport audit export --tenant TENANT [--since TIMESTAMP] [--server URL]
-    authport storage [--server URL]
-    authport reporting [--server URL]
-    authport policies [--server URL]
-    authport policy show ID [--server URL]
-    authport explain [DECISION_ID] [--server URL]
+    authboundry inspect [FILE] [--json] [--mode embedded|standalone]
+    authboundry init [PATH] [--dry-run] [--json] [--yes] [--standalone]
+    authboundry verify [PATH] [--json]
+    authboundry fingerprint [FILE]
+    authboundry routes [FILE]
+    authboundry providers [FILE]
+    authboundry password-policy [FILE] [--json]
+    authboundry password-policy --server URL [--json]
+    authboundry password-policy propose [options] [--server URL] [--dry-run]
+    authboundry serve [FILE] [options]
+    authboundry connect [--server URL] [--output-token]
+    authboundry propose [FILE] [--json]
+    authboundry reconcile [FILE] [--json] [--check]
+    authboundry drift [FILE] [--json] [--check]
+    authboundry propose <change-type> [options] [--server URL] [--dry-run]
+    authboundry approve [--proposal-id ID|--all] [--server URL] --yes
+    authboundry apply [--proposal-id ID|--all] [--server URL] --yes
+    authboundry reject [--proposal-id ID] [--reason TEXT] [--server URL]
+    authboundry agents [--tenant TENANT] [--server URL]
+    authboundry agent create --tenant TENANT --name NAME [--id ID] [--server URL]
+    authboundry agent show ID --tenant TENANT [--server URL]
+    authboundry runs --tenant TENANT --agent AGENT [--server URL]
+    authboundry run show ID --tenant TENANT [--server URL]
+    authboundry audit [--server URL]
+    authboundry audit events --tenant TENANT [--server URL]
+    authboundry audit export --tenant TENANT [--since TIMESTAMP] [--server URL]
+    authboundry storage [--server URL]
+    authboundry reporting [--server URL]
+    authboundry policies [--server URL]
+    authboundry policy show ID [--server URL]
+    authboundry explain [DECISION_ID] [--server URL]
 
 SERVE OPTIONS:
     --addr ADDRESS              listen address (default 127.0.0.1:8787)
     --tenant NAME               a tenant to serve (repeatable)
     --account USER:PASS:CLAIMS  seed a principal, e.g. alice:secret:role=owner@acme
     --grant CAPABILITY=CLAIM:V  grant a capability, e.g. invoice.read=role:owner
-    --upstream ADDRESS          the application AuthPort sits in front of
+    --upstream ADDRESS          the application AuthBoundry sits in front of
     --public PATH               forward this path prefix without a session
     --require PATH=CAPABILITY   require a capability for this path prefix
 
-FILE defaults to the first of authport.toml, appport.auth, appport.toml or
+FILE defaults to the first of authboundry.toml, appport.auth, authport.toml or
 auth.appport that exists in the current directory.
 ";
 
 /// Candidate declaration files, in the order they are tried.
 pub const DEFAULT_FILES: &[&str] = &[
+    "authboundry.toml",
     "authport.toml",
     "appport.auth",
     "appport.toml",
@@ -327,7 +328,7 @@ where
                     .map(|method| method.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                out.push_str(&format!("{:<18} {:<21} AuthPort\n", methods, route.path));
+                out.push_str(&format!("{:<18} {:<21} AuthBoundry\n", methods, route.path));
             }
             let root = path
                 .as_ref()
@@ -427,7 +428,7 @@ fn local_reconciliation(
 }
 
 fn render_drift_text(result: &ReconciliationResult) -> String {
-    let mut out = String::from("AuthPort Authority Drift\n");
+    let mut out = String::from("AuthBoundry Authority Drift\n");
     if result.drift.is_empty() {
         out.push_str("No authority drift detected.\n");
         return out;
@@ -452,7 +453,7 @@ fn run_server(config: AuthConfig, options: &serve::ServeOptions) -> Result<Outpu
     let running = serve::start(config, options)?;
     let address = running.authport.address();
 
-    println!("AuthPort listening on http://{} (standalone)", address);
+    println!("AuthBoundry listening on http://{} (standalone)", address);
     println!("  sign in           http://{}/auth/login", address);
     println!("  session           http://{}/auth/session", address);
     println!("  providers         http://{}/auth/providers", address);
@@ -648,7 +649,7 @@ use auth {
         assert!(json.contains("\"agents\": true"));
         // Inspection identifies the runtime boundary as well as the contract.
         assert!(json.contains("\"mode\": \"any\""));
-        assert!(json.contains("\"boundary\": {\"contract\": \"authport.boundary/v1\""));
+        assert!(json.contains("\"boundary\": {\"contract\": \"authboundry.boundary/v1\""));
         assert!(json.contains("\"modes\": [\"embedded\", \"standalone\"]"));
         assert!(json.contains("\"session_credential\": \"cookie:authport_session\""));
         assert!(json.contains("\"aliases\": [\"/auth/sign-in\"]"));
@@ -750,7 +751,7 @@ use auth {
             ..serve::ServeOptions::default()
         };
 
-        let running = serve::start(config, &options).expect("AuthPort binds");
+        let running = serve::start(config, &options).expect("AuthBoundry binds");
         let address = running.authport.address();
 
         // The generated sign-in UI is served from the same contract.
@@ -873,7 +874,7 @@ use auth {
         let reconcile = run_with(&["reconcile", path.to_str().unwrap()])
             .unwrap()
             .text;
-        assert!(reconcile.contains("AuthPort Authority Reconciliation"));
+        assert!(reconcile.contains("AuthBoundry Authority Reconciliation"));
         assert!(reconcile.contains("POST /refunds"));
         assert!(reconcile.contains("refund.create"));
         assert!(reconcile.contains("No authority was changed."));
@@ -908,13 +909,13 @@ use auth {
         let preview = run_with(&["init", dir.to_str().unwrap(), "--dry-run"])
             .unwrap()
             .text;
-        assert!(preview.contains("AuthPort found your application."));
+        assert!(preview.contains("AuthBoundry found your application."));
         assert!(preview.contains("Framework:\n  Express"));
         assert!(preview.contains("Google OAuth configuration"));
         assert!(!preview.contains("hidden"));
         assert!(preview.contains("Files to modify:"));
         assert!(preview.contains("src/server.js"));
-        assert!(!dir.join("authport.toml").exists());
+        assert!(!dir.join("authboundry.toml").exists());
 
         let json = run_with(&["init", dir.to_str().unwrap(), "--json"])
             .unwrap()
@@ -927,24 +928,24 @@ use auth {
         let applied = run_with(&["init", dir.to_str().unwrap(), "--yes"])
             .unwrap()
             .text;
-        assert!(applied.contains("✓ AuthPort integrated"));
+        assert!(applied.contains("✓ AuthBoundry integrated"));
         assert!(applied.contains("✓ 3 application routes discovered"));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert_eq!(server.matches("app.use(authport());").count(), 1);
+        assert_eq!(server.matches("app.use(authboundry());").count(), 1);
         assert!(server.contains("app.get('/health'"));
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
-        assert!(package_json.contains("\"authport\":\"latest\""));
-        assert!(dir.join("authport.toml").exists());
-        assert!(dir.join(".authport/adoption.json").exists());
+        assert!(package_json.contains("\"authboundry\":\"latest\""));
+        assert!(dir.join("authboundry.toml").exists());
+        assert!(dir.join(".authboundry/adoption.json").exists());
 
         let second = run_with(&["init", dir.to_str().unwrap(), "--yes"])
             .unwrap()
             .text;
-        assert!(second.contains("AuthPort already detected."));
+        assert!(second.contains("AuthBoundry already detected."));
         let server_again = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert_eq!(server_again.matches("app.use(authport());").count(), 1);
+        assert_eq!(server_again.matches("app.use(authboundry());").count(), 1);
 
-        let routes = run_with(&["routes", dir.join("authport.toml").to_str().unwrap()])
+        let routes = run_with(&["routes", dir.join("authboundry.toml").to_str().unwrap()])
             .unwrap()
             .text;
         assert!(routes.contains("GET                /health"));
@@ -982,18 +983,18 @@ use auth {
         assert!(applied.contains("✓ 5 application routes discovered"));
 
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
-        assert!(package_json.contains("\"authport\":\"latest\""));
+        assert!(package_json.contains("\"authboundry\":\"latest\""));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert!(server.contains("const { authport } = require(\"authport\");"));
-        assert_eq!(server.matches("app.use(authport());").count(), 1);
+        assert!(server.contains("const { authboundry } = require(\"authboundry\");"));
+        assert_eq!(server.matches("app.use(authboundry());").count(), 1);
         assert!(server.contains("app.post('/refunds', createRefund);"));
 
         let verify = run_with(&["verify", dir.to_str().unwrap()]).unwrap().text;
         assert!(verify.contains("✓ application discovered"));
-        assert!(verify.contains("✓ AuthPort boundary present"));
+        assert!(verify.contains("✓ AuthBoundry boundary present"));
         assert!(verify.contains("✓ live authority state available"));
 
-        let routes = run_with(&["routes", dir.join("authport.toml").to_str().unwrap()])
+        let routes = run_with(&["routes", dir.join("authboundry.toml").to_str().unwrap()])
             .unwrap()
             .text;
         assert!(routes.contains("GET                /health"));
@@ -1001,7 +1002,7 @@ use auth {
         assert!(routes.contains("POST               /refunds"));
         assert!(routes.contains("unprotected"));
 
-        let proposal = run_with(&["propose", dir.join("authport.toml").to_str().unwrap()])
+        let proposal = run_with(&["propose", dir.join("authboundry.toml").to_str().unwrap()])
             .unwrap()
             .text;
         assert!(proposal.contains("POST /invoices\n  → invoice.create"));
@@ -1018,12 +1019,12 @@ use auth {
         ])
         .unwrap();
         let standalone_server = std::fs::read_to_string(standalone.join("src/server.js")).unwrap();
-        assert!(!standalone_server.contains("authport()"));
-        let manifest = std::fs::read_to_string(standalone.join(".authport/adoption.json")).unwrap();
+        assert!(!standalone_server.contains("authboundry()"));
+        let manifest = std::fs::read_to_string(standalone.join(".authboundry/adoption.json")).unwrap();
         assert!(manifest.contains("\"mode\": \"standalone\""));
         assert!(manifest.contains("\"run_command\": \"node src/server.js\""));
         let standalone_routes =
-            run_with(&["routes", standalone.join("authport.toml").to_str().unwrap()])
+            run_with(&["routes", standalone.join("authboundry.toml").to_str().unwrap()])
                 .unwrap()
                 .text;
         assert!(standalone_routes.contains("POST               /refunds"));
@@ -1035,7 +1036,7 @@ use auth {
         write_express_app(&dir);
         let original = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
 
-        std::fs::write(dir.join(".authport-fail-after-write"), "").unwrap();
+        std::fs::write(dir.join(".authboundry-fail-after-write"), "").unwrap();
         let error = run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap_err();
 
         assert!(error.message.contains("simulated initialization failure"));
@@ -1043,8 +1044,8 @@ use auth {
             std::fs::read_to_string(dir.join("src/server.js")).unwrap(),
             original
         );
-        assert!(!dir.join("authport.toml").exists());
-        assert!(!dir.join(".authport/adoption.json").exists());
+        assert!(!dir.join("authboundry.toml").exists());
+        assert!(!dir.join(".authboundry/adoption.json").exists());
     }
 
     #[test]
@@ -1057,8 +1058,8 @@ use auth {
             .text;
         assert!(applied.contains("✓ Runtime boundary configured"));
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
-        assert!(!server.contains("authport()"));
-        let manifest = std::fs::read_to_string(dir.join(".authport/adoption.json")).unwrap();
+        assert!(!server.contains("authboundry()"));
+        let manifest = std::fs::read_to_string(dir.join(".authboundry/adoption.json")).unwrap();
         assert!(manifest.contains("\"mode\": \"standalone\""));
     }
 }

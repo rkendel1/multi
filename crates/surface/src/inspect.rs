@@ -8,8 +8,8 @@ use crate::surface::{AuthSurface, PrincipalSurfaceKind};
 /// generate?" without running the application.
 pub fn render_text(surface: &AuthSurface) -> String {
     let mut out = String::new();
-    out.push_str("AuthPort · Auth\n");
-    out.push_str("────────────────────────\n\n");
+    out.push_str("AuthBoundry · Authority Boundary\n");
+    out.push_str("────────────────────────────────\n\n");
 
     out.push_str(&format!("Multi-tenant: {}\n", yes_no(surface.multi_tenant)));
     out.push_str(&format!("Isolation: {}\n", surface.isolation.as_str()));

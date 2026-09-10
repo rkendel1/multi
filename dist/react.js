@@ -1,11 +1,11 @@
-import { createAuthPort } from "./client.js";
+import { createAuthBoundry } from "./client.js";
 
 /** Create React bindings without making React a runtime dependency. */
-export function createAuthPortReact(React, options = {}) {
-  const client = options.client || createAuthPort(options);
+export function createAuthBoundryReact(React, options = {}) {
+  const client = options.client || createAuthBoundry(options);
   const Context = React.createContext(null);
 
-  function AuthPort(props) {
+  function AuthBoundry(props) {
     const [state, setState] = React.useState(client.state);
     React.useEffect(() => {
       const unsubscribe = client.subscribe(setState);
@@ -30,8 +30,8 @@ export function createAuthPortReact(React, options = {}) {
   }
   function useAuth() {
     const value = React.useContext(Context);
-    if (!value) throw new Error("useAuth() must be used inside <AuthPort>");
+    if (!value) throw new Error("useAuth() must be used inside <AuthBoundry>");
     return value;
   }
-  return { AuthPort, useAuth, client };
+  return { AuthBoundry, useAuth, client };
 }

@@ -1,6 +1,6 @@
 //! Calling the application, however it is deployed.
 //!
-//! The same calls run against an embedded AuthPort (in process) and a
+//! The same calls run against an embedded AuthBoundry (in process) and a
 //! standalone one (over a socket), which is what makes the two modes
 //! comparable.
 
@@ -65,13 +65,13 @@ impl Call {
     }
 }
 
-/// How a caller reaches AuthPort.
+/// How a caller reaches AuthBoundry.
 pub trait Transport {
     fn call(&self, call: &Call) -> HttpResponse;
     fn label(&self) -> &'static str;
 }
 
-/// Embedded: AuthPort is bound to the application's own server, so the request
+/// Embedded: AuthBoundry is bound to the application's own server, so the request
 /// never leaves the process.
 pub struct EmbeddedTransport(pub Arc<AuthPortServer>);
 
@@ -85,7 +85,7 @@ impl Transport for EmbeddedTransport {
     }
 }
 
-/// Standalone: AuthPort owns the socket and the application sits behind it.
+/// Standalone: AuthBoundry owns the socket and the application sits behind it.
 pub struct HttpTransport(pub SocketAddr);
 
 impl Transport for HttpTransport {

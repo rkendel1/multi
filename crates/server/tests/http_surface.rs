@@ -631,8 +631,8 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     assert!(html.contains("<option value=\"acme\">"));
 
     // The page drives the same client library the JS package ships.
-    assert!(html.contains("/authport/client.js"));
-    assert!(html.contains("AuthPort.createAuthPort"));
+    assert!(html.contains("/authboundry/client.js"));
+    assert!(html.contains("AuthBoundry.createAuthBoundry"));
 
     // A single-tenant contract does not ask the visitor to pick one.
     let single =

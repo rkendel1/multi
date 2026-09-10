@@ -56,7 +56,7 @@ impl AuthPortServer {
     pub fn handle(&self, http: &HttpRequest) -> HttpResponse {
         let request = http.to_boundary();
 
-        if request.path == "/authport/client.js" {
+        if request.path == "/authboundry/client.js" {
             return HttpResponse::new(200, "application/javascript", CLIENT_JS.as_bytes().to_vec());
         }
 
@@ -381,7 +381,7 @@ impl AuthPortServer {
                 return HttpResponse::denied(
                     403,
                     "no_route_policy",
-                    "this path is not covered by an AuthPort route policy",
+                    "this path is not covered by an AuthBoundry route policy",
                 )
             }
         };

@@ -16,7 +16,7 @@ use appport_auth_mesh_server::{AppRequest, HttpResponse, RouterApp};
 /// What a handler needs to know about the caller.
 ///
 /// Embedded, it is read from the [`AuthContext`] the boundary constructed.
-/// Standalone, it is read from the context AuthPort injected into the upstream
+/// Standalone, it is read from the context AuthBoundry injected into the upstream
 /// request. Same fields, same handlers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppContext {
@@ -43,10 +43,10 @@ impl AppContext {
         }
     }
 
-    /// Read the context AuthPort injected, refusing anything unsigned.
+    /// Read the context AuthBoundry injected, refusing anything unsigned.
     ///
     /// The proxy strips this header vocabulary from inbound requests, so the
-    /// only way a signed context arrives here is from AuthPort itself.
+    /// only way a signed context arrives here is from AuthBoundry itself.
     pub fn from_injected(request_headers: &BTreeMap<String, String>, secret: &str) -> Option<Self> {
         let context = request_headers.get(headers::CONTEXT)?;
         let signature = request_headers.get(headers::SIGNATURE)?;

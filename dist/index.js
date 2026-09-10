@@ -1,1 +1,1 @@
-export { ANONYMOUS, createAuthPort } from "./client.js";
+export { ANONYMOUS, createAuthBoundry } from "./client.js";

@@ -145,7 +145,7 @@ pub trait ApplicationBinding: Send + Sync {
     }
 }
 
-/// An application whose handlers run in the same process as AuthPort.
+/// An application whose handlers run in the same process as AuthBoundry.
 ///
 /// This is the embedded placement: the developer registers routes with the
 /// authority each one needs, and handlers receive the resolved context.

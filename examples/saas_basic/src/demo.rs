@@ -38,7 +38,7 @@ impl Step {
     }
 }
 
-/// AuthPort bound to the application's own server: `app.use(authport())`.
+/// AuthBoundry bound to the application's own server.
 pub fn embedded() -> Result<(Deployment, Arc<AuthPortServer>), AuthError> {
     let deployment = bootstrap(BindingMode::Embedded)?;
     let server = Arc::new(
@@ -51,7 +51,7 @@ pub fn embedded() -> Result<(Deployment, Arc<AuthPortServer>), AuthError> {
     Ok((deployment, server))
 }
 
-/// AuthPort in front of an application that implements no authentication.
+/// AuthBoundry in front of an application that implements no authority system.
 pub struct Standalone {
     pub deployment: Deployment,
     pub address: SocketAddr,
@@ -77,7 +77,7 @@ pub fn standalone() -> Result<Standalone, AuthError> {
         AuthPortServer::new(deployment.runtime.clone(), Arc::new(proxy))
             .with_tenants(&["acme", "globex"]),
     );
-    let authport = serve(server, "127.0.0.1:0").expect("AuthPort binds");
+    let authport = serve(server, "127.0.0.1:0").expect("AuthBoundry binds");
 
     Ok(Standalone {
         address: authport.address(),
@@ -233,14 +233,14 @@ pub fn run() -> Result<String, AuthError> {
         &embedded_deployment,
         &EmbeddedTransport(embedded_server.clone()),
     );
-    report.push_str("Embedded (AuthPort bound to the application server)\n");
+    report.push_str("Embedded (AuthBoundry bound to the application server)\n");
     for step in &embedded_steps {
         report.push_str(&format!("  {}\n", step.describe()));
     }
 
     let standalone = standalone()?;
     let standalone_steps = scenario(&standalone.deployment, &HttpTransport(standalone.address));
-    report.push_str("\nStandalone (browser -> AuthPort -> application)\n");
+    report.push_str("\nStandalone (browser -> AuthBoundry -> application)\n");
     for step in &standalone_steps {
         report.push_str(&format!("  {}\n", step.describe()));
     }

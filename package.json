@@ -1,6 +1,6 @@
 {
   "name": "authboundry",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "The authority boundary for an application.",
   "type": "module",
   "exports": {
@@ -19,18 +19,18 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "authport": "bin/authport.js"
+    "authboundry": "bin/authboundry.js"
   },
   "files": [
     "bin/",
     "dist/",
     "native/",
-    "docs/architecture.md",
+    "docs/",
     "README.md"
   ],
   "scripts": {
     "build": "sh scripts/build-npm-package.sh",
-    "test": "node --test clients/js/authport.test.js test/npm-package.test.js",
+    "test": "node --test clients/js/authboundry.test.js test/npm-package.test.js",
     "prepack": "npm run build",
     "verify:package": "sh scripts/verify-npm-package.sh",
     "publish:packages": "sh scripts/publish-packages.sh"
@@ -45,12 +45,14 @@
   "homepage": "https://github.com/rkendel1/multi#readme",
   "license": "UNLICENSED",
   "keywords": [
-    "authentication",
     "authorization",
     "identity",
     "multi-tenant",
     "delegation",
-    "agents",
+    "agent",
+    "service-identity",
+    "authority",
+    "application-security",
     "access-control",
     "security"
   ],

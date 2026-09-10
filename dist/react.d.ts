@@ -1,4 +1,4 @@
-import type { AuthPortClient, AuthPortOptions, AuthProjection } from "./client.js";
+import type { AuthBoundryClient, AuthBoundryOptions, AuthProjection } from "./client.js";
 export interface ReactLike {
   createContext(defaultValue: unknown): unknown;
   createElement(type: unknown, props: unknown, children: unknown): unknown;
@@ -6,17 +6,17 @@ export interface ReactLike {
   useEffect(effect: () => void | (() => void), dependencies: unknown[]): void;
   useState<T>(initial: T): [T, (next: T) => void];
 }
-export interface AuthPortReactOptions extends AuthPortOptions { client?: AuthPortClient }
+export interface AuthBoundryReactOptions extends AuthBoundryOptions { client?: AuthBoundryClient }
 export interface AuthHookValue extends AuthProjection {
   loading: boolean;
-  signIn: AuthPortClient["signIn"];
-  signOut: AuthPortClient["signOut"];
-  authorize: AuthPortClient["authorize"];
+  signIn: AuthBoundryClient["signIn"];
+  signOut: AuthBoundryClient["signOut"];
+  authorize: AuthBoundryClient["authorize"];
   /** Rendering hint only; the server remains authoritative. */
-  can: AuthPortClient["can"];
+  can: AuthBoundryClient["can"];
 }
-export declare function createAuthPortReact(React: ReactLike, options?: AuthPortReactOptions): {
-  AuthPort(props: { children?: unknown }): unknown;
+export declare function createAuthBoundryReact(React: ReactLike, options?: AuthBoundryReactOptions): {
+  AuthBoundry(props: { children?: unknown }): unknown;
   useAuth(): AuthHookValue;
-  client: AuthPortClient;
+  client: AuthBoundryClient;
 };

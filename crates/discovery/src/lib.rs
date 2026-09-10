@@ -1,4 +1,4 @@
-//! Framework-neutral application discovery for AuthPort adoption.
+//! Framework-neutral application discovery for AuthBoundry adoption.
 //!
 //! Discovery is intentionally read-only: it inspects manifests and likely
 //! entrypoints, but never runs package scripts or binaries.
@@ -641,7 +641,7 @@ pub fn render_proposal_json(proposal: &AuthorityProposal) -> String {
 }
 
 pub fn render_reconciliation_text(result: &ReconciliationResult) -> String {
-    let mut out = String::from("AuthPort Authority Reconciliation\n");
+    let mut out = String::from("AuthBoundry Authority Reconciliation\n");
     out.push_str(&format!(
         "Contract: {}\nDiscovery: {}\nAuthority: {}\nReconciliation: {}\n",
         result.contract_fingerprint,
@@ -1316,7 +1316,7 @@ fn classify_protection(
     if normalized == "/auth" || normalized.starts_with("/auth/") {
         return (
             ProtectionState::Public,
-            "AuthPort-owned authentication endpoint".to_string(),
+            "AuthBoundry-owned authority endpoint".to_string(),
         );
     }
     (
@@ -1506,16 +1506,20 @@ fn node_servers(package_json: &str) -> Vec<ServerCandidate> {
 
 fn existing_authport(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -> ExistingAuthPort {
     ExistingAuthPort {
-        dependency: manifest.contains("\"authport\"") || manifest.contains("appport-auth-mesh"),
+        dependency: manifest.contains("\"authboundry\"")
+            || manifest.contains("\"authport\"")
+            || manifest.contains("appport-auth-mesh"),
         initialization: files.iter().any(|(_, source)| {
-            source.contains("createAuthPort(") || source.contains("AuthPortRuntime::new")
+            source.contains("createAuthBoundry(") || source.contains("AuthPortRuntime::new")
         }),
         middleware: files.iter().any(|(_, source)| {
-            source.contains("authport()")
-                || source.contains("app.use(authport")
+            source.contains("authboundry()")
+                || source.contains("authport()")
+                || source.contains("app.use(authboundry")
                 || source.contains("AuthPortServer::new")
         }),
         configuration: [
+            "authboundry.toml",
             "authport.toml",
             "appport.auth",
             "appport.toml",
@@ -1523,7 +1527,8 @@ fn existing_authport(root: &Path, manifest: &str, files: &[(PathBuf, String)]) -
         ]
         .iter()
         .any(|name| root.join(name).exists()),
-        manifest: root.join(".authport").join("adoption.json").exists(),
+        manifest: root.join(".authboundry").join("adoption.json").exists()
+            || root.join(".authport").join("adoption.json").exists(),
     }
 }
 
