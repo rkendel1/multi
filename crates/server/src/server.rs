@@ -246,7 +246,10 @@ impl AuthPortServer {
                     "{{\"id\": \"{}\", \"delegated_by\": \"{}\", \"expires_at\": {}, \"revoked\": {}}}",
                     escape(delegation.id.as_str()),
                     escape(delegation.delegator.as_str()),
-                    delegation.expires_at,
+                    delegation
+                        .expires_at
+                        .map(|expires_at| expires_at.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
                     delegation.revoked_at.is_some()
                 )
             })

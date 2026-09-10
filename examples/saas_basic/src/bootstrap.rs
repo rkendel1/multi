@@ -244,8 +244,9 @@ fn build(
                     Capability("invoice.read".to_string()),
                     Capability("invoice.create".to_string()),
                 ],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::resource("invoice"),
                 issued_at: now,
-                expires_at: now + 3_600,
+                expires_at: Some(now + 3_600),
             },
             now,
         )?

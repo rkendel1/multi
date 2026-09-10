@@ -170,6 +170,8 @@ pub struct AuthorizationEvidence {
     pub matched_rules: Vec<String>,
     pub conditions: Vec<ConditionEvidence>,
     pub authority: Option<AuthorityBasis>,
+    pub delegated_by: Option<PrincipalId>,
+    pub delegation_chain: Vec<DelegationId>,
     pub authority_revision: u64,
     pub contract_fingerprint: String,
     pub decision: AuthorizationOutcome,
@@ -310,6 +312,7 @@ pub struct GrantedCapability {
     pub authority: AuthorityBasis,
     pub claim_basis: Vec<String>,
     pub delegation_id: Option<DelegationId>,
+    pub delegation_chain: Vec<DelegationId>,
     /// The human (or service) whose authority an agent is acting on. Never
     /// collapsed into `principal_id`.
     pub delegated_by: Option<PrincipalId>,
@@ -333,6 +336,16 @@ impl GrantedCapability {
         out.push_str(&format!("  authority: {}\n", self.authority.as_str()));
         if let Some(delegation_id) = &self.delegation_id {
             out.push_str(&format!("  delegation: {}\n", delegation_id));
+        }
+        if !self.delegation_chain.is_empty() {
+            out.push_str(&format!(
+                "  delegation_chain: {}\n",
+                self.delegation_chain
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ));
         }
         if let Some(delegated_by) = &self.delegated_by {
             out.push_str(&format!("  delegated_by: {}\n", delegated_by));
@@ -413,6 +426,9 @@ pub enum DenialReason {
     ExpiredDelegation,
     RevokedDelegation,
     InvalidDelegation,
+    DelegationMissing,
+    DelegationScopeDenied,
+    DelegationExceedsAuthority,
     AgentRevoked,
     AgentSuspended,
     UnknownCapability,
@@ -437,9 +453,12 @@ impl DenialReason {
             Self::CapabilityNotGranted => "capability_not_granted",
             Self::ExpiredSession => "expired_session",
             Self::RevokedSession => "revoked_session",
-            Self::ExpiredDelegation => "expired_delegation",
-            Self::RevokedDelegation => "revoked_delegation",
+            Self::ExpiredDelegation => "delegation_expired",
+            Self::RevokedDelegation => "delegation_revoked",
             Self::InvalidDelegation => "invalid_delegation",
+            Self::DelegationMissing => "delegation_missing",
+            Self::DelegationScopeDenied => "delegation_scope_denied",
+            Self::DelegationExceedsAuthority => "delegation_exceeds_authority",
             Self::AgentRevoked => "agent_revoked",
             Self::AgentSuspended => "agent_suspended",
             Self::UnknownCapability => "unknown_capability",
@@ -465,6 +484,13 @@ pub enum DecisionReason {
     SessionInvalid,
     RouteUnprotected,
     AuthorityUnavailable,
+    DelegationMissing,
+    DelegationExpired,
+    DelegationRevoked,
+    DelegationScopeDenied,
+    DelegationExceedsAuthority,
+    AgentRevoked,
+    AgentSuspended,
     FailClosed,
 }
 
@@ -481,6 +507,13 @@ impl DecisionReason {
             Self::SessionInvalid => "session_invalid",
             Self::RouteUnprotected => "route_unprotected",
             Self::AuthorityUnavailable => "authority_unavailable",
+            Self::DelegationMissing => "delegation_missing",
+            Self::DelegationExpired => "delegation_expired",
+            Self::DelegationRevoked => "delegation_revoked",
+            Self::DelegationScopeDenied => "delegation_scope_denied",
+            Self::DelegationExceedsAuthority => "delegation_exceeds_authority",
+            Self::AgentRevoked => "agent_revoked",
+            Self::AgentSuspended => "agent_suspended",
             Self::FailClosed => "fail_closed",
         }
     }
@@ -527,11 +560,14 @@ impl AuthorizationDecision {
                 | DenialReason::MissingCredential => DecisionReason::SessionInvalid,
                 DenialReason::PolicyDenied => DecisionReason::PolicyDenied,
                 DenialReason::ConditionFailed => DecisionReason::ConditionFailed,
-                DenialReason::ExpiredDelegation
-                | DenialReason::RevokedDelegation
-                | DenialReason::InvalidDelegation
-                | DenialReason::AgentRevoked
-                | DenialReason::AgentSuspended
+                DenialReason::DelegationMissing => DecisionReason::DelegationMissing,
+                DenialReason::ExpiredDelegation => DecisionReason::DelegationExpired,
+                DenialReason::RevokedDelegation => DecisionReason::DelegationRevoked,
+                DenialReason::DelegationScopeDenied => DecisionReason::DelegationScopeDenied,
+                DenialReason::DelegationExceedsAuthority => DecisionReason::DelegationExceedsAuthority,
+                DenialReason::AgentRevoked => DecisionReason::AgentRevoked,
+                DenialReason::AgentSuspended => DecisionReason::AgentSuspended,
+                DenialReason::InvalidDelegation
                 | DenialReason::UnsupportedConnector
                 | DenialReason::AuditUnavailable => DecisionReason::FailClosed,
             },

@@ -685,6 +685,20 @@ fn decision_json(decision: &AuthorizationEvidence) -> JsonValue {
             ),
         ),
         (
+            "authority_source".to_string(),
+            authority_source_json(decision),
+        ),
+        (
+            "delegation_chain".to_string(),
+            JsonValue::Array(
+                decision
+                    .delegation_chain
+                    .iter()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .collect(),
+            ),
+        ),
+        (
             "authority_revision".to_string(),
             JsonValue::Number(decision.authority_revision as f64),
         ),
@@ -705,6 +719,34 @@ fn decision_json(decision: &AuthorizationEvidence) -> JsonValue {
             JsonValue::String(decision_summary(decision)),
         ),
     ])
+}
+
+fn authority_source_json(decision: &AuthorizationEvidence) -> JsonValue {
+    match (
+        decision.authority.as_ref().map(|authority| authority.as_str()),
+        decision.delegation_chain.last(),
+    ) {
+        (Some("delegated"), Some(delegation_id)) => JsonValue::Object(vec![
+            ("type".to_string(), JsonValue::String("delegation".to_string())),
+            (
+                "id".to_string(),
+                JsonValue::String(delegation_id.to_string()),
+            ),
+            (
+                "delegator".to_string(),
+                decision
+                    .delegated_by
+                    .as_ref()
+                    .map(|delegator| JsonValue::String(delegator.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ]),
+        (Some(_), _) => JsonValue::Object(vec![(
+            "type".to_string(),
+            JsonValue::String("policy".to_string()),
+        )]),
+        _ => JsonValue::Null,
+    }
 }
 
 fn condition_json(condition: &ConditionEvidence) -> JsonValue {

@@ -222,9 +222,11 @@ use auth {
                 Capability("invoice.create".to_string()),
                 Capability("invoice.read".to_string()),
             ],
+            resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
             issued_at: 0,
-            expires_at: 100,
+            expires_at: Some(100),
             revoked_at: None,
+            chain: Vec::new(),
         })
         .unwrap();
 
@@ -259,7 +261,7 @@ use auth {
             &Capability("billing.charge".to_string()),
             10,
         ),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
     assert_deny(
         evaluate_capability(
@@ -270,7 +272,7 @@ use auth {
             &Capability("reports.export".to_string()),
             10,
         ),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
 
     assert_allow(
@@ -422,9 +424,11 @@ fn adversarial_authorization_cases_fail_closed() {
                 delegate: agent.id.clone(),
                 tenant_id: tenant_a.tenant_id.clone(),
                 capabilities: vec![Capability("invoice.create".to_string())],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: 0,
-                expires_at: 5,
+                expires_at: Some(5),
                 revoked_at: None,
+                chain: Vec::new(),
             }),
             &Capability("invoice.create".to_string()),
             10,
@@ -442,9 +446,11 @@ fn adversarial_authorization_cases_fail_closed() {
                 delegate: agent.id.clone(),
                 tenant_id: tenant_b.tenant_id.clone(),
                 capabilities: vec![Capability("invoice.create".to_string())],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: 0,
-                expires_at: 100,
+                expires_at: Some(100),
                 revoked_at: None,
+                chain: Vec::new(),
             }),
             &Capability("invoice.create".to_string()),
             10,

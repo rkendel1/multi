@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use appport_auth_mesh_authz::{
-    AuthorityBasis, AuthorizationDecision, CapabilityEnvelope, Condition, DenialReason, Policy,
-    Rule,
+    Action, AuthorityBasis, AuthorizationContext, AuthorizationDecision, CapabilityEnvelope,
+    Condition, DenialReason, Policy, ResourceAttributes, ResourceRef, Rule,
 };
 use appport_auth_mesh_contract::{
     Capability, ClaimValue, Claims, Delegation, DelegationId, Principal, PrincipalId,
-    PrincipalKind, SessionId, TenantContext,
+    PrincipalKind, ResourceScope, SessionId, TenantContext,
 };
 use appport_auth_mesh_dsl::{parse_auth_block, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -235,7 +235,7 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
     assert!(grant.explain().contains("authority: claim"));
     assert_denies(
         &mesh.authorize(&context, &capability("billing.charge"), NOW + 10),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
 
     // Human and agent are distinct principals, both authenticated.
@@ -250,7 +250,7 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
     assert!(agent_context.capabilities.capabilities().is_empty());
     assert_denies(
         &mesh.authorize(&agent_context, &capability("invoice.create"), NOW + 10),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
 
     // Delegation -> Agent -> RuntimeContext
@@ -262,8 +262,9 @@ fn declaration_flows_all_the_way_to_a_runtime_context() {
                 delegator: alice.principal().id.clone(),
                 delegate: agent.principal().id.clone(),
                 capabilities: vec![capability("invoice.create")],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: NOW,
-                expires_at: NOW + 1_000,
+                expires_at: Some(NOW + 1_000),
             },
             NOW,
         )
@@ -316,13 +317,14 @@ fn delegation_cannot_exceed_the_delegators_own_authority() {
                 delegator: alice.principal().id.clone(),
                 delegate: agent.principal().id.clone(),
                 capabilities: vec![capability("billing.charge")],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: NOW,
-                expires_at: NOW + 1_000,
+                expires_at: Some(NOW + 1_000),
             },
             NOW,
         )
         .expect_err("authority cannot be widened by delegating it");
-    assert_eq!(err.denial, DenialReason::CapabilityNotGranted);
+    assert_eq!(err.denial, DenialReason::DelegationExceedsAuthority);
 
     // A delegation with no end is not a delegation.
     let err = mesh
@@ -333,8 +335,9 @@ fn delegation_cannot_exceed_the_delegators_own_authority() {
                 delegator: alice.principal().id.clone(),
                 delegate: agent.principal().id.clone(),
                 capabilities: vec![capability("invoice.create")],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: NOW,
-                expires_at: NOW,
+                expires_at: Some(NOW),
             },
             NOW,
         )
@@ -357,8 +360,9 @@ fn revoking_a_delegation_removes_agent_authority() {
                 delegator: alice.principal().id.clone(),
                 delegate: agent.principal().id.clone(),
                 capabilities: vec![capability("invoice.create")],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: NOW,
-                expires_at: NOW + 1_000,
+                expires_at: Some(NOW + 1_000),
             },
             NOW,
         )
@@ -394,7 +398,7 @@ fn revoking_a_delegation_removes_agent_authority() {
         .any(|event| event.kind == AuditEventKind::DelegationRevoked));
     assert!(events.iter().any(|event| {
         event.kind == AuditEventKind::AuthorizationDenied
-            && event.metadata.get("reason").map(String::as_str) == Some("revoked_delegation")
+            && event.metadata.get("reason").map(String::as_str) == Some("delegation_revoked")
     }));
 }
 
@@ -412,8 +416,9 @@ fn an_expired_delegation_stops_granting_authority() {
             delegator: alice.principal().id.clone(),
             delegate: agent.principal().id.clone(),
             capabilities: vec![capability("invoice.create")],
+            resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
             issued_at: NOW,
-            expires_at: NOW + 100,
+            expires_at: Some(NOW + 100),
         },
         NOW,
     )
@@ -437,6 +442,137 @@ fn an_expired_delegation_stops_granting_authority() {
 }
 
 #[test]
+fn delegated_authority_is_limited_by_resource_scope() {
+    let stores = MemoryStores::new();
+    provision(&stores);
+    let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
+    let (alice, agent, _bob) = sign_up_cast(&mesh);
+
+    mesh.delegate(
+        "tenant-a",
+        DelegationRequest {
+            id: DelegationId("delegation-finance".to_string()),
+            delegator: alice.principal().id.clone(),
+            delegate: agent.principal().id.clone(),
+            capabilities: vec![capability("invoice.create")],
+            resource_scope: ResourceScope::resource("invoice")
+                .with_attribute("department", ClaimValue::Enum("finance".to_string())),
+            issued_at: NOW,
+            expires_at: Some(NOW + 1_000),
+        },
+        NOW,
+    )
+    .unwrap();
+
+    let context = mesh
+        .session_context("tenant-a", &agent.session.id, NOW + 10)
+        .unwrap();
+    let request = appport_auth_mesh_authz::AuthorizationRequest {
+        principal: agent.principal().id.clone(),
+        tenant: "tenant-a".into(),
+        capability: capability("invoice.create"),
+        action: Action("create".to_string()),
+        resource: Some(ResourceRef::new("invoice", "8472", "tenant-a")),
+        context: AuthorizationContext::default(),
+    };
+    let finance_invoice = ResourceAttributes::new()
+        .with_tenant("tenant-a")
+        .with_value("department", ClaimValue::Enum("finance".to_string()));
+    assert!(mesh
+        .authorize_request(&context, &request, Some(&finance_invoice), NOW + 10)
+        .is_allowed());
+
+    let sales_invoice = ResourceAttributes::new()
+        .with_tenant("tenant-a")
+        .with_value("department", ClaimValue::Enum("sales".to_string()));
+    assert_denies(
+        &mesh
+            .authorize_request(&context, &request, Some(&sales_invoice), NOW + 10),
+        DenialReason::DelegationScopeDenied,
+    );
+}
+
+#[test]
+fn chained_delegation_preserves_attenuated_scope_and_evidence() {
+    let stores = MemoryStores::new();
+    provision(&stores);
+    let mesh = AuthMesh::new(config(), registry(), stores.mesh_stores()).expect("mesh builds");
+    let (alice, manager, _bob) = sign_up_cast(&mesh);
+    let invoice_agent = mesh
+        .sign_up(
+            "tenant-a",
+            &credentials("tenant-a", "carol", "carol-secret"),
+            Registration::agent(),
+            NOW,
+        )
+        .unwrap();
+
+    let parent_scope = ResourceScope::resource("invoice")
+        .with_attribute("department", ClaimValue::Enum("finance".to_string()));
+    let parent = mesh
+        .delegate(
+            "tenant-a",
+            DelegationRequest {
+                id: DelegationId("delegation-manager".to_string()),
+                delegator: alice.principal().id.clone(),
+                delegate: manager.principal().id.clone(),
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: parent_scope.clone(),
+                issued_at: NOW,
+                expires_at: Some(NOW + 1_000),
+            },
+            NOW,
+        )
+        .unwrap();
+
+    let err = mesh
+        .delegate(
+            "tenant-a",
+            DelegationRequest {
+                id: DelegationId("delegation-too-wide".to_string()),
+                delegator: manager.principal().id.clone(),
+                delegate: invoice_agent.principal().id.clone(),
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: ResourceScope::resource("invoice")
+                    .with_attribute("department", ClaimValue::Enum("sales".to_string())),
+                issued_at: NOW + 1,
+                expires_at: Some(NOW + 1_000),
+            },
+            NOW + 1,
+        )
+        .unwrap_err();
+    assert_eq!(err.denial, DenialReason::DelegationScopeDenied);
+
+    let child = mesh
+        .delegate(
+            "tenant-a",
+            DelegationRequest {
+                id: DelegationId("delegation-invoice-agent".to_string()),
+                delegator: manager.principal().id.clone(),
+                delegate: invoice_agent.principal().id.clone(),
+                capabilities: vec![capability("invoice.create")],
+                resource_scope: parent_scope,
+                issued_at: NOW + 1,
+                expires_at: Some(NOW + 900),
+            },
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(child.chain, vec![parent.id.clone()]);
+
+    let context = mesh
+        .session_context("tenant-a", &invoice_agent.session.id, NOW + 10)
+        .unwrap();
+    let decision = mesh.authorize(&context, &capability("invoice.create"), NOW + 10);
+    let grant = decision.grant().unwrap();
+    assert_eq!(
+        grant.delegation_chain,
+        vec![parent.id, DelegationId("delegation-invoice-agent".to_string())]
+    );
+    assert_eq!(grant.principal_id, invoice_agent.principal().id);
+}
+
+#[test]
 fn a_revoked_agent_loses_authority_independently_of_its_delegator() {
     let stores = MemoryStores::new();
     provision(&stores);
@@ -450,8 +586,9 @@ fn a_revoked_agent_loses_authority_independently_of_its_delegator() {
             delegator: alice.principal().id.clone(),
             delegate: agent.principal().id.clone(),
             capabilities: vec![capability("invoice.create")],
+            resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
             issued_at: NOW,
-            expires_at: NOW + 1_000,
+            expires_at: Some(NOW + 1_000),
         },
         NOW,
     )
@@ -515,8 +652,9 @@ fn tenant_isolation_holds_for_humans_and_for_agents() {
             delegator: alice.principal().id.clone(),
             delegate: agent.principal().id.clone(),
             capabilities: vec![capability("invoice.create")],
+            resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
             issued_at: NOW,
-            expires_at: NOW + 1_000,
+            expires_at: Some(NOW + 1_000),
         },
         NOW,
     )
@@ -787,11 +925,11 @@ fn every_unresolved_input_is_denied() {
     };
     assert_denies(
         &mesh.authorize(&context, &capability("invoice.create"), NOW),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
     assert_denies(
         &mesh.authorize(&context, &capability("nonsense.capability"), NOW),
-        DenialReason::CapabilityNotGranted,
+        DenialReason::DelegationMissing,
     );
 }
 
@@ -848,8 +986,9 @@ use auth {
                 delegator: alice.principal().id.clone(),
                 delegate: PrincipalId("prn_whoever".to_string()),
                 capabilities: vec![capability("invoice.create")],
+                resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
                 issued_at: NOW,
-                expires_at: NOW + 10,
+                expires_at: Some(NOW + 10),
             },
             NOW,
         )
@@ -939,9 +1078,11 @@ fn a_delegation_belongs_to_one_tenant() {
         delegate: agent.principal().id.clone(),
         tenant_id: "tenant-b".into(),
         capabilities: vec![capability("invoice.create")],
+        resource_scope: appport_auth_mesh_contract::ResourceScope::any(),
         issued_at: NOW,
-        expires_at: NOW + 1_000,
+        expires_at: Some(NOW + 1_000),
         revoked_at: None,
+        chain: Vec::new(),
     };
     assert!(!foreign.is_valid_at(NOW + 2_000));
 

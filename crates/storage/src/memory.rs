@@ -503,8 +503,12 @@ impl DelegationStore for MemoryDelegationStore {
         if delegation.capabilities.is_empty() {
             return Err(StorageError::new("delegation requires capabilities"));
         }
-        if delegation.expires_at <= delegation.issued_at {
-            return Err(StorageError::new("delegation must be time-bound"));
+        if delegation
+            .expires_at
+            .map(|expires_at| expires_at <= delegation.issued_at)
+            .unwrap_or(false)
+        {
+            return Err(StorageError::new("delegation expires before it is issued"));
         }
         if delegation.delegator == delegation.delegate {
             return Err(StorageError::new("delegation requires two principals"));

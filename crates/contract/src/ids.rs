@@ -31,6 +31,8 @@ macro_rules! authority_id {
 
 authority_id!(TenantId);
 authority_id!(PrincipalId);
+authority_id!(AgentId);
+authority_id!(AgentCredentialId);
 authority_id!(IdentityId);
 authority_id!(SessionId);
 authority_id!(PolicyId);
