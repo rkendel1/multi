@@ -25,8 +25,8 @@ pub use control::{
     RouteProtection,
 };
 pub use proposal_store::{
-    ChangeRecord, MemoryProposalStore, ProposalMetadata, ProposalStatus, ProposalStore,
-    StoredProposal,
+    ChangeRecord, MemoryProposalStore, ProposalDecision, ProposalMetadata, ProposalSource,
+    ProposalStatus, ProposalStore, StoredProposal,
 };
 pub use request::{BoundaryRequest, Method, SessionCredential, RESERVED_HEADER_PREFIX};
 pub use runtime::{AuthPortRuntime, BindingMode, RegistrationPolicy, SignInOutcome};

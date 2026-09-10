@@ -143,11 +143,61 @@ pub struct RouteDescription {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityRecommendation {
+    pub id: Option<String>,
     pub method: String,
     pub path: String,
     pub action: RecommendationAction,
     pub capability: Option<String>,
+    pub status: ProposalReviewStatus,
+    pub current_authority_state: String,
+    pub proposed_authority_state: String,
+    pub source: ProposalOrigin,
+    pub discovery_revision: u64,
+    pub authority_revision: u64,
+    pub contract_fingerprint: String,
+    pub confidence: Confidence,
+    pub reasons: Vec<String>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalReviewStatus {
+    Recommended,
+    Approved,
+    Rejected,
+    AlreadyProtected,
+    AlreadyPublic,
+    Stale,
+}
+
+impl ProposalReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recommended => "recommended",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::AlreadyProtected => "already_protected",
+            Self::AlreadyPublic => "already_public",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalOrigin {
+    Explicit,
+    Inferred,
+    Imported,
+}
+
+impl ProposalOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Inferred => "inferred",
+            Self::Imported => "imported",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +219,7 @@ impl RecommendationAction {
 pub struct AuthorityProposal {
     pub application: String,
     pub contract_fingerprint: String,
+    pub discovery_revision: u64,
     pub live_revision: u64,
     pub routes: Vec<RouteDescription>,
     pub inferences: Vec<Inference>,
@@ -245,6 +296,8 @@ pub fn propose_authority(
         .iter()
         .filter_map(|route| route.inference.clone())
         .collect::<Vec<_>>();
+    let contract_fingerprint = contract_fingerprint.into();
+    let discovery_revision = discovery_revision(&routes);
     let recommendations = routes
         .iter()
         .map(|route| {
@@ -262,6 +315,7 @@ pub fn propose_authority(
                 RecommendationAction::NoChange
             };
             AuthorityRecommendation {
+                id: None,
                 method: route.method.clone(),
                 path: route.path.clone(),
                 action,
@@ -269,6 +323,37 @@ pub fn propose_authority(
                     .capability
                     .clone()
                     .or_else(|| route.inference.as_ref().map(|i| i.capability.clone())),
+                status: match route.protection {
+                    ProtectionState::Public => ProposalReviewStatus::AlreadyPublic,
+                    ProtectionState::Protected => ProposalReviewStatus::AlreadyProtected,
+                    ProtectionState::Unprotected => match action {
+                        RecommendationAction::ProtectRoute => ProposalReviewStatus::Recommended,
+                        RecommendationAction::NoChange => ProposalReviewStatus::Recommended,
+                    },
+                },
+                current_authority_state: route.protection.as_str().to_string(),
+                proposed_authority_state: match action {
+                    RecommendationAction::ProtectRoute => "protected".to_string(),
+                    RecommendationAction::NoChange => route.protection.as_str().to_string(),
+                },
+                source: if route.capability.is_some() {
+                    ProposalOrigin::Explicit
+                } else {
+                    ProposalOrigin::Inferred
+                },
+                discovery_revision,
+                authority_revision: live_revision,
+                contract_fingerprint: contract_fingerprint.clone(),
+                confidence: route
+                    .inference
+                    .as_ref()
+                    .map(|inference| inference.confidence)
+                    .unwrap_or(Confidence::Unknown),
+                reasons: route
+                    .inference
+                    .as_ref()
+                    .map(|inference| inference.reasons.clone())
+                    .unwrap_or_else(|| vec![route.protection_reason.clone()]),
                 reason: match action {
                     RecommendationAction::NoChange => {
                         "nothing is applied without approval".to_string()
@@ -286,7 +371,8 @@ pub fn propose_authority(
             .name
             .clone()
             .unwrap_or_else(|| "application".to_string()),
-        contract_fingerprint: contract_fingerprint.into(),
+        contract_fingerprint,
+        discovery_revision,
         live_revision,
         routes,
         inferences,
@@ -394,15 +480,35 @@ pub fn render_proposal_text(proposal: &AuthorityProposal) -> String {
 
 pub fn render_proposal_json(proposal: &AuthorityProposal) -> String {
     format!(
-        "{{\n  \"application\": \"{}\",\n  \"contract_fingerprint\": \"{}\",\n  \"live_revision\": {},\n  \"routes\": [{}],\n  \"inferences\": [{}],\n  \"recommendations\": [{}],\n  \"warnings\": [{}]\n}}\n",
+        "{{\n  \"application\": \"{}\",\n  \"contract_fingerprint\": \"{}\",\n  \"discovery_revision\": {},\n  \"live_revision\": {},\n  \"routes\": [{}],\n  \"inferences\": [{}],\n  \"recommendations\": [{}],\n  \"warnings\": [{}]\n}}\n",
         escape(&proposal.application),
         escape(&proposal.contract_fingerprint),
+        proposal.discovery_revision,
         proposal.live_revision,
         proposal.routes.iter().map(route_json).collect::<Vec<_>>().join(", "),
         proposal.inferences.iter().map(inference_json).collect::<Vec<_>>().join(", "),
         proposal.recommendations.iter().map(recommendation_json).collect::<Vec<_>>().join(", "),
         proposal.warnings.iter().map(|warning| format!("\"{}\"", escape(warning))).collect::<Vec<_>>().join(", ")
     )
+}
+
+fn discovery_revision(routes: &[RouteDescription]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for route in routes {
+        route.method.hash(&mut hasher);
+        route.path.hash(&mut hasher);
+        route.source.as_str().hash(&mut hasher);
+        route.capability.hash(&mut hasher);
+        if let Some(inference) = &route.inference {
+            inference.capability.hash(&mut hasher);
+            inference.confidence.as_str().hash(&mut hasher);
+            inference.reasons.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn describe_route(
@@ -918,11 +1024,26 @@ fn inference_json(inference: &Inference) -> String {
 
 fn recommendation_json(recommendation: &AuthorityRecommendation) -> String {
     format!(
-        "{{\"method\": \"{}\", \"path\": \"{}\", \"action\": \"{}\", \"capability\": {}, \"reason\": \"{}\"}}",
+        "{{\"id\": {}, \"method\": \"{}\", \"path\": \"{}\", \"action\": \"{}\", \"capability\": {}, \"status\": \"{}\", \"current_authority_state\": \"{}\", \"proposed_authority_state\": \"{}\", \"source\": \"{}\", \"discovery_revision\": {}, \"authority_revision\": {}, \"contract_fingerprint\": \"{}\", \"confidence\": \"{}\", \"reasons\": [{}], \"reason\": \"{}\"}}",
+        option_string_json(recommendation.id.as_deref()),
         escape(&recommendation.method),
         escape(&recommendation.path),
         recommendation.action.as_str(),
         option_string_json(recommendation.capability.as_deref()),
+        recommendation.status.as_str(),
+        escape(&recommendation.current_authority_state),
+        escape(&recommendation.proposed_authority_state),
+        recommendation.source.as_str(),
+        recommendation.discovery_revision,
+        recommendation.authority_revision,
+        escape(&recommendation.contract_fingerprint),
+        recommendation.confidence.as_str(),
+        recommendation
+            .reasons
+            .iter()
+            .map(|reason| format!("\"{}\"", escape(reason)))
+            .collect::<Vec<_>>()
+            .join(", "),
         escape(&recommendation.reason)
     )
 }
