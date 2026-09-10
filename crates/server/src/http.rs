@@ -30,11 +30,16 @@ impl JsonValue {
             Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             Self::Null => "null".to_string(),
             Self::Array(items) => {
-                let items_str = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                let items_str = items
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("[{}]", items_str)
             }
             Self::Object(pairs) => {
-                let pairs_str = pairs.iter()
+                let pairs_str = pairs
+                    .iter()
                     .map(|(k, v)| format!("\"{}\": {}", escape(k), v.to_string()))
                     .collect::<Vec<_>>()
                     .join(", ");

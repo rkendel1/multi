@@ -69,7 +69,8 @@ pub trait ProposalStore: Send + Sync {
     fn mark_rejected(&self, proposal_id: &str, reason: String) -> Result<(), String>;
     fn store_change_record(&self, record: ChangeRecord) -> Result<(), String>;
     fn retrieve_change_record(&self, change_id: &str) -> Result<ChangeRecord, String>;
-    fn list_change_records(&self, limit: usize, offset: usize) -> Result<Vec<ChangeRecord>, String>;
+    fn list_change_records(&self, limit: usize, offset: usize)
+        -> Result<Vec<ChangeRecord>, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +189,11 @@ impl ProposalStore for MemoryProposalStore {
             .ok_or_else(|| format!("change `{}` was not found", change_id))
     }
 
-    fn list_change_records(&self, limit: usize, offset: usize) -> Result<Vec<ChangeRecord>, String> {
+    fn list_change_records(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ChangeRecord>, String> {
         let mut records = self
             .changes
             .lock()

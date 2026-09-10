@@ -60,7 +60,9 @@ impl AuthPortServer {
 
         // Check for control plane routes
         if request.path.starts_with("/_authport/") {
-            if let Some(response) = crate::control_routes::handle_control_route(&self.runtime, &request.path, http) {
+            if let Some(response) =
+                crate::control_routes::handle_control_route(&self.runtime, &request.path, http)
+            {
                 return response;
             }
         }

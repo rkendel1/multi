@@ -1,14 +1,13 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
+use crate::http::{HttpRequest, HttpResponse, JsonValue};
 use appport_auth_mesh_authz::Policy;
 use appport_auth_mesh_boundary::{
-    Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method,
-    ProposalMetadata, ProposalStatus, RouteId, RouteProtection as LiveRouteProtection,
-    StoredProposal,
+    Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method, ProposalMetadata,
+    ProposalStatus, RouteId, RouteProtection as LiveRouteProtection, StoredProposal,
 };
 use appport_auth_mesh_contract::PolicyId;
 use appport_auth_mesh_surface::AuthSurface;
-use crate::http::{HttpRequest, HttpResponse, JsonValue};
-use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Handle control plane routes (_authport/*)
 pub fn handle_control_route(
@@ -37,10 +36,7 @@ pub fn handle_control_route(
 
 fn overview(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     let now = SystemTime::now();
-    let uptime = now
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let uptime = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
     let desc = ApplicationDescription {
         name: "AuthPort".to_string(),
@@ -107,16 +103,14 @@ fn policies(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
     let policies_json: Vec<(String, JsonValue)> = authority
         .capability_policies
         .iter()
-        .map(|(cap, policy)| {
-            (
-                cap.clone(),
-                JsonValue::String(format!("{:?}", policy)),
-            )
-        })
+        .map(|(cap, policy)| (cap.clone(), JsonValue::String(format!("{:?}", policy))))
         .collect();
 
     let json = JsonValue::Object(vec![
-        ("revision".to_string(), JsonValue::Number(authority.revision as f64)),
+        (
+            "revision".to_string(),
+            JsonValue::Number(authority.revision as f64),
+        ),
         ("policies".to_string(), JsonValue::Object(policies_json)),
     ]);
 
@@ -133,8 +127,14 @@ fn providers(runtime: &std::sync::Arc<AuthPortRuntime>) -> HttpResponse {
             let enabled = runtime.is_provider_enabled(&provider.id);
             JsonValue::Object(vec![
                 ("id".to_string(), JsonValue::String(provider.id.clone())),
-                ("kind".to_string(), JsonValue::String(provider.kind.as_str().to_string())),
-                ("enabled".to_string(), JsonValue::String(if enabled { "true" } else { "false" }.to_string())),
+                (
+                    "kind".to_string(),
+                    JsonValue::String(provider.kind.as_str().to_string()),
+                ),
+                (
+                    "enabled".to_string(),
+                    JsonValue::String(if enabled { "true" } else { "false" }.to_string()),
+                ),
             ])
         })
         .collect();
@@ -154,11 +154,20 @@ fn propose(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> 
     match runtime.propose_change(change) {
         Ok(proposal) => {
             let json = JsonValue::Object(vec![
-                ("proposal_id".to_string(), JsonValue::String(proposal.id.clone())),
-                ("revision".to_string(), JsonValue::Number(proposal.revision as f64)),
+                (
+                    "proposal_id".to_string(),
+                    JsonValue::String(proposal.id.clone()),
+                ),
+                (
+                    "revision".to_string(),
+                    JsonValue::Number(proposal.revision as f64),
+                ),
                 ("change".to_string(), change_to_json(&proposal.change)),
                 ("preview".to_string(), preview_to_json(&proposal.preview)),
-                ("approval_token".to_string(), JsonValue::String(Approval::for_proposal(&proposal).token)),
+                (
+                    "approval_token".to_string(),
+                    JsonValue::String(Approval::for_proposal(&proposal).token),
+                ),
             ]);
             HttpResponse::ok_json(json)
         }
@@ -184,8 +193,14 @@ fn apply(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> Ht
 
     match runtime.apply_stored_proposal(&proposal_id, approval) {
         Ok((change_id, new_revision)) => HttpResponse::ok_json(JsonValue::Object(vec![
-            ("applied_change_id".to_string(), JsonValue::String(change_id)),
-            ("new_revision".to_string(), JsonValue::Number(new_revision as f64)),
+            (
+                "applied_change_id".to_string(),
+                JsonValue::String(change_id),
+            ),
+            (
+                "new_revision".to_string(),
+                JsonValue::Number(new_revision as f64),
+            ),
         ])),
         Err(msg) => HttpResponse::bad_request(&msg),
     }
@@ -198,14 +213,17 @@ fn revert(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> H
         None => return HttpResponse::bad_request("missing change_id"),
     };
 
-    propose(runtime, &HttpRequest {
-        body: format!(
-            "{{\"type\": \"revert\", \"change_id\": \"{}\"}}",
-            crate::http::escape(&change_id)
-        )
-        .into_bytes(),
-        ..request.clone()
-    })
+    propose(
+        runtime,
+        &HttpRequest {
+            body: format!(
+                "{{\"type\": \"revert\", \"change_id\": \"{}\"}}",
+                crate::http::escape(&change_id)
+            )
+            .into_bytes(),
+            ..request.clone()
+        },
+    )
 }
 
 fn history(runtime: &std::sync::Arc<AuthPortRuntime>, request: &HttpRequest) -> HttpResponse {
@@ -256,7 +274,8 @@ fn parse_authority_change(request: &HttpRequest) -> Result<AuthorityChange, Stri
         };
 
         let path = extract_quoted_field(&body_str, "path").ok_or("missing path")?;
-        let capability = extract_quoted_field(&body_str, "capability").ok_or("missing capability")?;
+        let capability =
+            extract_quoted_field(&body_str, "capability").ok_or("missing capability")?;
 
         Ok(AuthorityChange::ProtectRoute {
             method,
@@ -279,7 +298,8 @@ fn parse_authority_change(request: &HttpRequest) -> Result<AuthorityChange, Stri
 
         Ok(AuthorityChange::UnprotectRoute { method, path })
     } else if body_str.contains("set_policy") || body_str.contains("set_capability_policy") {
-        let capability = extract_quoted_field(&body_str, "capability").ok_or("missing capability")?;
+        let capability =
+            extract_quoted_field(&body_str, "capability").ok_or("missing capability")?;
         let policy_id = extract_quoted_field(&body_str, "policy").ok_or("missing policy")?;
 
         Ok(AuthorityChange::SetCapabilityPolicy {
@@ -294,7 +314,8 @@ fn parse_authority_change(request: &HttpRequest) -> Result<AuthorityChange, Stri
         || body_str.contains("disable_provider")
     {
         let provider = extract_quoted_field(&body_str, "provider").ok_or("missing provider")?;
-        let enabled = body_str.contains("\"enabled\": true") || body_str.contains("enable_provider");
+        let enabled =
+            body_str.contains("\"enabled\": true") || body_str.contains("enable_provider");
 
         Ok(AuthorityChange::SetProviderEnabled { provider, enabled })
     } else if body_str.contains("revert") {
@@ -349,12 +370,21 @@ fn system_time_json(time: SystemTime) -> JsonValue {
 fn proposal_metadata_to_json(metadata: &ProposalMetadata) -> JsonValue {
     JsonValue::Object(vec![
         ("id".to_string(), JsonValue::String(metadata.id.clone())),
-        ("change_type".to_string(), JsonValue::String(metadata.change_type.clone())),
+        (
+            "change_type".to_string(),
+            JsonValue::String(metadata.change_type.clone()),
+        ),
         ("status".to_string(), proposal_status_json(&metadata.status)),
-        ("created_at".to_string(), system_time_json(metadata.created_at)),
+        (
+            "created_at".to_string(),
+            system_time_json(metadata.created_at),
+        ),
         (
             "applied_at".to_string(),
-            metadata.applied_at.map(system_time_json).unwrap_or(JsonValue::Null),
+            metadata
+                .applied_at
+                .map(system_time_json)
+                .unwrap_or(JsonValue::Null),
         ),
     ])
 }
@@ -364,12 +394,21 @@ fn stored_proposal_to_json(proposal: &StoredProposal) -> JsonValue {
         ("id".to_string(), JsonValue::String(proposal.id.clone())),
         ("change".to_string(), change_to_json(&proposal.change)),
         ("preview".to_string(), preview_to_json(&proposal.preview)),
-        ("revision".to_string(), JsonValue::Number(proposal.revision as f64)),
+        (
+            "revision".to_string(),
+            JsonValue::Number(proposal.revision as f64),
+        ),
         ("status".to_string(), proposal_status_json(&proposal.status)),
-        ("created_at".to_string(), system_time_json(proposal.created_at)),
+        (
+            "created_at".to_string(),
+            system_time_json(proposal.created_at),
+        ),
         (
             "applied_at".to_string(),
-            proposal.applied_at.map(system_time_json).unwrap_or(JsonValue::Null),
+            proposal
+                .applied_at
+                .map(system_time_json)
+                .unwrap_or(JsonValue::Null),
         ),
         (
             "change_id".to_string(),
@@ -392,14 +431,23 @@ fn stored_proposal_to_json(proposal: &StoredProposal) -> JsonValue {
 
 fn change_record_to_json(record: &ChangeRecord) -> JsonValue {
     JsonValue::Object(vec![
-        ("change_id".to_string(), JsonValue::String(record.change_id.clone())),
-        ("proposal_id".to_string(), JsonValue::String(record.proposal_id.clone())),
+        (
+            "change_id".to_string(),
+            JsonValue::String(record.change_id.clone()),
+        ),
+        (
+            "proposal_id".to_string(),
+            JsonValue::String(record.proposal_id.clone()),
+        ),
         (
             "change_type".to_string(),
             JsonValue::String(record.change.change_type().to_string()),
         ),
         ("change".to_string(), change_to_json(&record.change)),
-        ("applied_at".to_string(), system_time_json(record.applied_at)),
+        (
+            "applied_at".to_string(),
+            system_time_json(record.applied_at),
+        ),
         (
             "applied_by".to_string(),
             record
@@ -473,7 +521,10 @@ fn route_protection_map_to_json(
             .iter()
             .map(|(route, protection)| {
                 JsonValue::Object(vec![
-                    ("method".to_string(), JsonValue::String(route.method.as_str().to_string())),
+                    (
+                        "method".to_string(),
+                        JsonValue::String(route.method.as_str().to_string()),
+                    ),
                     ("path".to_string(), JsonValue::String(route.path.clone())),
                     (
                         "capability".to_string(),
@@ -496,14 +547,29 @@ fn change_to_json(change: &AuthorityChange) -> JsonValue {
             path,
             capability,
         } => JsonValue::Object(vec![
-            ("type".to_string(), JsonValue::String("protect_route".to_string())),
-            ("method".to_string(), JsonValue::String(method.as_str().to_string())),
+            (
+                "type".to_string(),
+                JsonValue::String("protect_route".to_string()),
+            ),
+            (
+                "method".to_string(),
+                JsonValue::String(method.as_str().to_string()),
+            ),
             ("path".to_string(), JsonValue::String(path.clone())),
-            ("capability".to_string(), JsonValue::String(capability.clone())),
+            (
+                "capability".to_string(),
+                JsonValue::String(capability.clone()),
+            ),
         ]),
         AuthorityChange::UnprotectRoute { method, path } => JsonValue::Object(vec![
-            ("type".to_string(), JsonValue::String("unprotect_route".to_string())),
-            ("method".to_string(), JsonValue::String(method.as_str().to_string())),
+            (
+                "type".to_string(),
+                JsonValue::String("unprotect_route".to_string()),
+            ),
+            (
+                "method".to_string(),
+                JsonValue::String(method.as_str().to_string()),
+            ),
             ("path".to_string(), JsonValue::String(path.clone())),
         ]),
         AuthorityChange::SetCapabilityPolicy { capability, policy } => JsonValue::Object(vec![
@@ -511,7 +577,10 @@ fn change_to_json(change: &AuthorityChange) -> JsonValue {
                 "type".to_string(),
                 JsonValue::String("set_capability_policy".to_string()),
             ),
-            ("capability".to_string(), JsonValue::String(capability.clone())),
+            (
+                "capability".to_string(),
+                JsonValue::String(capability.clone()),
+            ),
             ("policy".to_string(), JsonValue::String(policy.id.0.clone())),
         ]),
         AuthorityChange::SetProviderEnabled { provider, enabled } => JsonValue::Object(vec![
@@ -524,7 +593,10 @@ fn change_to_json(change: &AuthorityChange) -> JsonValue {
         ]),
         AuthorityChange::Revert { change_id } => JsonValue::Object(vec![
             ("type".to_string(), JsonValue::String("revert".to_string())),
-            ("change_id".to_string(), JsonValue::String(change_id.clone())),
+            (
+                "change_id".to_string(),
+                JsonValue::String(change_id.clone()),
+            ),
         ]),
     }
 }

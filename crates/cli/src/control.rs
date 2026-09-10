@@ -70,7 +70,9 @@ fn apply(args: &[String]) -> Result<Output, CliError> {
         index += 1;
     }
     if !yes {
-        return Err(error("apply needs --yes to confirm in non-interactive mode"));
+        return Err(error(
+            "apply needs --yes to confirm in non-interactive mode",
+        ));
     }
 
     let proposal_id = match proposal_id {

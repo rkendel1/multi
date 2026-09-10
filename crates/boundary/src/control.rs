@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use appport_auth_mesh_authz::Policy;
 use crate::request::Method;
+use appport_auth_mesh_authz::Policy;
+use std::collections::BTreeMap;
 
 /// Route identifier: (method, path) pair
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -74,27 +74,16 @@ pub enum AuthorityChange {
     },
 
     /// Remove route protection
-    UnprotectRoute {
-        method: Method,
-        path: String,
-    },
+    UnprotectRoute { method: Method, path: String },
 
     /// Set policy for a capability
-    SetCapabilityPolicy {
-        capability: String,
-        policy: Policy,
-    },
+    SetCapabilityPolicy { capability: String, policy: Policy },
 
     /// Enable or disable a provider
-    SetProviderEnabled {
-        provider: String,
-        enabled: bool,
-    },
+    SetProviderEnabled { provider: String, enabled: bool },
 
     /// Revert a previously applied change.
-    Revert {
-        change_id: String,
-    },
+    Revert { change_id: String },
 }
 
 impl AuthorityChange {
@@ -180,10 +169,7 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
             method.as_str().hash(&mut hasher);
             path.hash(&mut hasher);
         }
-        AuthorityChange::SetCapabilityPolicy {
-            capability,
-            policy,
-        } => {
+        AuthorityChange::SetCapabilityPolicy { capability, policy } => {
             "SetCapabilityPolicy".hash(&mut hasher);
             capability.hash(&mut hasher);
             format!("{:?}", policy).hash(&mut hasher);
@@ -277,20 +263,13 @@ pub fn apply_change(
             let route_id = RouteId::new(method.clone(), path.clone());
             next.route_protection.remove(&route_id);
         }
-        AuthorityChange::SetCapabilityPolicy {
-            capability,
-            policy,
-        } => {
+        AuthorityChange::SetCapabilityPolicy { capability, policy } => {
             next.capability_policies
                 .insert(capability.clone(), policy.clone());
         }
         AuthorityChange::SetProviderEnabled { provider, enabled } => {
-            next.provider_state.insert(
-                provider.clone(),
-                ProviderState {
-                    enabled: *enabled,
-                },
-            );
+            next.provider_state
+                .insert(provider.clone(), ProviderState { enabled: *enabled });
         }
         AuthorityChange::Revert { .. } => {
             return Err("revert requires an applied change record".to_string());

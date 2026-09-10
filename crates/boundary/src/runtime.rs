@@ -355,7 +355,11 @@ impl AuthPortRuntime {
     }
 
     /// Apply a proposed change with approval
-    pub fn apply_change(&self, proposal: ChangeProposal, approval: Approval) -> Result<String, String> {
+    pub fn apply_change(
+        &self,
+        proposal: ChangeProposal,
+        approval: Approval,
+    ) -> Result<String, String> {
         // Verify the approval was created for this proposal
         if !approval.verify(&proposal) {
             return Err("approval token does not match proposal".to_string());
@@ -382,11 +386,8 @@ impl AuthPortRuntime {
         *authority = next;
         let resulting_state = authority.clone();
 
-        self.proposals.mark_applied(
-            &proposal.id,
-            change_id.clone(),
-            resulting_state.revision,
-        )?;
+        self.proposals
+            .mark_applied(&proposal.id, change_id.clone(), resulting_state.revision)?;
         self.proposals.store_change_record(ChangeRecord {
             change_id: change_id.clone(),
             proposal_id: proposal.id,
@@ -408,7 +409,11 @@ impl AuthPortRuntime {
         self.proposals.retrieve_proposal(proposal_id)
     }
 
-    pub fn list_proposals(&self, limit: usize, offset: usize) -> Result<Vec<ProposalMetadata>, String> {
+    pub fn list_proposals(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ProposalMetadata>, String> {
         self.proposals.list_proposals(limit, offset)
     }
 

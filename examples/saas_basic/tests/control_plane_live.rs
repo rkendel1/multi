@@ -1,14 +1,16 @@
 //! End-to-end control plane test: modify authority on live running application.
-//! 
+//!
 //! The killer test case for PR5: proves that changes to live authority take
 //! effect immediately without application restart.
 
-use std::sync::Arc;
-use appport_auth_mesh_boundary::{Approval, AuthorityChange, AuthPortRuntime, BindingMode, Method, RegistrationPolicy};
+use appport_auth_mesh_boundary::{
+    Approval, AuthPortRuntime, AuthorityChange, BindingMode, Method, RegistrationPolicy,
+};
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_runtime::MemoryStores;
 use saas_basic::bootstrap::bootstrap;
+use std::sync::Arc;
 
 const DECLARATION: &str = r#"
 use auth {
@@ -63,7 +65,9 @@ fn killer_test_route_protection_without_restart() {
             .any(|(r, p)| {
                 r.method == Method::Post
                     && r.path == "/invoices"
-                    && p.capability.as_ref().map_or(false, |c| c == "invoice.create")
+                    && p.capability
+                        .as_ref()
+                        .map_or(false, |c| c == "invoice.create")
             }),
         "after: POST /invoices should require invoice.create"
     );
@@ -72,7 +76,9 @@ fn killer_test_route_protection_without_restart() {
     // 3. APPLY: Apply the change
     println!("\n=== Step 3: Apply protection ===");
     let approval = Approval::for_proposal(&proposal);
-    let change_id = runtime.apply_change(proposal, approval).expect("apply change");
+    let change_id = runtime
+        .apply_change(proposal, approval)
+        .expect("apply change");
     println!("Applied change: {}", change_id);
 
     // 4. CRITICAL: Verify protection is now live (without restart)
@@ -88,7 +94,10 @@ fn killer_test_route_protection_without_restart() {
     // 5. Verify GET /invoices is still unprotected
     println!("\n=== Step 5: Verify other methods unaffected ===");
     let protection = runtime.get_route_protection(&Method::Get, "/invoices");
-    assert_eq!(protection, None, "GET /invoices should still be unprotected");
+    assert_eq!(
+        protection, None,
+        "GET /invoices should still be unprotected"
+    );
     println!("✓ GET /invoices remains unprotected");
 
     // 6. CHANGE: Unprotect the route
@@ -98,13 +107,20 @@ fn killer_test_route_protection_without_restart() {
         path: "/invoices".to_string(),
     };
 
-    let proposal2 = runtime.propose_change(unprotect).expect("propose unprotect");
+    let proposal2 = runtime
+        .propose_change(unprotect)
+        .expect("propose unprotect");
     let approval2 = Approval::for_proposal(&proposal2);
-    runtime.apply_change(proposal2, approval2).expect("apply unprotect");
+    runtime
+        .apply_change(proposal2, approval2)
+        .expect("apply unprotect");
 
     // Verify protection is removed (without restart)
     let protection = runtime.get_route_protection(&Method::Post, "/invoices");
-    assert_eq!(protection, None, "POST /invoices should be unprotected again");
+    assert_eq!(
+        protection, None,
+        "POST /invoices should be unprotected again"
+    );
     println!("✓ Protection removed immediately (no restart)");
 
     println!("\n=== ✓ KILLER TEST PASSED ===");
@@ -149,8 +165,14 @@ fn multiple_routes_independently_protected() {
         Some("order.create".to_string())
     );
     // Other methods should not be protected
-    assert_eq!(runtime.get_route_protection(&Method::Get, "/invoices"), None);
-    assert_eq!(runtime.get_route_protection(&Method::Delete, "/invoices"), None);
+    assert_eq!(
+        runtime.get_route_protection(&Method::Get, "/invoices"),
+        None
+    );
+    assert_eq!(
+        runtime.get_route_protection(&Method::Delete, "/invoices"),
+        None
+    );
 }
 
 #[test]
@@ -173,7 +195,10 @@ fn state_survives_multiple_sequential_changes() {
         let proposal_rev = proposal.revision;
         revisions.push(proposal_rev);
 
-        assert!(proposal_rev == prev_revision, "proposal revision should match current state");
+        assert!(
+            proposal_rev == prev_revision,
+            "proposal revision should match current state"
+        );
 
         let approval = Approval::for_proposal(&proposal);
         runtime.apply_change(proposal, approval).expect("apply");
