@@ -481,7 +481,7 @@ fn the_boundary_is_framework_neutral() {
 
     let credential = match signed_in {
         appport_auth_mesh_boundary::SignInOutcome::Authenticated { credential, .. } => credential,
-        other => panic!("expected an authenticated outcome, got {other:?}"),
+        _ => panic!("expected an authenticated outcome"),
     };
 
     let request =

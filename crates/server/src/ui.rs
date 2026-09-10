@@ -1,4 +1,4 @@
-use appport_auth_mesh_dsl::{AuthUiMode, UiScreen};
+use appport_auth_mesh_dsl::{AuthUiMode, PasswordPolicy, UiScreen};
 use appport_auth_mesh_surface::AuthSurface;
 
 /// The client library, served to the browser. It is the same file the JS
@@ -10,7 +10,7 @@ pub const CLIENT_JS: &str = include_str!("../../../clients/js/authport.js");
 /// The provider buttons come from the same `AuthSurface` the runtime
 /// authenticates against: there is one provider declaration, and this reads it
 /// rather than repeating it.
-pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
+pub fn render_sign_in(surface: &AuthSurface, policy: &PasswordPolicy, tenants: &[String]) -> String {
     let providers = surface
         .ui
         .screen(UiScreen::Login)
@@ -69,6 +69,7 @@ pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
             html_escape(tenants.first().map(String::as_str).unwrap_or("default"))
         )
     };
+    let requirements = password_requirements_html(policy);
 
     format!(
         r#"<!doctype html>
@@ -89,6 +90,9 @@ pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
     ul {{ padding-left: 1.1rem; }}
     .muted {{ opacity: 0.6; }}
     #status {{ margin-top: 1rem; white-space: pre-wrap; }}
+    #password-policy {{ margin: 0.75rem 0; }}
+    #password-policy li.ok {{ color: #1a7f37; }}
+    #password-policy li.missing {{ color: #cf222e; }}
   </style>
 </head>
 <body>
@@ -108,6 +112,12 @@ pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
       <label>Password
         <input name="password" id="password" type="password" autocomplete="current-password" required>
       </label>
+      <section id="password-policy" aria-live="polite">
+        <strong>Create password</strong>
+        <ul>
+          {requirements}
+        </ul>
+      </section>
       <button type="submit">Sign in</button>
     </form>
     <ul>
@@ -126,6 +136,30 @@ pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
       }}
     }});
     auth.session().catch(() => {{}});
+    const policyList = document.getElementById("password-policy").querySelector("ul");
+    const passwordInput = document.getElementById("password");
+    function renderPasswordPolicy(policy) {{
+      const checks = [
+        ["At least " + policy.min_length + " characters", (value) => value.length >= policy.min_length],
+      ];
+      if (policy.require_uppercase) checks.push(["Contains an uppercase letter", (value) => /[A-Z]/.test(value)]);
+      if (policy.require_lowercase) checks.push(["Contains a lowercase letter", (value) => /[a-z]/.test(value)]);
+      if (policy.require_number) checks.push(["Contains a number", (value) => /[0-9]/.test(value)]);
+      if (policy.require_special_character) checks.push(["Contains a special character", (value) => /[^A-Za-z0-9\s]/.test(value)]);
+      function update() {{
+        const value = passwordInput.value || "";
+        policyList.innerHTML = checks.map(([label, ok]) => {{
+          const passed = ok(value);
+          return `<li class="${{passed ? "ok" : "missing"}}">${{passed ? "✓" : "✗"}} ${{label}}</li>`;
+        }}).join("");
+      }}
+      passwordInput.addEventListener("input", update);
+      update();
+    }}
+    fetch("/_authport/password-policy")
+      .then((response) => response.json())
+      .then(renderPasswordPolicy)
+      .catch(() => {{}});
 
     document.getElementById("signin").addEventListener("submit", async (event) => {{
       event.preventDefault();
@@ -145,6 +179,7 @@ pub fn render_sign_in(surface: &AuthSurface, tenants: &[String]) -> String {
         tenant_field = tenant_field,
         provider_options = provider_options,
         unavailable = unavailable,
+        requirements = requirements,
     )
 }
 
@@ -164,4 +199,25 @@ fn html_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn password_requirements_html(policy: &PasswordPolicy) -> String {
+    let mut requirements = vec![format!("At least {} characters", policy.min_length)];
+    if policy.require_uppercase {
+        requirements.push("Contains an uppercase letter".to_string());
+    }
+    if policy.require_lowercase {
+        requirements.push("Contains a lowercase letter".to_string());
+    }
+    if policy.require_number {
+        requirements.push("Contains a number".to_string());
+    }
+    if policy.require_special_character {
+        requirements.push("Contains a special character".to_string());
+    }
+    requirements
+        .iter()
+        .map(|item| format!("<li>{}</li>", html_escape(item)))
+        .collect::<Vec<_>>()
+        .join("\n          ")
 }

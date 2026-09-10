@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use appport_auth_mesh_dsl::PasswordPolicy;
+
 /// The connector contract.
 ///
 /// A connector proves an *external* identity. It never creates an AuthPort
@@ -17,6 +19,37 @@ pub trait AuthConnector: Send + Sync {
 
     /// Complete an attempt, yielding proof of an external identity.
     fn authenticate(&self, response: &AuthResponse) -> Result<ExternalIdentity, ConnectorError>;
+
+    fn supports_password_management(&self) -> bool {
+        false
+    }
+
+    fn change_password(
+        &self,
+        _tenant_id: &str,
+        _username: &str,
+        _current_password: &str,
+        _new_password: &str,
+        _policy: &PasswordPolicy,
+        _now: i64,
+    ) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Unsupported {
+            connector: self.id().to_string(),
+        })
+    }
+
+    fn reset_password(
+        &self,
+        _tenant_id: &str,
+        _username: &str,
+        _new_password: &str,
+        _policy: &PasswordPolicy,
+        _now: i64,
+    ) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Unsupported {
+            connector: self.id().to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -219,6 +252,12 @@ pub enum ConnectorError {
     ChallengeMismatch {
         connector: String,
     },
+    PasswordReused {
+        connector: String,
+    },
+    PasswordHashingFailed {
+        connector: String,
+    },
 }
 
 impl ConnectorError {
@@ -230,7 +269,9 @@ impl ConnectorError {
             | Self::DuplicateConnector { connector }
             | Self::InvalidRequest { connector, .. }
             | Self::InvalidCredentials { connector }
-            | Self::ChallengeMismatch { connector } => connector,
+            | Self::ChallengeMismatch { connector }
+            | Self::PasswordReused { connector }
+            | Self::PasswordHashingFailed { connector } => connector,
         }
     }
 }
@@ -266,6 +307,12 @@ impl std::fmt::Display for ConnectorError {
                     "connector `{}`: challenge does not match response",
                     connector
                 )
+            }
+            Self::PasswordReused { connector } => {
+                write!(f, "connector `{}`: PASSWORD_REUSED", connector)
+            }
+            Self::PasswordHashingFailed { connector } => {
+                write!(f, "connector `{}`: password hashing failed", connector)
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::request::Method;
 use appport_auth_mesh_authz::Policy;
+use appport_auth_mesh_dsl::PasswordPolicy;
 use std::collections::BTreeMap;
 
 /// Route identifier: (method, path) pair
@@ -37,6 +38,8 @@ pub struct LiveAuthorityState {
     pub capability_policies: BTreeMap<String, Policy>,
     /// Current enabled/disabled state for each provider
     pub provider_state: BTreeMap<String, ProviderState>,
+    /// Effective password policy override managed by authority proposals.
+    pub password_policy: Option<PasswordPolicy>,
     /// Monotonic revision number; increments on each change
     pub revision: u64,
 }
@@ -47,6 +50,7 @@ impl LiveAuthorityState {
             route_protection: BTreeMap::new(),
             capability_policies: BTreeMap::new(),
             provider_state: BTreeMap::new(),
+            password_policy: None,
             revision: 0,
         }
     }
@@ -82,6 +86,9 @@ pub enum AuthorityChange {
     /// Enable or disable a provider
     SetProviderEnabled { provider: String, enabled: bool },
 
+    /// Replace the live password policy.
+    SetPasswordPolicy { policy: PasswordPolicy },
+
     /// Revert a previously applied change.
     Revert { change_id: String },
 }
@@ -93,6 +100,7 @@ impl AuthorityChange {
             Self::UnprotectRoute { .. } => "unprotect_route",
             Self::SetCapabilityPolicy { .. } => "set_capability_policy",
             Self::SetProviderEnabled { .. } => "set_provider_enabled",
+            Self::SetPasswordPolicy { .. } => "set_password_policy",
             Self::Revert { .. } => "revert",
         }
     }
@@ -111,6 +119,7 @@ pub struct PreviewState {
     pub route_protection: BTreeMap<RouteId, RouteProtection>,
     pub capability_policies: BTreeMap<String, Policy>,
     pub provider_state: BTreeMap<String, ProviderState>,
+    pub password_policy: Option<PasswordPolicy>,
 }
 
 impl From<&LiveAuthorityState> for PreviewState {
@@ -119,6 +128,7 @@ impl From<&LiveAuthorityState> for PreviewState {
             route_protection: state.route_protection.clone(),
             capability_policies: state.capability_policies.clone(),
             provider_state: state.provider_state.clone(),
+            password_policy: state.password_policy.clone(),
         }
     }
 }
@@ -179,6 +189,10 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
             provider.hash(&mut hasher);
             enabled.hash(&mut hasher);
         }
+        AuthorityChange::SetPasswordPolicy { policy } => {
+            "SetPasswordPolicy".hash(&mut hasher);
+            policy.revision_fingerprint().hash(&mut hasher);
+        }
         AuthorityChange::Revert { change_id } => {
             "Revert".hash(&mut hasher);
             change_id.hash(&mut hasher);
@@ -237,6 +251,10 @@ pub fn apply_change(
         AuthorityChange::SetProviderEnabled { provider, enabled } => {
             next.provider_state
                 .insert(provider.clone(), ProviderState { enabled: *enabled });
+        }
+        AuthorityChange::SetPasswordPolicy { policy } => {
+            policy.validate().map_err(|err| err.message)?;
+            next.password_policy = Some(policy.clone());
         }
         AuthorityChange::Revert { .. } => {
             return Err("revert requires an applied change record".to_string());

@@ -20,6 +20,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("run") => run_command(&args[1..]),
         Some("policies") => policies(&args[1..]),
         Some("policy") => policy(&args[1..]),
+        Some("password-policy") => password_policy(&args[1..]),
         Some("explain") => explain(&args[1..]),
         _ => Err(error("unknown control command")),
     }
@@ -311,6 +312,30 @@ fn policies(args: &[String]) -> Result<Output, CliError> {
     })
 }
 
+fn password_policy(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, dry_run) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    if filtered.first().map(String::as_str) == Some("propose") {
+        let body = proposal_body("password-policy", &filtered[1..])?;
+        if dry_run {
+            return Ok(Output {
+                text: format!("dry-run proposal for {}\n{}\n", server, body),
+            });
+        }
+        let response = http_post(&server, "/_authport/propose", &body)?;
+        if let Some(proposal_id) = extract_quoted_field(&response, "proposal_id") {
+            cache_proposal(&proposal_id, &server, &response)?;
+        }
+        return Ok(Output {
+            text: format!("proposal response from {}\n{}\n", server, response),
+        });
+    }
+    let response = http_get(&server, "/_authport/password-policy")?;
+    Ok(Output {
+        text: format!("password policy from {}\n{}\n", server, response),
+    })
+}
+
 fn policy(args: &[String]) -> Result<Output, CliError> {
     let (server, _output_token, _) = common_options(args)?;
     let filtered = strip_common_options(args);
@@ -413,8 +438,54 @@ fn proposal_body(change_type: &str, args: &[String]) -> Result<String, CliError>
             "{{\"type\": \"disable_provider\", \"provider\": \"{}\", \"enabled\": false}}",
             escape(&get("--provider")?)
         )),
+        "password-policy" => password_policy_body(args),
         other => Err(error(format!("unknown proposal change type `{}`", other))),
     }
+}
+
+fn password_policy_body(args: &[String]) -> Result<String, CliError> {
+    let mut fields = vec!["\"type\": \"set_password_policy\"".to_string()];
+    for (flag, field) in [
+        ("--min-length", "min_length"),
+        ("--max-length", "max_length"),
+        ("--expiration-days", "expiration_days"),
+        ("--history-count", "history_count"),
+    ] {
+        if let Some(value) = option_value(args, flag) {
+            fields.push(format!("\"{}\": {}", field, value));
+        }
+    }
+    for (flag, field) in [
+        ("--require-uppercase", "require_uppercase"),
+        ("--require-lowercase", "require_lowercase"),
+        ("--require-number", "require_number"),
+        ("--require-special-character", "require_special_character"),
+        ("--allow-password-change", "allow_password_change"),
+        ("--allow-password-reset", "allow_password_reset"),
+    ] {
+        if args.iter().any(|arg| arg == flag) {
+            fields.push(format!("\"{}\": true", field));
+        }
+    }
+    for (flag, field) in [
+        ("--no-uppercase", "require_uppercase"),
+        ("--no-lowercase", "require_lowercase"),
+        ("--no-number", "require_number"),
+        ("--no-special-character", "require_special_character"),
+        ("--no-password-change", "allow_password_change"),
+        ("--no-password-reset", "allow_password_reset"),
+    ] {
+        if args.iter().any(|arg| arg == flag) {
+            fields.push(format!("\"{}\": false", field));
+        }
+    }
+    if args.iter().any(|arg| arg == "--no-expiration") {
+        fields.push("\"expiration_days\": null".to_string());
+    }
+    if fields.len() == 1 {
+        return Err(error("password-policy propose needs at least one setting"));
+    }
+    Ok(format!("{{{}}}", fields.join(", ")))
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {

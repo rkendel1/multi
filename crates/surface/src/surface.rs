@@ -184,6 +184,27 @@ impl AuthRoute {
                 AuthFeature::Signup,
             ),
             Self::new(
+                "/auth/password/change",
+                &[Post],
+                AuthOperation::PasswordChange,
+                false,
+                AuthFeature::Signup,
+            ),
+            Self::new(
+                "/auth/password/reset",
+                &[Post],
+                AuthOperation::PasswordReset,
+                false,
+                AuthFeature::Signup,
+            ),
+            Self::new(
+                "/_authport/password-policy",
+                &[Get],
+                AuthOperation::PasswordPolicy,
+                false,
+                AuthFeature::ControlPlane,
+            ),
+            Self::new(
                 "/auth/logout",
                 &[Post],
                 AuthOperation::Logout,
@@ -318,6 +339,9 @@ impl AuthMethod {
 pub enum AuthOperation {
     Login,
     Signup,
+    PasswordChange,
+    PasswordReset,
+    PasswordPolicy,
     Logout,
     Session,
     Providers,
@@ -337,6 +361,9 @@ impl AuthOperation {
         match self {
             Self::Login => "login",
             Self::Signup => "signup",
+            Self::PasswordChange => "password_change",
+            Self::PasswordReset => "password_reset",
+            Self::PasswordPolicy => "password_policy",
             Self::Logout => "logout",
             Self::Session => "session",
             Self::Providers => "providers",

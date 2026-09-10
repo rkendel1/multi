@@ -452,6 +452,14 @@ pub enum DenialReason {
     UnsupportedConnector,
     InvalidSession,
     MissingCredential,
+    PasswordTooShort,
+    PasswordTooLong,
+    PasswordMissingUppercase,
+    PasswordMissingLowercase,
+    PasswordMissingNumber,
+    PasswordMissingSpecialCharacter,
+    PasswordReused,
+    PasswordExpired,
     PolicyDenied,
     ConditionFailed,
     /// The decision could not be durably recorded, so it is not a decision.
@@ -488,6 +496,14 @@ impl DenialReason {
             Self::UnsupportedConnector => "unsupported_connector",
             Self::InvalidSession => "invalid_session",
             Self::MissingCredential => "missing_credential",
+            Self::PasswordTooShort => "PASSWORD_TOO_SHORT",
+            Self::PasswordTooLong => "PASSWORD_TOO_LONG",
+            Self::PasswordMissingUppercase => "PASSWORD_MISSING_UPPERCASE",
+            Self::PasswordMissingLowercase => "PASSWORD_MISSING_LOWERCASE",
+            Self::PasswordMissingNumber => "PASSWORD_MISSING_NUMBER",
+            Self::PasswordMissingSpecialCharacter => "PASSWORD_MISSING_SPECIAL_CHARACTER",
+            Self::PasswordReused => "PASSWORD_REUSED",
+            Self::PasswordExpired => "PASSWORD_EXPIRED",
             Self::PolicyDenied => "policy_denied",
             Self::ConditionFailed => "condition_failed",
             Self::AuditUnavailable => "audit_unavailable",
@@ -594,6 +610,14 @@ impl AuthorizationDecision {
                 | DenialReason::InvalidSession
                 | DenialReason::MissingCredential => DecisionReason::SessionInvalid,
                 DenialReason::PolicyDenied => DecisionReason::PolicyDenied,
+                DenialReason::PasswordTooShort
+                | DenialReason::PasswordTooLong
+                | DenialReason::PasswordMissingUppercase
+                | DenialReason::PasswordMissingLowercase
+                | DenialReason::PasswordMissingNumber
+                | DenialReason::PasswordMissingSpecialCharacter
+                | DenialReason::PasswordReused
+                | DenialReason::PasswordExpired => DecisionReason::PolicyDenied,
                 DenialReason::ConditionFailed => DecisionReason::ConditionFailed,
                 DenialReason::DelegationMissing => DecisionReason::DelegationMissing,
                 DenialReason::ExpiredDelegation => DecisionReason::DelegationExpired,

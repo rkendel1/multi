@@ -13,6 +13,7 @@ pub struct AuthConfig {
     pub agents: bool,
     pub policies: Vec<PolicyDef>,
     pub ui: AuthUiConfig,
+    pub password_policy: PasswordPolicy,
 }
 
 impl Default for AuthConfig {
@@ -25,6 +26,7 @@ impl Default for AuthConfig {
             agents: false,
             policies: Vec::new(),
             ui: AuthUiConfig::default(),
+            password_policy: PasswordPolicy::default(),
         }
     }
 }
@@ -53,6 +55,7 @@ impl AuthConfig {
             agents: self.agents,
             policies,
             ui: self.ui.canonical(),
+            password_policy: self.password_policy.clone(),
         }
     }
 
@@ -125,6 +128,7 @@ impl AuthConfig {
         }
 
         self.ui.validate()?;
+        self.password_policy.validate()?;
 
         Ok(())
     }
@@ -180,6 +184,7 @@ impl AuthConfig {
             }
         }
         self.ui.write_canonical(out);
+        self.password_policy.write_canonical(out);
     }
 }
 
@@ -223,6 +228,81 @@ pub struct PolicyDef {
 pub struct PolicyClaimCondition {
     pub claim: String,
     pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordPolicy {
+    pub min_length: usize,
+    pub max_length: usize,
+    pub require_uppercase: bool,
+    pub require_lowercase: bool,
+    pub require_number: bool,
+    pub require_special_character: bool,
+    pub password_expiration_days: Option<u32>,
+    pub password_history_count: usize,
+    pub allow_password_change: bool,
+    pub allow_password_reset: bool,
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self {
+            min_length: 12,
+            max_length: 128,
+            require_uppercase: false,
+            require_lowercase: false,
+            require_number: false,
+            require_special_character: false,
+            password_expiration_days: None,
+            password_history_count: 5,
+            allow_password_change: true,
+            allow_password_reset: true,
+        }
+    }
+}
+
+impl PasswordPolicy {
+    pub fn validate(&self) -> Result<(), AuthConfigError> {
+        if self.min_length == 0 {
+            return Err(AuthConfigError {
+                message: "password min_length must be at least 1".to_string(),
+            });
+        }
+        if self.max_length < self.min_length {
+            return Err(AuthConfigError {
+                message: "password max_length must be greater than or equal to min_length"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn revision_fingerprint(&self) -> String {
+        let mut bytes = Vec::new();
+        self.write_canonical(&mut bytes);
+        format!("{:016x}", stable_hash(&bytes))
+    }
+
+    pub fn write_canonical(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(
+            format!(
+                "pwd_policy=min:{};max:{};upper:{};lower:{};number:{};special:{};expiration:{};history:{};change:{};reset:{};",
+                self.min_length,
+                self.max_length,
+                self.require_uppercase,
+                self.require_lowercase,
+                self.require_number,
+                self.require_special_character,
+                self.password_expiration_days
+                    .map(|days| days.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                self.password_history_count,
+                self.allow_password_change,
+                self.allow_password_reset
+            )
+            .as_bytes(),
+        );
+    }
 }
 
 impl ClaimKind {

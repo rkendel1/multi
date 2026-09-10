@@ -93,6 +93,18 @@ impl AuthPortServer {
             }
             AuthOperation::Login => self.complete(self.runtime.sign_in(request)),
             AuthOperation::Signup => self.complete(self.runtime.sign_up(request)),
+            AuthOperation::PasswordChange => match self.runtime.change_password(request) {
+                Ok(()) => HttpResponse::json(200, "{\"changed\": true}"),
+                Err(err) => denial(&err),
+            },
+            AuthOperation::PasswordReset => match self.runtime.reset_password(request) {
+                Ok(()) => HttpResponse::json(200, "{\"reset\": true}"),
+                Err(err) => denial(&err),
+            },
+            AuthOperation::PasswordPolicy => HttpResponse::json(
+                200,
+                crate::control_routes::password_policy_json(&self.runtime).to_string(),
+            ),
             AuthOperation::Logout => match self.runtime.sign_out(request) {
                 Ok(()) => {
                     HttpResponse::json(200, "{\"signed_out\": true}").clearing_session_cookie()
@@ -359,7 +371,14 @@ impl AuthPortServer {
 
     fn render_screen(&self, screen: UiScreen) -> HttpResponse {
         if serves_default_screen(self.runtime.surface(), screen) {
-            HttpResponse::html(200, render_sign_in(self.runtime.surface(), &self.tenants))
+            HttpResponse::html(
+                200,
+                render_sign_in(
+                    self.runtime.surface(),
+                    &self.runtime.effective_password_policy().policy,
+                    &self.tenants,
+                ),
+            )
         } else {
             // The contract says the application owns this screen.
             HttpResponse::denied(404, "custom_ui", "this screen is served by the application")

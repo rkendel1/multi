@@ -83,7 +83,7 @@ fn sign_in_request(tenant: &str, username: &str, password: &str) -> BoundaryRequ
 fn issued(outcome: SignInOutcome) -> SessionCredential {
     match outcome {
         SignInOutcome::Authenticated { credential, .. } => credential,
-        other => panic!("expected an authenticated outcome, got {other:?}"),
+        _ => panic!("expected an authenticated outcome"),
     }
 }
 

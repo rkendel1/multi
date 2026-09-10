@@ -1825,6 +1825,8 @@ fn connector_error(err: ConnectorError) -> AuthError {
         ConnectorError::InvalidRequest { .. }
         | ConnectorError::InvalidCredentials { .. }
         | ConnectorError::ChallengeMismatch { .. } => DenialReason::UnknownPrincipal,
+        ConnectorError::PasswordReused { .. } => DenialReason::PasswordReused,
+        ConnectorError::PasswordHashingFailed { .. } => DenialReason::PolicyDenied,
     };
     let stage = match err {
         ConnectorError::UnknownConnector { .. }
