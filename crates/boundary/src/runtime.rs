@@ -16,7 +16,14 @@ use appport_auth_mesh_surface::{AuthSurface, ProviderSurface};
 use crate::boundary::{AuthBoundary, Requirement};
 use crate::clock::{Clock, SystemClock};
 use crate::context::AuthContext;
-use crate::control::{apply_change, Approval, AuthorityChange, ChangeProposal, LiveAuthorityState, Preview, PreviewState, RouteId};
+use crate::control::{
+    apply_change, apply_revert_change, Approval, AuthorityChange, ChangeProposal,
+    LiveAuthorityState, Preview, PreviewState, RouteId,
+};
+use crate::proposal_store::{
+    ChangeRecord, MemoryProposalStore, ProposalMetadata, ProposalStatus, ProposalStore,
+    StoredProposal,
+};
 use crate::request::{BoundaryRequest, Method, SessionCredential};
 
 /// Where the boundary is placed.
@@ -98,6 +105,7 @@ pub struct AuthPortRuntime {
     registration: RegistrationPolicy,
     /// Live authority state overlays the immutable contract
     authority: Arc<RwLock<LiveAuthorityState>>,
+    proposals: Arc<dyn ProposalStore>,
 }
 
 impl AuthPortRuntime {
@@ -117,6 +125,7 @@ impl AuthPortRuntime {
             clock: Arc::new(SystemClock),
             registration: RegistrationPolicy::default(),
             authority: Arc::new(RwLock::new(LiveAuthorityState::new())),
+            proposals: Arc::new(MemoryProposalStore::new()),
         })
     }
 
@@ -148,6 +157,11 @@ impl AuthPortRuntime {
 
     pub fn with_session_ttl(mut self, seconds: i64) -> Self {
         self.mesh = self.mesh.with_session_ttl(seconds);
+        self
+    }
+
+    pub fn with_proposal_store(mut self, proposals: Arc<dyn ProposalStore>) -> Self {
+        self.proposals = proposals;
         self
     }
 
@@ -312,16 +326,32 @@ impl AuthPortRuntime {
     /// Propose a change to authority state
     pub fn propose_change(&self, change: AuthorityChange) -> Result<ChangeProposal, String> {
         let current = self.authority.read().unwrap().clone();
-        let after = apply_change(&current, &change)?;
+        let after = self.preview_authority_change(&current, &change)?;
+        let id = self.proposals.allocate_proposal_id();
 
-        Ok(ChangeProposal {
+        let proposal = ChangeProposal {
+            id: id.clone(),
             change,
             preview: Preview {
                 before: PreviewState::from(&current),
                 after: PreviewState::from(&after),
             },
             revision: current.revision,
-        })
+        };
+
+        self.proposals.store_proposal(StoredProposal {
+            id,
+            change: proposal.change.clone(),
+            preview: proposal.preview.clone(),
+            revision: proposal.revision,
+            status: ProposalStatus::Pending,
+            created_at: SystemTime::now(),
+            applied_at: None,
+            change_id: None,
+            rejection_reason: None,
+        })?;
+
+        Ok(proposal)
     }
 
     /// Apply a proposed change with approval
@@ -338,7 +368,8 @@ impl AuthPortRuntime {
             return Err("change conflicts with newer authority state".to_string());
         }
 
-        let next = apply_change(&authority, &proposal.change)?;
+        let previous_state = authority.clone();
+        let next = self.preview_authority_change(&authority, &proposal.change)?;
         let change_id = format!(
             "change-{}-rev{}",
             SystemTime::now()
@@ -349,8 +380,74 @@ impl AuthPortRuntime {
         );
 
         *authority = next;
+        let resulting_state = authority.clone();
+
+        self.proposals.mark_applied(
+            &proposal.id,
+            change_id.clone(),
+            resulting_state.revision,
+        )?;
+        self.proposals.store_change_record(ChangeRecord {
+            change_id: change_id.clone(),
+            proposal_id: proposal.id,
+            reverted_change_id: match &proposal.change {
+                AuthorityChange::Revert { change_id } => Some(change_id.clone()),
+                _ => None,
+            },
+            change: proposal.change,
+            previous_state,
+            resulting_state,
+            applied_at: SystemTime::now(),
+            applied_by: None,
+        })?;
 
         Ok(change_id)
+    }
+
+    pub fn retrieve_proposal(&self, proposal_id: &str) -> Result<StoredProposal, String> {
+        self.proposals.retrieve_proposal(proposal_id)
+    }
+
+    pub fn list_proposals(&self, limit: usize, offset: usize) -> Result<Vec<ProposalMetadata>, String> {
+        self.proposals.list_proposals(limit, offset)
+    }
+
+    pub fn apply_stored_proposal(
+        &self,
+        proposal_id: &str,
+        approval: Approval,
+    ) -> Result<(String, u64), String> {
+        let stored = self.proposals.retrieve_proposal(proposal_id)?;
+        if stored.status != ProposalStatus::Pending {
+            return Err(format!("proposal `{}` is not pending", proposal_id));
+        }
+        let proposal = ChangeProposal {
+            id: stored.id,
+            change: stored.change,
+            preview: stored.preview,
+            revision: stored.revision,
+        };
+        let change_id = self.apply_change(proposal, approval)?;
+        let revision = self.live_authority().revision;
+        Ok((change_id, revision))
+    }
+
+    pub fn history(&self, limit: usize, offset: usize) -> Result<Vec<ChangeRecord>, String> {
+        self.proposals.list_change_records(limit, offset)
+    }
+
+    fn preview_authority_change(
+        &self,
+        current: &LiveAuthorityState,
+        change: &AuthorityChange,
+    ) -> Result<LiveAuthorityState, String> {
+        match change {
+            AuthorityChange::Revert { change_id } => {
+                let record = self.proposals.retrieve_change_record(change_id)?;
+                apply_revert_change(current, change_id, &record)
+            }
+            _ => apply_change(current, change),
+        }
     }
 
     /// Is a route currently protected?

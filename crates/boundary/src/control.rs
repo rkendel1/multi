@@ -90,6 +90,23 @@ pub enum AuthorityChange {
         provider: String,
         enabled: bool,
     },
+
+    /// Revert a previously applied change.
+    Revert {
+        change_id: String,
+    },
+}
+
+impl AuthorityChange {
+    pub fn change_type(&self) -> &'static str {
+        match self {
+            Self::ProtectRoute { .. } => "protect_route",
+            Self::UnprotectRoute { .. } => "unprotect_route",
+            Self::SetCapabilityPolicy { .. } => "set_capability_policy",
+            Self::SetProviderEnabled { .. } => "set_provider_enabled",
+            Self::Revert { .. } => "revert",
+        }
+    }
 }
 
 /// Preview of what would change
@@ -176,6 +193,10 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
             provider.hash(&mut hasher);
             enabled.hash(&mut hasher);
         }
+        AuthorityChange::Revert { change_id } => {
+            "Revert".hash(&mut hasher);
+            change_id.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -183,6 +204,7 @@ fn stable_hash(change: &AuthorityChange) -> u64 {
 /// Proposed change with validation result
 #[derive(Debug, Clone)]
 pub struct ChangeProposal {
+    pub id: String,
     pub change: AuthorityChange,
     pub preview: Preview,
     pub revision: u64,
@@ -212,6 +234,7 @@ mod tests {
         let after_state = apply_change(&current_state, &change).unwrap();
 
         let proposal = ChangeProposal {
+            id: "proposal-test".to_string(),
             change,
             preview: Preview {
                 before: PreviewState::from(&current_state),
@@ -269,7 +292,27 @@ pub fn apply_change(
                 },
             );
         }
+        AuthorityChange::Revert { .. } => {
+            return Err("revert requires an applied change record".to_string());
+        }
     }
 
+    Ok(next)
+}
+
+pub fn apply_revert_change(
+    current: &LiveAuthorityState,
+    change_id: &str,
+    record: &crate::proposal_store::ChangeRecord,
+) -> Result<LiveAuthorityState, String> {
+    if record.change_id != change_id {
+        return Err("revert change id does not match the stored record".to_string());
+    }
+    if current.revision < record.resulting_state.revision {
+        return Err("cannot revert against an older authority state".to_string());
+    }
+
+    let mut next = record.previous_state.clone();
+    next.revision = current.next_revision();
     Ok(next)
 }
