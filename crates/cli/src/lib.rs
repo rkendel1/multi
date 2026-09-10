@@ -739,6 +739,20 @@ use auth {
         .unwrap();
     }
 
+    fn write_pr18_express_app(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"pr18-app","scripts":{"dev":"node src/server.js"},"dependencies":{"express":"latest"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/server.js"),
+            "const express = require('express');\nconst app = express();\napp.get('/health', health);\napp.get('/invoices', listInvoices);\napp.get('/invoices/:id', getInvoice);\napp.post('/invoices', createInvoice);\napp.post('/refunds', createRefund);\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn inspect_and_propose_discovered_routes_without_changing_authority() {
         let dir = temp_dir("propose-express");
@@ -846,6 +860,8 @@ use auth {
         let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
         assert_eq!(server.matches("app.use(authport());").count(), 1);
         assert!(server.contains("app.get('/health'"));
+        let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
+        assert!(package_json.contains("\"authport\":\"latest\""));
         assert!(dir.join("authport.toml").exists());
         assert!(dir.join(".authport/adoption.json").exists());
 
@@ -869,6 +885,76 @@ use auth {
         assert!(verify.contains("\"ok\": true"));
         assert!(verify.contains("\"contract_fingerprint_stable\": true"));
         assert!(verify.contains("\"live_authority_available\": true"));
+    }
+
+    #[test]
+    fn pr18_golden_path_discovers_initializes_and_reviews_authority() {
+        let dir = temp_dir("pr18-golden");
+        write_pr18_express_app(&dir);
+
+        let preview = run_with(&["init", dir.to_str().unwrap(), "--dry-run"])
+            .unwrap()
+            .text;
+        assert!(preview.contains("Application:\n  pr18-app"));
+        assert!(preview.contains("Package manager:\n  npm"));
+        assert!(preview.contains("Run command:\n  node src/server.js"));
+        assert!(preview.contains("GET    /health"));
+        assert!(preview.contains("GET    /invoices/:param"));
+        assert!(preview.contains("POST   /refunds"));
+        assert!(preview.contains("public"));
+        assert!(preview.contains("unprotected"));
+
+        let applied = run_with(&["init", dir.to_str().unwrap(), "--yes"])
+            .unwrap()
+            .text;
+        assert!(applied.contains("✓ 5 application routes discovered"));
+
+        let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
+        assert!(package_json.contains("\"authport\":\"latest\""));
+        let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+        assert!(server.contains("const { authport } = require(\"authport\");"));
+        assert_eq!(server.matches("app.use(authport());").count(), 1);
+        assert!(server.contains("app.post('/refunds', createRefund);"));
+
+        let verify = run_with(&["verify", dir.to_str().unwrap()]).unwrap().text;
+        assert!(verify.contains("✓ application discovered"));
+        assert!(verify.contains("✓ AuthPort boundary present"));
+        assert!(verify.contains("✓ live authority state available"));
+
+        let routes = run_with(&["routes", dir.join("authport.toml").to_str().unwrap()])
+            .unwrap()
+            .text;
+        assert!(routes.contains("GET                /health"));
+        assert!(routes.contains("GET                /invoices/:id"));
+        assert!(routes.contains("POST               /refunds"));
+        assert!(routes.contains("unprotected"));
+
+        let proposal = run_with(&["propose", dir.join("authport.toml").to_str().unwrap()])
+            .unwrap()
+            .text;
+        assert!(proposal.contains("POST /invoices\n  → invoice.create"));
+        assert!(proposal.contains("POST /refunds\n  → refund.create"));
+        assert!(proposal.contains("RECOMMENDED PROTECTION"));
+
+        let standalone = temp_dir("pr18-standalone");
+        write_pr18_express_app(&standalone);
+        run_with(&[
+            "init",
+            standalone.to_str().unwrap(),
+            "--standalone",
+            "--yes",
+        ])
+        .unwrap();
+        let standalone_server = std::fs::read_to_string(standalone.join("src/server.js")).unwrap();
+        assert!(!standalone_server.contains("authport()"));
+        let manifest = std::fs::read_to_string(standalone.join(".authport/adoption.json")).unwrap();
+        assert!(manifest.contains("\"mode\": \"standalone\""));
+        assert!(manifest.contains("\"run_command\": \"node src/server.js\""));
+        let standalone_routes =
+            run_with(&["routes", standalone.join("authport.toml").to_str().unwrap()])
+                .unwrap()
+                .text;
+        assert!(standalone_routes.contains("POST               /refunds"));
     }
 
     #[test]

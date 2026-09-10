@@ -1492,12 +1492,14 @@ fn node_package_manager(root: &Path) -> Option<String> {
 }
 
 fn node_servers(package_json: &str) -> Vec<ServerCandidate> {
-    json_script(package_json, "start")
+    ["start", "dev"]
         .into_iter()
-        .map(|command| ServerCandidate {
-            command,
-            source: "package.json scripts.start".to_string(),
-            confidence: DiscoveryConfidence::High,
+        .filter_map(|script| {
+            json_script(package_json, script).map(|command| ServerCandidate {
+                command,
+                source: format!("package.json scripts.{}", script),
+                confidence: DiscoveryConfidence::High,
+            })
         })
         .collect()
 }
@@ -1797,6 +1799,27 @@ mod tests {
         }));
         assert_eq!(app.providers[0].id, "google");
         assert!(!app.providers[0].display_name.contains("super-secret"));
+    }
+
+    #[test]
+    fn detects_dev_script_when_start_is_absent() {
+        let dir = temp_dir("dev-script");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"dev-only","scripts":{"dev":"node src/server.js"},"dependencies":{"express":"latest"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/server.js"),
+            "const express = require('express');\nconst app = express();\napp.get('/health', handler);\n",
+        )
+        .unwrap();
+
+        let app = discover(&dir).expect("node app discovered");
+
+        assert_eq!(app.servers[0].command, "node src/server.js");
+        assert_eq!(app.servers[0].source, "package.json scripts.dev");
     }
 
     #[test]

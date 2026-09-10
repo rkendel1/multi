@@ -1,13 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use appport_auth_mesh_discovery::{discover, ApplicationCandidate, EntrypointKind, RouteCandidate};
+use appport_auth_mesh_discovery::{
+    discover, propose_authority, ApplicationCandidate, EntrypointKind, RouteCandidate,
+};
 
 use crate::{error, CliError, Output};
 
 const DEFAULT_DECLARATION: &str = "use auth {\n  providers = [local]\n}\n";
 const MANIFEST_DIR: &str = ".authport";
 const MANIFEST_FILE: &str = ".authport/adoption.json";
+const DEFAULT_FILES: &[&str] = &[
+    "authport.toml",
+    "appport.auth",
+    "appport.toml",
+    "auth.appport",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitMode {
@@ -155,16 +163,21 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
     let application = discover(root).ok_or_else(|| {
         error("no supported application found (looked for package.json or Cargo.toml)")
     })?;
-    let already_integrated = application.existing_authport.detected();
+    let already_integrated = boundary_integrated(&application, mode);
     let mut changes = Vec::new();
 
     if !already_integrated {
         if mode == InitMode::Embedded {
+            if let Some(change) = node_dependency_change(&application)? {
+                changes.push(change);
+            }
             if let Some(change) = node_embedded_change(&application)? {
                 changes.push(change);
             }
         }
-        changes.push(config_change(root));
+        if !application.existing_authport.configuration {
+            changes.push(config_change(root));
+        }
         changes.push(manifest_change(&application, mode));
     }
 
@@ -184,6 +197,115 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
         detected: true,
         integration_supported,
     })
+}
+
+fn boundary_integrated(application: &ApplicationCandidate, mode: InitMode) -> bool {
+    match mode {
+        InitMode::Embedded => {
+            application.existing_authport.configuration
+                && (application.existing_authport.middleware
+                    || application.existing_authport.initialization)
+        }
+        InitMode::Standalone => {
+            application.existing_authport.configuration && application.existing_authport.manifest
+        }
+    }
+}
+
+fn node_dependency_change(
+    application: &ApplicationCandidate,
+) -> Result<Option<FileChange>, CliError> {
+    if application.language.as_deref() != Some("Node") {
+        return Ok(None);
+    }
+    let path = application.root.join("package.json");
+    let before = fs::read_to_string(&path)
+        .map_err(|err| error(format!("cannot read `{}`: {}", path.display(), err)))?;
+    if before.contains("\"authport\"") {
+        return Ok(None);
+    }
+    Ok(Some(FileChange {
+        path,
+        before: Some(before.clone()),
+        after: add_authport_dependency(&before)?,
+    }))
+}
+
+fn add_authport_dependency(package_json: &str) -> Result<String, CliError> {
+    if let Some(dependencies_index) = package_json.find("\"dependencies\"") {
+        let after_key = &package_json[dependencies_index + "\"dependencies\"".len()..];
+        let colon = after_key
+            .find(':')
+            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
+        let after_colon = dependencies_index + "\"dependencies\"".len() + colon + 1;
+        let object_start = package_json[after_colon..]
+            .find('{')
+            .map(|index| after_colon + index)
+            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
+        let object_end = matching_brace(package_json, object_start)
+            .ok_or_else(|| error("package.json dependencies field is not an object"))?;
+        let inside = &package_json[object_start + 1..object_end];
+        let insertion = if inside.trim().is_empty() {
+            "\"authport\":\"latest\"".to_string()
+        } else {
+            ",\"authport\":\"latest\"".to_string()
+        };
+        return Ok(format!(
+            "{}{}{}",
+            &package_json[..object_end],
+            insertion,
+            &package_json[object_end..]
+        ));
+    }
+
+    let root_end = package_json
+        .rfind('}')
+        .ok_or_else(|| error("package.json root must be an object"))?;
+    let prefix = &package_json[..root_end];
+    let separator = if prefix.trim_end().ends_with('{') {
+        ""
+    } else {
+        ","
+    };
+    Ok(format!(
+        "{}{}\"dependencies\":{{\"authport\":\"latest\"}}{}",
+        prefix,
+        separator,
+        &package_json[root_end..]
+    ))
+}
+
+fn matching_brace(source: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in source
+        .char_indices()
+        .skip_while(|(index, _)| *index < start)
+    {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn node_embedded_change(
@@ -339,13 +461,9 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
         .as_ref()
         .map(|application| application.routes.len())
         .unwrap_or(0);
-    let boundary_present = application
-        .as_ref()
-        .map(|application| application.existing_authport.detected())
-        .unwrap_or(false);
-    let config_path = root.join("authport.toml");
-    let runtime_starts = fs::read_to_string(&config_path)
+    let runtime_starts = resolve_config(root)
         .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|source| appport_auth_mesh_dsl::parse_auth_block(&source).ok())
         .and_then(|config| {
             let registry =
@@ -359,6 +477,14 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
             .ok()
         })
         .is_some();
+    let boundary_present = application
+        .as_ref()
+        .map(|application| {
+            application.existing_authport.middleware
+                || application.existing_authport.initialization
+                || application.existing_authport.manifest
+        })
+        .unwrap_or(false);
     let report = VerifyReport {
         ok: application.is_some() && boundary_present && runtime_starts,
         application_discovered: application.is_some(),
@@ -374,6 +500,14 @@ fn verify_root(root: &Path) -> Result<VerifyReport, CliError> {
     Ok(report)
 }
 
+fn resolve_config(root: &Path) -> Result<PathBuf, CliError> {
+    DEFAULT_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.exists())
+        .ok_or_else(|| error("no auth declaration found"))
+}
+
 fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
     let mut out = String::new();
     if plan.already_integrated {
@@ -382,15 +516,39 @@ fn render_plan_text(plan: &InitPlan, preview: bool) -> String {
         out.push_str("AuthPort found your application.\n");
     }
     out.push_str(&format!(
-        "Application:\n  {}\nFramework:\n  {}\nEntrypoint:\n  {}\n",
+        "Application:\n  {}\nLanguage:\n  {}\nFramework:\n  {}\nPackage manager:\n  {}\nEntrypoint:\n  {}\nRun command:\n  {}\n",
         plan.application.name.as_deref().unwrap_or("(unknown)"),
+        plan.application.language.as_deref().unwrap_or("(unknown)"),
         plan.application.framework.as_deref().unwrap_or("(none)"),
+        plan.application.package_manager.as_deref().unwrap_or("(unknown)"),
         plan.application
             .entrypoints
             .first()
             .map(|entrypoint| display_path(&entrypoint.path, &plan.application.root))
-            .unwrap_or_else(|| "(none)".to_string())
+            .unwrap_or_else(|| "(none)".to_string()),
+        plan.application
+            .servers
+            .first()
+            .map(|server| server.command.as_str())
+            .unwrap_or("(unknown)")
     ));
+    if !plan.application.routes.is_empty() {
+        let proposal = propose_authority(
+            &plan.application,
+            "preview",
+            0,
+            &std::collections::BTreeMap::new(),
+        );
+        out.push_str("Discovered routes:\n");
+        for route in proposal.routes {
+            out.push_str(&format!(
+                "  {:<6} {:<24} {}\n",
+                route.method,
+                route.path,
+                route.protection.as_str()
+            ));
+        }
+    }
     if !plan.application.providers.is_empty() {
         out.push_str("Detected:\n");
         for provider in &plan.application.providers {
@@ -459,9 +617,11 @@ fn render_verify_text(report: &VerifyReport) -> String {
 
 fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
     format!(
-        "{{\n  \"application\": \"{}\",\n  \"framework\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"detected\": {},\n  \"already_integrated\": {},\n  \"mode\": \"{}\",\n  \"dry_run\": {},\n  \"routes\": {},\n  \"providers\": [{}],\n  \"changes\": [{}]\n}}\n",
+        "{{\n  \"application\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"detected\": {},\n  \"already_integrated\": {},\n  \"mode\": \"{}\",\n  \"dry_run\": {},\n  \"routes\": {},\n  \"providers\": [{}],\n  \"changes\": [{}]\n}}\n",
         escape(plan.application.name.as_deref().unwrap_or("")),
+        escape(plan.application.language.as_deref().unwrap_or("")),
         escape(plan.application.framework.as_deref().unwrap_or("")),
+        escape(plan.application.package_manager.as_deref().unwrap_or("")),
         escape(
             &plan
                 .application
@@ -469,6 +629,13 @@ fn render_plan_json(plan: &InitPlan, dry_run: bool) -> String {
                 .first()
                 .map(|entrypoint| display_path(&entrypoint.path, &plan.application.root))
                 .unwrap_or_default()
+        ),
+        escape(
+            plan.application
+                .servers
+                .first()
+                .map(|server| server.command.as_str())
+                .unwrap_or("")
         ),
         plan.detected,
         plan.already_integrated,
@@ -511,16 +678,25 @@ fn render_verify_json(report: &VerifyReport) -> String {
 
 fn render_manifest(application: &ApplicationCandidate, mode: InitMode) -> String {
     format!(
-        "{{\n  \"application\": \"{}\",\n  \"mode\": \"{}\",\n  \"framework\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"routes\": {}\n}}\n",
+        "{{\n  \"application\": \"{}\",\n  \"mode\": \"{}\",\n  \"language\": \"{}\",\n  \"framework\": \"{}\",\n  \"package_manager\": \"{}\",\n  \"entrypoint\": \"{}\",\n  \"run_command\": \"{}\",\n  \"routes\": {}\n}}\n",
         escape(application.name.as_deref().unwrap_or("")),
         mode_str(mode),
+        escape(application.language.as_deref().unwrap_or("")),
         escape(application.framework.as_deref().unwrap_or("")),
+        escape(application.package_manager.as_deref().unwrap_or("")),
         escape(
             &application
                 .entrypoints
                 .first()
                 .map(|entrypoint| display_path(&entrypoint.path, &application.root))
                 .unwrap_or_default()
+        ),
+        escape(
+            application
+                .servers
+                .first()
+                .map(|server| server.command.as_str())
+                .unwrap_or("")
         ),
         application.routes.len()
     )
