@@ -6,7 +6,9 @@ use appport_auth_mesh_authz::{
     Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, DenialReason,
     ResourceAttributes, ResourceRef, ResourceResolver,
 };
-use appport_auth_mesh_contract::{AgentRun, Capability, PrincipalId, PrincipalKind, RunId};
+use appport_auth_mesh_contract::{
+    AgentRun, Capability, ExecutionCredentialId, PrincipalId, PrincipalKind, RunId,
+};
 use appport_auth_mesh_dsl::AuthConfig;
 use appport_auth_mesh_providers::{
     AuthChallenge, AuthRequest, AuthResponse, ChallengeKind, ConnectorRegistry,
@@ -220,12 +222,10 @@ impl AuthPortRuntime {
             Requirement::Capability(capability) => {
                 let context = self.authenticate(request)?;
                 let decision = match authorization_request(context.runtime(), capability, request) {
-                    Some(auth_request) => match request.field("run_id") {
-                        Some(run_id) => self.authorize_run_resource(
-                            &context,
-                            &RunId(run_id.to_string()),
-                            auth_request,
-                        )?,
+                    Some(auth_request) => match self.run_id_from_request(&context, request)? {
+                        Some(run_id) => {
+                            self.authorize_run_resource(&context, &run_id, auth_request)?
+                        }
                         None => self.authorize_resource(&context, auth_request)?,
                     },
                     None => self.authorize(&context, capability)?,
@@ -795,6 +795,15 @@ impl AuthPortRuntime {
         self.mesh.agent_run(&tenant, run_id)
     }
 
+    pub fn agent_run_by_credential(
+        &self,
+        tenant_id: &str,
+        credential: &ExecutionCredentialId,
+    ) -> Result<Option<AgentRun>, AuthError> {
+        let tenant = self.mesh.tenant(tenant_id)?;
+        self.mesh.agent_run_by_credential(&tenant, credential)
+    }
+
     pub fn cancel_agent_run(&self, tenant_id: &str, run_id: &RunId) -> Result<AgentRun, AuthError> {
         self.mesh.cancel_agent_run(tenant_id, run_id, self.now())
     }
@@ -824,6 +833,33 @@ impl AuthPortRuntime {
             self.now(),
             self.live_authority().revision,
         ))
+    }
+
+    fn run_id_from_request(
+        &self,
+        context: &AuthContext,
+        request: &BoundaryRequest,
+    ) -> Result<Option<RunId>, AuthError> {
+        if let Some(run_id) = request.field("run_id") {
+            return Ok(Some(RunId(run_id.to_string())));
+        }
+        let Some(credential) = request
+            .field("execution_credential")
+            .or_else(|| request.field("run_credential"))
+        else {
+            return Ok(None);
+        };
+        let run = self.agent_run_by_credential(
+            context.tenant.tenant_id.as_str(),
+            &ExecutionCredentialId(credential.to_string()),
+        )?;
+        run.map(|run| Some(run.id)).ok_or_else(|| {
+            AuthError::new(
+                AuthLifecycleStage::PolicyEvaluation,
+                "run credential was not found",
+                DenialReason::RunNotFound,
+            )
+        })
     }
 }
 

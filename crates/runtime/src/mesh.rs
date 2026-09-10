@@ -742,6 +742,12 @@ impl AuthMesh {
                 ));
             }
         }
+        if !tenant_scope_holds(&request.resource_scope, &tenant.tenant_id) {
+            return Err(run_error(
+                "run resource scope crosses tenant boundary",
+                DenialReason::RunExceedsDelegation,
+            ));
+        }
         if !request
             .resource_scope
             .is_subset_of(&delegation.resource_scope)
@@ -860,6 +866,22 @@ impl AuthMesh {
             Some(_) => Err(run_error("run tenant mismatch", DenialReason::RunNotFound)),
             None => Ok(None),
         }
+    }
+
+    pub fn agent_run_by_credential(
+        &self,
+        tenant: &TenantContext,
+        credential: &ExecutionCredentialId,
+    ) -> Result<Option<AgentRun>, AuthError> {
+        Ok(self
+            .runs
+            .lock()
+            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
+            .values()
+            .find(|run| {
+                run.tenant_id == tenant.tenant_id && &run.execution_credential == credential
+            })
+            .cloned())
     }
 
     pub fn cancel_agent_run(
@@ -1622,6 +1644,15 @@ fn resource_scope_matches(
         }
         resource_attributes.and_then(|attributes| attributes.values.get(key)) == Some(expected)
     })
+}
+
+fn tenant_scope_holds(scope: &ResourceScope, tenant_id: &TenantId) -> bool {
+    scope
+        .attributes
+        .get("tenant")
+        .or_else(|| scope.attributes.get("tenant_id"))
+        .map(|value| matches_tenant(value, tenant_id.as_str()))
+        .unwrap_or(true)
 }
 
 fn matches_tenant(value: &ClaimValue, tenant_id: &str) -> bool {
