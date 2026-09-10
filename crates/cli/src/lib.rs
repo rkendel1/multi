@@ -10,6 +10,7 @@ use appport_auth_mesh_providers::ConnectorRegistry;
 use appport_auth_mesh_surface::{render_json_with, render_text, AuthSurface};
 
 pub mod control;
+pub mod init;
 pub mod serve;
 
 pub const USAGE: &str = "\
@@ -17,6 +18,8 @@ authport — the AuthPort authority boundary
 
 USAGE:
     authport inspect [FILE] [--json] [--mode embedded|standalone]
+    authport init [PATH] [--dry-run] [--json] [--yes] [--standalone]
+    authport verify [PATH] [--json]
     authport fingerprint [FILE]
     authport routes [FILE]
     authport providers [FILE]
@@ -80,6 +83,12 @@ where
         Some("connect" | "propose" | "apply")
     ) {
         return control::run(&args);
+    }
+    if matches!(args.first().map(String::as_str), Some("init")) {
+        return init::run(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("verify")) {
+        return init::verify(&args[1..]);
     }
     let mut command = None;
     let mut file: Option<PathBuf> = None;
@@ -180,19 +189,28 @@ where
             config.fingerprint(),
             AuthSurface::derive(&config).fingerprint()
         ),
-        "routes" => AuthSurface::derive(&config)
-            .routes
-            .iter()
-            .map(|route| {
+        "routes" => {
+            let mut out = String::from("METHOD             PATH                  AUTHORITY\n");
+            for route in &AuthSurface::derive(&config).routes {
                 let methods = route
                     .methods
                     .iter()
                     .map(|method| method.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{:<18} {}\n", methods, route.path)
-            })
-            .collect(),
+                out.push_str(&format!("{:<18} {:<21} AuthPort\n", methods, route.path));
+            }
+            let root = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            if let Some(routes) = init::discovered_routes(root) {
+                for route in routes {
+                    out.push_str(&format!(
+                        "{:<18} {:<21} unprotected\n",
+                        route.method, route.path
+                    ));
+                }
+            }
+            out
+        }
         "providers" => describe_providers(&config)?,
         "serve" => return run_server(config, &serve_options),
         other => return Err(error(format!("unknown command `{}`\n\n{}", other, USAGE))),
@@ -483,5 +501,114 @@ use auth {
         assert!(refused.body_string().contains("\"allowed\": false"));
 
         running.authport.shutdown();
+    }
+
+    fn write_express_app(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"zero-app","scripts":{"start":"node src/server.js"},"dependencies":{"express":"latest"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/server.js"),
+            "const express = require('express');\nconst app = express();\napp.get('/', handler);\napp.get('/health', handler);\napp.post('/invoices', handler);\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn init_previews_applies_and_is_idempotent_for_existing_express_app() {
+        let dir = temp_dir("init-express");
+        write_express_app(&dir);
+        std::fs::write(
+            dir.join(".env"),
+            "GOOGLE_CLIENT_ID=value\nGOOGLE_CLIENT_SECRET=hidden\n",
+        )
+        .unwrap();
+
+        let preview = run_with(&["init", dir.to_str().unwrap(), "--dry-run"])
+            .unwrap()
+            .text;
+        assert!(preview.contains("AuthPort found your application."));
+        assert!(preview.contains("Framework:\n  Express"));
+        assert!(preview.contains("Google OAuth configuration"));
+        assert!(!preview.contains("hidden"));
+        assert!(preview.contains("Files to modify:"));
+        assert!(preview.contains("src/server.js"));
+        assert!(!dir.join("authport.toml").exists());
+
+        let json = run_with(&["init", dir.to_str().unwrap(), "--json"])
+            .unwrap()
+            .text;
+        assert!(json.contains("\"application\": \"zero-app\""));
+        assert!(json.contains("\"framework\": \"Express\""));
+        assert!(json.contains("\"already_integrated\": false"));
+        assert!(json.contains("\"changes\": ["));
+
+        let applied = run_with(&["init", dir.to_str().unwrap(), "--yes"])
+            .unwrap()
+            .text;
+        assert!(applied.contains("✓ AuthPort integrated"));
+        assert!(applied.contains("✓ 3 application routes discovered"));
+        let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+        assert_eq!(server.matches("app.use(authport());").count(), 1);
+        assert!(server.contains("app.get('/health'"));
+        assert!(dir.join("authport.toml").exists());
+        assert!(dir.join(".authport/adoption.json").exists());
+
+        let second = run_with(&["init", dir.to_str().unwrap(), "--yes"])
+            .unwrap()
+            .text;
+        assert!(second.contains("AuthPort already detected."));
+        let server_again = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+        assert_eq!(server_again.matches("app.use(authport());").count(), 1);
+
+        let routes = run_with(&["routes", dir.join("authport.toml").to_str().unwrap()])
+            .unwrap()
+            .text;
+        assert!(routes.contains("GET                /health"));
+        assert!(routes.contains("POST               /invoices"));
+        assert!(routes.contains("unprotected"));
+
+        let verify = run_with(&["verify", dir.to_str().unwrap(), "--json"])
+            .unwrap()
+            .text;
+        assert!(verify.contains("\"ok\": true"));
+        assert!(verify.contains("\"contract_fingerprint_stable\": true"));
+        assert!(verify.contains("\"live_authority_available\": true"));
+    }
+
+    #[test]
+    fn init_rolls_back_when_a_write_fails_partway_through() {
+        let dir = temp_dir("init-rollback");
+        write_express_app(&dir);
+        let original = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+
+        std::fs::write(dir.join(".authport-fail-after-write"), "").unwrap();
+        let error = run_with(&["init", dir.to_str().unwrap(), "--yes"]).unwrap_err();
+
+        assert!(error.message.contains("simulated initialization failure"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/server.js")).unwrap(),
+            original
+        );
+        assert!(!dir.join("authport.toml").exists());
+        assert!(!dir.join(".authport/adoption.json").exists());
+    }
+
+    #[test]
+    fn standalone_init_creates_equivalent_adoption_metadata_without_source_rewrite() {
+        let dir = temp_dir("init-standalone");
+        write_express_app(&dir);
+
+        let applied = run_with(&["init", dir.to_str().unwrap(), "--standalone", "--yes"])
+            .unwrap()
+            .text;
+        assert!(applied.contains("✓ Runtime boundary configured"));
+        let server = std::fs::read_to_string(dir.join("src/server.js")).unwrap();
+        assert!(!server.contains("authport()"));
+        let manifest = std::fs::read_to_string(dir.join(".authport/adoption.json")).unwrap();
+        assert!(manifest.contains("\"mode\": \"standalone\""));
     }
 }

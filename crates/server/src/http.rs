@@ -16,9 +16,9 @@ pub enum JsonValue {
     Object(Vec<(String, JsonValue)>),
 }
 
-impl JsonValue {
-    pub fn to_string(&self) -> String {
-        match self {
+impl std::fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rendered = match self {
             Self::String(s) => format!("\"{}\"", escape(s)),
             Self::Number(n) => {
                 if n.fract() == 0.0 {
@@ -40,15 +40,15 @@ impl JsonValue {
             Self::Object(pairs) => {
                 let pairs_str = pairs
                     .iter()
-                    .map(|(k, v)| format!("\"{}\": {}", escape(k), v.to_string()))
+                    .map(|(k, v)| format!("\"{}\": {}", escape(k), v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{{}}}", pairs_str)
             }
-        }
+        };
+        f.write_str(&rendered)
     }
 }
-
 /// A parsed HTTP request. Deliberately small: the boundary does the thinking,
 /// this only gets bytes into a shape it understands.
 #[derive(Debug, Clone, PartialEq, Eq)]

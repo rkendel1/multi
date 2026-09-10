@@ -204,39 +204,6 @@ pub struct ApplyOutcome {
     pub new_revision: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn approval_token_is_deterministic() {
-        let change = AuthorityChange::ProtectRoute {
-            method: Method::Post,
-            path: "/invoices".to_string(),
-            capability: "invoice.create".to_string(),
-        };
-
-        let current_state = LiveAuthorityState::new();
-        let after_state = apply_change(&current_state, &change).unwrap();
-
-        let proposal = ChangeProposal {
-            id: "proposal-test".to_string(),
-            change,
-            preview: Preview {
-                before: PreviewState::from(&current_state),
-                after: PreviewState::from(&after_state),
-            },
-            revision: 0,
-        };
-
-        let approval1 = Approval::for_proposal(&proposal);
-        let approval2 = Approval::for_proposal(&proposal);
-
-        assert_eq!(approval1, approval2);
-        assert!(approval1.verify(&proposal));
-    }
-}
-
 /// Apply a change to authority state (returns new state, immutable contract unchanged)
 pub fn apply_change(
     current: &LiveAuthorityState,
@@ -251,7 +218,7 @@ pub fn apply_change(
             path,
             capability,
         } => {
-            let route_id = RouteId::new(method.clone(), path.clone());
+            let route_id = RouteId::new(*method, path.clone());
             next.route_protection.insert(
                 route_id,
                 RouteProtection {
@@ -260,7 +227,7 @@ pub fn apply_change(
             );
         }
         AuthorityChange::UnprotectRoute { method, path } => {
-            let route_id = RouteId::new(method.clone(), path.clone());
+            let route_id = RouteId::new(*method, path.clone());
             next.route_protection.remove(&route_id);
         }
         AuthorityChange::SetCapabilityPolicy { capability, policy } => {
@@ -294,4 +261,37 @@ pub fn apply_revert_change(
     let mut next = record.previous_state.clone();
     next.revision = current.next_revision();
     Ok(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_token_is_deterministic() {
+        let change = AuthorityChange::ProtectRoute {
+            method: Method::Post,
+            path: "/invoices".to_string(),
+            capability: "invoice.create".to_string(),
+        };
+
+        let current_state = LiveAuthorityState::new();
+        let after_state = apply_change(&current_state, &change).unwrap();
+
+        let proposal = ChangeProposal {
+            id: "proposal-test".to_string(),
+            change,
+            preview: Preview {
+                before: PreviewState::from(&current_state),
+                after: PreviewState::from(&after_state),
+            },
+            revision: 0,
+        };
+
+        let approval1 = Approval::for_proposal(&proposal);
+        let approval2 = Approval::for_proposal(&proposal);
+
+        assert_eq!(approval1, approval2);
+        assert!(approval1.verify(&proposal));
+    }
 }

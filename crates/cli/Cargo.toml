@@ -17,3 +17,4 @@ appport-auth-mesh-server = { path = "../server" }
 appport-auth-mesh-storage = { path = "../storage" }
 appport-auth-mesh-providers = { path = "../providers" }
 appport-auth-mesh-surface = { path = "../surface" }
+appport-auth-mesh-discovery = { path = "../discovery" }

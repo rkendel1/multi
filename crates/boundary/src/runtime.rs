@@ -458,7 +458,7 @@ impl AuthPortRuntime {
     /// Is a route currently protected?
     pub fn get_route_protection(&self, method: &Method, path: &str) -> Option<String> {
         let authority = self.authority.read().unwrap();
-        let route_id = RouteId::new(method.clone(), path.to_string());
+        let route_id = RouteId::new(*method, path.to_string());
         authority
             .route_protection
             .get(&route_id)
