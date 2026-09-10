@@ -21,6 +21,7 @@ cp "$root/examples/saas_basic/appport.auth" example.auth
 mkdir types
 printf '%s\n' 'import { createAuthBoundry } from "@authboundry/core";' 'import { createAuthBoundryReact } from "@authboundry/core/react";' 'createAuthBoundry(); createAuthBoundryReact({} as any);' > types/index.ts
 npx --yes --package typescript tsc --strict --noEmit --module nodenext --moduleResolution nodenext --target es2022 types/index.ts
+npx --yes --package typescript@4.9.5 tsc --strict --noEmit --module commonjs --moduleResolution node --target es2017 types/index.ts
 
 # Verify the unscoped redirect against the already-installed local core.
 shim_tarball=$(npm pack "$root/packages/authboundry" --pack-destination "$work" | tail -n 1)

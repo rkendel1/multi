@@ -756,13 +756,13 @@ fn package_dependency_change(root: &Path) -> Result<Option<FileChange>, CliError
     let after = if before.contains("\"dependencies\": {") {
         before.replacen(
             "\"dependencies\": {",
-            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.10.0\",",
+            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.11.0\",",
             1,
         )
     } else {
         before.replacen(
             '{',
-            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.10.0\"},",
+            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.11.0\"},",
             1,
         )
     };
@@ -990,7 +990,10 @@ fn gitignore_change(root: &Path) -> Option<FileChange> {
 
 fn boundary_integrated(application: &ApplicationCandidate, mode: InitMode) -> bool {
     let _ = mode;
-    application.existing_authport.configuration && application.existing_authport.manifest
+    DEFAULT_FILES
+        .iter()
+        .any(|name| application.root.join(name).exists())
+        && application.root.join(MANIFEST_FILE).exists()
 }
 
 fn config_change(root: &Path) -> FileChange {

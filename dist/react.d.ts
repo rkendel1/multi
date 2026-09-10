@@ -16,7 +16,7 @@ export interface AuthHookValue extends AuthProjection {
   can: AuthBoundryClient["can"];
 }
 export declare function createAuthBoundryReact(React: ReactLike, options?: AuthBoundryReactOptions): {
-  AuthBoundry(props: { children?: unknown }): unknown;
+  AuthBoundry(props: { children?: unknown }): any;
   useAuth(): AuthHookValue;
   client: AuthBoundryClient;
 };

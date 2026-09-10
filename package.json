@@ -1,8 +1,16 @@
 {
   "name": "@authboundry/core",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "The authority boundary for an application.",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "react": ["./dist/react.d.ts"],
+      "client": ["./dist/client.d.ts"]
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
