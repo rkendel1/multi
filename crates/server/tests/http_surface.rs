@@ -14,12 +14,12 @@ use appport_auth_mesh_boundary::{
     RESERVED_HEADER_PREFIX,
 };
 use appport_auth_mesh_contract::{
-    AgentState, Capability, ClaimValue, Claims, ContractVersion, Principal, PrincipalId,
-    PrincipalKind, TenantContext,
+    AgentState, Capability, ClaimValue, Claims, ContractVersion, DelegationId, Principal,
+    PrincipalId, PrincipalKind, ResourceScope, TenantContext,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
-use appport_auth_mesh_runtime::{MemoryStores, RuntimeContext};
+use appport_auth_mesh_runtime::{DelegationRequest, MemoryStores, RuntimeContext};
 use appport_auth_mesh_server::http::{parse_flat_json, parse_form, HttpRequest, HttpResponse};
 use appport_auth_mesh_server::{
     render_sign_in, status_for, AuthPortServer, PathPattern, RouteOutcome, RoutePolicy, RouterApp,
@@ -232,6 +232,136 @@ fn control_plane_lists_shows_and_creates_agents() {
 }
 
 #[test]
+fn control_plane_creates_lists_shows_and_cancels_agent_runs() {
+    let config =
+        parse_auth_block("use auth { providers = [local] tenant = true agents = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let stores = MemoryStores::new();
+    let tenant = TenantContext {
+        tenant_id: "acme".into(),
+        namespace: "acme".to_string(),
+        policy_id: "acme-policy".into(),
+        storage_root_id: "acme-root".into(),
+    };
+    stores.tenants.put_tenant(tenant.clone()).unwrap();
+    stores
+        .policies
+        .put(Policy {
+            id: tenant.policy_id.clone(),
+            rules: vec![Rule::allow(
+                Capability("invoice.read".to_string()),
+                Condition::ClaimEquals {
+                    key: "role".to_string(),
+                    value: ClaimValue::Enum("admin".to_string()),
+                },
+            )],
+        })
+        .unwrap();
+    stores
+        .principals
+        .put_principal(Principal::human(
+            PrincipalId("user:alice".to_string()),
+            tenant.tenant_id.clone(),
+            Claims {
+                values: HashMap::from([(
+                    "role".to_string(),
+                    ClaimValue::Enum("admin".to_string()),
+                )]),
+            },
+            ContractVersion { major: 1, minor: 0 },
+        ))
+        .unwrap();
+    stores
+        .principals
+        .put_principal(Principal::agent(
+            PrincipalId("agent:invoice".to_string()),
+            tenant.tenant_id.clone(),
+            Claims {
+                values: HashMap::new(),
+            },
+            ContractVersion { major: 1, minor: 0 },
+            AgentState::Active,
+        ))
+        .unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            stores.mesh_stores(),
+            BindingMode::Standalone,
+        )
+        .unwrap(),
+    );
+    let now = runtime.now();
+    runtime
+        .mesh()
+        .delegate(
+            "acme",
+            DelegationRequest {
+                id: DelegationId("delegation-invoice".to_string()),
+                delegator: PrincipalId("user:alice".to_string()),
+                delegate: PrincipalId("agent:invoice".to_string()),
+                capabilities: vec![Capability("invoice.read".to_string())],
+                resource_scope: ResourceScope::resource("invoice")
+                    .with_attribute("tenant", ClaimValue::Enum("acme".to_string())),
+                issued_at: now,
+                expires_at: Some(now + 1_000),
+            },
+            now,
+        )
+        .unwrap();
+    let server = AuthPortServer::new(runtime, Arc::new(NoApp));
+
+    let created = server.handle(&request(
+        Method::Post,
+        "/_authport/agents/agent:invoice/runs",
+        &[("content-type", "application/json")],
+        &format!(
+            "{{\"tenant\":\"acme\",\"id\":\"run-invoice\",\"task_id\":\"task-invoice\",\"purpose\":\"Review invoices\",\"delegation_id\":\"delegation-invoice\",\"capability\":\"invoice.read\",\"resource_type\":\"invoice\",\"resource_tenant\":\"acme\",\"expires_at\":{}}}",
+            now + 100
+        ),
+    ));
+    assert_eq!(created.status, 200);
+    assert!(created.body_string().contains("\"id\": \"run-invoice\""));
+    assert!(created
+        .body_string()
+        .contains("\"task_id\": \"task-invoice\""));
+    assert!(created
+        .body_string()
+        .contains("\"execution_credential\": \"exec_"));
+
+    let listed = server.handle(&request(
+        Method::Get,
+        "/_authport/agents/agent:invoice/runs?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(listed.status, 200);
+    assert!(listed.body_string().contains("\"runs\":"));
+    assert!(listed.body_string().contains("\"run-invoice\""));
+
+    let shown = server.handle(&request(
+        Method::Get,
+        "/_authport/runs/run-invoice?tenant=acme",
+        &[],
+        "",
+    ));
+    assert_eq!(shown.status, 200);
+    assert!(shown.body_string().contains("\"status\": \"active\""));
+
+    let cancelled = server.handle(&request(
+        Method::Post,
+        "/_authport/runs/run-invoice/cancel",
+        &[("content-type", "application/json")],
+        "{\"tenant\":\"acme\"}",
+    ));
+    assert_eq!(cancelled.status, 200);
+    assert!(cancelled
+        .body_string()
+        .contains("\"status\": \"cancelled\""));
+}
+
+#[test]
 fn authorization_explain_endpoints_return_decision_evidence_by_id() {
     let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
     let registry = ConnectorRegistry::from_config(&config).unwrap();
@@ -295,6 +425,7 @@ fn authorization_explain_endpoints_return_decision_evidence_by_id() {
         tenant: tenant.clone(),
         session_id: None,
         delegation: None,
+        run: None,
         claims: Claims { values: claims },
         capabilities: CapabilityEnvelope::empty(),
     };

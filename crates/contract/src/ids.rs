@@ -42,3 +42,6 @@ authority_id!(ProviderSubject);
 authority_id!(Capability);
 authority_id!(DelegationId);
 authority_id!(AuditEventId);
+authority_id!(RunId);
+authority_id!(TaskId);
+authority_id!(ExecutionCredentialId);

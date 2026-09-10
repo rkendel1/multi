@@ -23,7 +23,7 @@ pub use injection::{inject_auth_context, IncomingRequest};
 pub use memory_stores::MemoryStores;
 pub use mesh::{
     AuthMesh, AuthenticatedSession, DelegationRequest, MeshStores, Registration,
-    DEFAULT_SESSION_TTL_SECONDS,
+    RunCreationRequest, DEFAULT_SESSION_TTL_SECONDS,
 };
 pub use policy_store::{MemoryPolicyStore, PolicyStore};
 pub use resolution::{principal_id_for, ResolvedPrincipal};

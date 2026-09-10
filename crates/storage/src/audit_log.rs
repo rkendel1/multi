@@ -37,4 +37,6 @@ pub enum AuditEventKind {
     AgentCreated,
     AgentSuspended,
     AgentRevoked,
+    AgentRunCreated,
+    AgentRunCancelled,
 }

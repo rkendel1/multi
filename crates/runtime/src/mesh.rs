@@ -9,8 +9,9 @@ use appport_auth_mesh_authz::{
 };
 use appport_auth_mesh_authz::{Action, Condition, Effect, ResourceSelector, Rule};
 use appport_auth_mesh_contract::{
-    AgentState, AuditEventId, Capability, ClaimValue, Claims, Delegation, DelegationId, Principal,
-    PrincipalId, PrincipalKind, ResourceScope, SessionId, TenantContext, TenantId,
+    AgentRun, AgentState, AuditEventId, Capability, ClaimValue, Claims, Delegation, DelegationId,
+    ExecutionCredentialId, Principal, PrincipalId, PrincipalKind, ResourceScope, RunId, RunStatus,
+    SessionId, TaskId, TaskSpec, TenantContext, TenantId,
 };
 use appport_auth_mesh_dsl::{stable_hash, AuthConfig};
 use appport_auth_mesh_providers::{
@@ -59,7 +60,9 @@ pub struct AuthMesh {
     stores: MeshStores,
     session_ttl: i64,
     audit_sequence: AtomicU64,
+    run_sequence: AtomicU64,
     decisions: Mutex<Vec<AuthorizationEvidence>>,
+    runs: Mutex<HashMap<RunId, AgentRun>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +123,19 @@ pub struct DelegationRequest {
     pub resource_scope: ResourceScope,
     pub issued_at: i64,
     pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCreationRequest {
+    pub id: Option<RunId>,
+    pub task_id: TaskId,
+    pub task_purpose: String,
+    pub delegation_id: DelegationId,
+    pub parent_run_id: Option<RunId>,
+    pub capabilities: Vec<Capability>,
+    pub resource_scope: ResourceScope,
+    pub expires_at: i64,
+    pub constraints: Vec<String>,
 }
 
 /// One entry in the authority audit trail.
@@ -200,7 +216,9 @@ impl AuthMesh {
             stores,
             session_ttl: DEFAULT_SESSION_TTL_SECONDS,
             audit_sequence: AtomicU64::new(0),
+            run_sequence: AtomicU64::new(0),
             decisions: Mutex::new(Vec::new()),
+            runs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -644,6 +662,262 @@ impl AuthMesh {
             })
     }
 
+    pub fn create_agent_run(
+        &self,
+        tenant_id: &str,
+        agent_id: &PrincipalId,
+        request: RunCreationRequest,
+        now: i64,
+        authority_revision: u64,
+        contract_fingerprint: String,
+    ) -> Result<AgentRun, AuthError> {
+        let tenant = self.tenant(tenant_id)?;
+        if request.capabilities.is_empty() {
+            return Err(run_error(
+                "run task must request structured capabilities",
+                DenialReason::RunExceedsDelegation,
+            ));
+        }
+        if request.expires_at <= now {
+            return Err(run_error(
+                "run expires before it can be used",
+                DenialReason::RunExpired,
+            ));
+        }
+
+        let agent = self.principal(&tenant, agent_id)?;
+        if agent.kind != PrincipalKind::Agent {
+            return Err(run_error(
+                "run principal must be an agent",
+                DenialReason::RunNotFound,
+            ));
+        }
+        self.assert_principal_is_usable(&agent)?;
+
+        let delegation = self
+            .stores
+            .delegations
+            .get_delegation(&tenant, &request.delegation_id)
+            .map_err(|err| {
+                AuthError::new(
+                    AuthLifecycleStage::DelegationManagement,
+                    err.message,
+                    DenialReason::InvalidDelegation,
+                )
+            })?
+            .ok_or_else(|| run_error("delegation not found", DenialReason::DelegationMissing))?;
+        if delegation.delegate != *agent_id || delegation.tenant_id != tenant.tenant_id {
+            return Err(run_error(
+                "delegation does not belong to this agent",
+                DenialReason::InvalidDelegation,
+            ));
+        }
+        if delegation.revoked_at.is_some() {
+            return Err(run_error(
+                "delegation is revoked",
+                DenialReason::RevokedDelegation,
+            ));
+        }
+        if !delegation.is_valid_at(now) {
+            return Err(run_error(
+                "delegation is expired",
+                DenialReason::ExpiredDelegation,
+            ));
+        }
+        if delegation
+            .expires_at
+            .map(|expires_at| request.expires_at > expires_at)
+            .unwrap_or(false)
+        {
+            return Err(run_error(
+                "run expiration exceeds delegation lifetime",
+                DenialReason::RunExceedsDelegation,
+            ));
+        }
+        for capability in &request.capabilities {
+            if !delegation.capabilities.contains(capability) {
+                return Err(run_error(
+                    format!("run requests `{}` outside delegation", capability),
+                    DenialReason::RunExceedsDelegation,
+                ));
+            }
+        }
+        if !tenant_scope_holds(&request.resource_scope, &tenant.tenant_id) {
+            return Err(run_error(
+                "run resource scope crosses tenant boundary",
+                DenialReason::RunExceedsDelegation,
+            ));
+        }
+        if !request
+            .resource_scope
+            .is_subset_of(&delegation.resource_scope)
+        {
+            return Err(run_error(
+                "run resource scope must narrow the delegation",
+                DenialReason::RunExceedsDelegation,
+            ));
+        }
+
+        let parent_run = match &request.parent_run_id {
+            Some(parent_id) => Some(self.checked_run(&tenant, parent_id, now).map_err(|_| {
+                run_error(
+                    "parent run is not valid",
+                    DenialReason::ParentRunScopeDenied,
+                )
+            })?),
+            None => None,
+        };
+        if let Some(parent) = &parent_run {
+            for capability in &request.capabilities {
+                if !parent.capability_scope.contains(capability) {
+                    return Err(run_error(
+                        format!("child run requests `{}` outside parent run", capability),
+                        DenialReason::ParentRunScopeDenied,
+                    ));
+                }
+            }
+            if !request.resource_scope.is_subset_of(&parent.resource_scope)
+                || request.expires_at > parent.expires_at
+            {
+                return Err(run_error(
+                    "child run must narrow the parent run",
+                    DenialReason::ParentRunScopeDenied,
+                ));
+            }
+        }
+
+        let id = request.id.unwrap_or_else(|| self.next_run_id(&tenant));
+        let credential = self.execution_credential(&tenant, &id);
+        let task = TaskSpec {
+            id: request.task_id,
+            purpose: request.task_purpose,
+            capabilities: request.capabilities.clone(),
+            resource_scope: request.resource_scope.clone(),
+            expires_at: request.expires_at,
+            constraints: request.constraints,
+        };
+        let mut chain = delegation.chain.clone();
+        chain.push(delegation.id.clone());
+        let run = AgentRun {
+            id: id.clone(),
+            tenant_id: tenant.tenant_id.clone(),
+            agent_principal: agent_id.clone(),
+            delegator: delegation.delegator.clone(),
+            delegation_id: delegation.id.clone(),
+            delegation_chain: chain,
+            task,
+            parent_run_id: request.parent_run_id,
+            created_at: now,
+            expires_at: request.expires_at,
+            status: RunStatus::Active,
+            authority_revision,
+            contract_fingerprint,
+            capability_scope: request.capabilities,
+            resource_scope: request.resource_scope,
+            execution_credential: credential,
+            cancelled_at: None,
+        };
+        self.runs
+            .lock()
+            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
+            .insert(id, run.clone());
+        self.audit(
+            &tenant,
+            AuditRecord::new(AuditEventKind::AgentRunCreated)
+                .principal(&run.agent_principal)
+                .delegation(&run.delegation_id)
+                .meta("run_id", run.id.as_str())
+                .meta("task_id", run.task.id.as_str()),
+            now,
+        )?;
+        Ok(run)
+    }
+
+    pub fn agent_runs(
+        &self,
+        tenant: &TenantContext,
+        agent: &PrincipalId,
+    ) -> Result<Vec<AgentRun>, AuthError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
+            .values()
+            .filter(|run| run.tenant_id == tenant.tenant_id && &run.agent_principal == agent)
+            .cloned()
+            .collect::<Vec<_>>();
+        runs.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(runs)
+    }
+
+    pub fn agent_run(
+        &self,
+        tenant: &TenantContext,
+        run_id: &RunId,
+    ) -> Result<Option<AgentRun>, AuthError> {
+        let run = self
+            .runs
+            .lock()
+            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
+            .get(run_id)
+            .cloned();
+        match run {
+            Some(run) if run.tenant_id == tenant.tenant_id => Ok(Some(run)),
+            Some(_) => Err(run_error("run tenant mismatch", DenialReason::RunNotFound)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn agent_run_by_credential(
+        &self,
+        tenant: &TenantContext,
+        credential: &ExecutionCredentialId,
+    ) -> Result<Option<AgentRun>, AuthError> {
+        Ok(self
+            .runs
+            .lock()
+            .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?
+            .values()
+            .find(|run| {
+                run.tenant_id == tenant.tenant_id && &run.execution_credential == credential
+            })
+            .cloned())
+    }
+
+    pub fn cancel_agent_run(
+        &self,
+        tenant_id: &str,
+        run_id: &RunId,
+        now: i64,
+    ) -> Result<AgentRun, AuthError> {
+        let tenant = self.tenant(tenant_id)?;
+        let run = {
+            let mut runs = self
+                .runs
+                .lock()
+                .map_err(|_| run_error("run store unavailable", DenialReason::RunNotFound))?;
+            let run = runs
+                .get_mut(run_id)
+                .ok_or_else(|| run_error("run not found", DenialReason::RunNotFound))?;
+            if run.tenant_id != tenant.tenant_id {
+                return Err(run_error("run tenant mismatch", DenialReason::RunNotFound));
+            }
+            run.status = RunStatus::Cancelled;
+            run.cancelled_at = Some(now);
+            run.clone()
+        };
+        self.audit(
+            &tenant,
+            AuditRecord::new(AuditEventKind::AgentRunCancelled)
+                .principal(&run.agent_principal)
+                .delegation(&run.delegation_id)
+                .meta("run_id", run.id.as_str())
+                .meta("task_id", run.task.id.as_str()),
+            now,
+        )?;
+        Ok(run)
+    }
+
     pub fn suspend_agent(
         &self,
         tenant_id: &str,
@@ -803,6 +1077,61 @@ impl AuthMesh {
                 authority_revision,
             ),
             Err(_) => deny(DenialReason::AuditUnavailable),
+        }
+    }
+
+    pub fn authorize_run_request_with_authority_revision(
+        &self,
+        context: &RuntimeContext,
+        run_id: &RunId,
+        request: &AuthorizationRequest,
+        resource_attributes: Option<&ResourceAttributes>,
+        now: i64,
+        authority_revision: u64,
+    ) -> AuthorizationDecision {
+        match self.checked_run_for_request(context, run_id, request, resource_attributes, now) {
+            Ok(run) => {
+                let run_context = context.clone().with_run(run.clone());
+                let mut run_request = request.clone();
+                run_request.context.run_id = Some(run.id.clone());
+                run_request.context.task_id = Some(run.task.id.clone());
+                run_request.context.agent_principal = Some(run.agent_principal.clone());
+                run_request.context.delegation_id = Some(run.delegation_id.clone());
+                run_request.context.delegation_chain = run.delegation_chain.clone();
+                self.authorize_request_with_authority_revision(
+                    &run_context,
+                    &run_request,
+                    resource_attributes,
+                    now,
+                    authority_revision,
+                )
+            }
+            Err((reason, run)) => {
+                let run_context = run
+                    .clone()
+                    .map(|run| context.clone().with_run(run))
+                    .unwrap_or_else(|| context.clone());
+                let decision = AuthorizationDecision::Deny {
+                    reason,
+                    capability: Some(request.capability.clone()),
+                    resource: request.resource.clone(),
+                    action: Some(request.action.clone()),
+                    policy_id: self.policy(&context.tenant).ok().map(|policy| policy.id),
+                    matched_rules: Vec::new(),
+                    conditions: Vec::new(),
+                    audit_event_id: None,
+                };
+                match self.record_decision(&run_context, &request.capability, &decision, now) {
+                    Ok(audit_event_id) => self.remember_decision(
+                        &run_context,
+                        &request.capability,
+                        attach_audit_event(decision, audit_event_id),
+                        now,
+                        authority_revision,
+                    ),
+                    Err(_) => deny(DenialReason::AuditUnavailable),
+                }
+            }
         }
     }
 
@@ -984,6 +1313,7 @@ impl AuthMesh {
             tenant: tenant.clone(),
             session_id,
             delegation,
+            run: None,
             capabilities,
         })
     }
@@ -1085,6 +1415,11 @@ impl AuthMesh {
         if let Some(session_id) = context.session_id.as_ref() {
             record = record.session(session_id);
         }
+        if let Some(run) = context.run.as_ref() {
+            record = record
+                .meta("run_id", run.id.as_str())
+                .meta("task_id", run.task.id.as_str());
+        }
         if let Some(delegation_id) = delegation_id.as_ref() {
             record = record.delegation(delegation_id);
         }
@@ -1155,6 +1490,83 @@ impl AuthMesh {
         audit_event_id(tenant, sequence)
     }
 
+    fn next_run_id(&self, tenant: &TenantContext) -> RunId {
+        let sequence = self.run_sequence.fetch_add(1, Ordering::SeqCst);
+        RunId(format!(
+            "run_{:016x}",
+            stable_hash(format!("{}|{}", tenant.tenant_id, sequence).as_bytes())
+        ))
+    }
+
+    fn execution_credential(
+        &self,
+        tenant: &TenantContext,
+        run_id: &RunId,
+    ) -> ExecutionCredentialId {
+        let material = format!(
+            "{}|{}|{}",
+            tenant.tenant_id,
+            run_id,
+            self.config.fingerprint()
+        );
+        ExecutionCredentialId(format!("exec_{:016x}", stable_hash(material.as_bytes())))
+    }
+
+    fn checked_run(
+        &self,
+        tenant: &TenantContext,
+        run_id: &RunId,
+        now: i64,
+    ) -> Result<AgentRun, AuthError> {
+        let run = self
+            .agent_run(tenant, run_id)?
+            .ok_or_else(|| run_error("run not found", DenialReason::RunNotFound))?;
+        match run.status {
+            RunStatus::Active => {}
+            RunStatus::Cancelled => {
+                return Err(run_error("run is cancelled", DenialReason::RunCancelled))
+            }
+            RunStatus::Expired => {
+                return Err(run_error("run is expired", DenialReason::RunExpired))
+            }
+            RunStatus::Completed | RunStatus::Failed => {
+                return Err(run_error(
+                    "run is no longer active",
+                    DenialReason::RunCancelled,
+                ))
+            }
+        }
+        if now >= run.expires_at {
+            return Err(run_error("run is expired", DenialReason::RunExpired));
+        }
+        Ok(run)
+    }
+
+    fn checked_run_for_request(
+        &self,
+        context: &RuntimeContext,
+        run_id: &RunId,
+        request: &AuthorizationRequest,
+        resource_attributes: Option<&ResourceAttributes>,
+        now: i64,
+    ) -> Result<AgentRun, (DenialReason, Option<AgentRun>)> {
+        let run = match self.checked_run(&context.tenant, run_id, now) {
+            Ok(run) => run,
+            Err(err) => return Err((err.denial, None)),
+        };
+        if run.agent_principal != context.principal.id || run.tenant_id != context.tenant.tenant_id
+        {
+            return Err((DenialReason::RunNotFound, Some(run)));
+        }
+        if !run.capability_scope.contains(&request.capability) {
+            return Err((DenialReason::RunScopeDenied, Some(run)));
+        }
+        if !resource_scope_matches(&run.resource_scope, request, resource_attributes) {
+            return Err((DenialReason::RunScopeDenied, Some(run)));
+        }
+        Ok(run)
+    }
+
     fn remember_decision(
         &self,
         context: &RuntimeContext,
@@ -1203,6 +1615,51 @@ fn pick_delegation<'d>(
                 .iter()
                 .find(|delegation| delegation.capabilities.contains(capability))
         })
+}
+
+fn resource_scope_matches(
+    scope: &ResourceScope,
+    request: &AuthorizationRequest,
+    resource_attributes: Option<&ResourceAttributes>,
+) -> bool {
+    if scope.is_unconstrained() {
+        return true;
+    }
+    let Some(resource) = &request.resource else {
+        return false;
+    };
+    if let Some(resource_type) = &scope.resource_type {
+        if resource_type != &resource.resource_type {
+            return false;
+        }
+    }
+    if let Some(resource_id) = &scope.resource_id {
+        if resource_id != "*" && resource_id != &resource.resource_id {
+            return false;
+        }
+    }
+    scope.attributes.iter().all(|(key, expected)| {
+        if key == "tenant" || key == "tenant_id" {
+            return matches_tenant(expected, resource.tenant_id.as_str());
+        }
+        resource_attributes.and_then(|attributes| attributes.values.get(key)) == Some(expected)
+    })
+}
+
+fn tenant_scope_holds(scope: &ResourceScope, tenant_id: &TenantId) -> bool {
+    scope
+        .attributes
+        .get("tenant")
+        .or_else(|| scope.attributes.get("tenant_id"))
+        .map(|value| matches_tenant(value, tenant_id.as_str()))
+        .unwrap_or(true)
+}
+
+fn matches_tenant(value: &ClaimValue, tenant_id: &str) -> bool {
+    match value {
+        ClaimValue::Enum(value) | ClaimValue::String(value) => value == tenant_id,
+        _ => false,
+    }
 }
 
 fn attach_audit_event(
@@ -1255,6 +1712,7 @@ fn decision_evidence(
     authority_revision: u64,
     contract_fingerprint: String,
 ) -> AuthorizationEvidence {
+    let run = context.run.as_ref();
     match decision {
         AuthorizationDecision::Allow {
             grant,
@@ -1280,6 +1738,12 @@ fn decision_evidence(
             authority: Some(grant.authority),
             delegated_by: grant.delegated_by.clone(),
             delegation_chain: grant.delegation_chain.clone(),
+            run_id: run.map(|run| run.id.clone()),
+            task_id: run.map(|run| run.task.id.clone()),
+            agent_principal: run.map(|run| run.agent_principal.clone()),
+            delegation_id: run.map(|run| run.delegation_id.clone()),
+            parent_run_id: run.and_then(|run| run.parent_run_id.clone()),
+            execution_scope: run.map(|run| run.resource_scope.clone()),
             authority_revision,
             contract_fingerprint,
             decision: AuthorizationOutcome::Allow,
@@ -1312,8 +1776,16 @@ fn decision_evidence(
             matched_rules: matched_rules.clone(),
             conditions: conditions.clone(),
             authority: None,
-            delegated_by: None,
-            delegation_chain: Vec::new(),
+            delegated_by: run.map(|run| run.delegator.clone()),
+            delegation_chain: run
+                .map(|run| run.delegation_chain.clone())
+                .unwrap_or_default(),
+            run_id: run.map(|run| run.id.clone()),
+            task_id: run.map(|run| run.task.id.clone()),
+            agent_principal: run.map(|run| run.agent_principal.clone()),
+            delegation_id: run.map(|run| run.delegation_id.clone()),
+            parent_run_id: run.and_then(|run| run.parent_run_id.clone()),
+            execution_scope: run.map(|run| run.resource_scope.clone()),
             authority_revision,
             contract_fingerprint,
             decision: AuthorizationOutcome::Deny,
@@ -1387,6 +1859,14 @@ fn delegation_error(message: &str) -> AuthError {
         AuthLifecycleStage::DelegationManagement,
         message,
         DenialReason::InvalidDelegation,
+    )
+}
+
+fn run_error(message: impl Into<String>, denial: DenialReason) -> AuthError {
+    AuthError::new(
+        AuthLifecycleStage::DelegationManagement,
+        message.into(),
+        denial,
     )
 }
 

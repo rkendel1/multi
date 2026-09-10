@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use appport_auth_mesh_authz::{AuthorizationDecision, DenialReason};
+use appport_auth_mesh_authz::{
+    Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, DenialReason,
+};
 use appport_auth_mesh_boundary::{
     AuthBoundary, AuthPortRuntime, BoundaryRequest, ClientAuthContext, Method, SignInOutcome,
 };
-use appport_auth_mesh_contract::PrincipalKind;
+use appport_auth_mesh_contract::{Capability, ExecutionCredentialId, PrincipalKind, RunId};
 use appport_auth_mesh_dsl::UiScreen;
 use appport_auth_mesh_runtime::AuthError;
 use appport_auth_mesh_surface::{AuthMethod, AuthOperation, AuthRoute};
@@ -158,7 +160,24 @@ impl AuthPortServer {
             return HttpResponse::denied(400, "missing_capability", "no capability named");
         };
 
-        match self.runtime.authorize(&context, capability) {
+        let decision = match self.run_id_from_request(&context, request) {
+            Ok(Some(run_id)) => self.runtime.authorize_run_resource(
+                &context,
+                &run_id,
+                AuthorizationRequest {
+                    principal: context.principal.id.clone(),
+                    tenant: context.tenant.tenant_id.clone(),
+                    capability: Capability(capability.to_string()),
+                    action: Action("authorize".to_string()),
+                    resource: None,
+                    context: AuthorizationContext::default(),
+                },
+            ),
+            Ok(None) => self.runtime.authorize(&context, capability),
+            Err(err) => return denial(&err),
+        };
+
+        match decision {
             Ok(AuthorizationDecision::Allow { grant, .. }) => HttpResponse::json(
                 200,
                 format!(
@@ -220,6 +239,33 @@ impl AuthPortServer {
             .join(", ");
 
         HttpResponse::json(200, format!("{{\"agents\": [{}]}}", agents))
+    }
+
+    fn run_id_from_request(
+        &self,
+        context: &appport_auth_mesh_boundary::AuthContext,
+        request: &BoundaryRequest,
+    ) -> Result<Option<RunId>, AuthError> {
+        if let Some(run_id) = request.field("run_id") {
+            return Ok(Some(RunId(run_id.to_string())));
+        }
+        let Some(credential) = request
+            .field("execution_credential")
+            .or_else(|| request.field("run_credential"))
+        else {
+            return Ok(None);
+        };
+        let run = self.runtime.agent_run_by_credential(
+            context.tenant.tenant_id.as_str(),
+            &ExecutionCredentialId(credential.to_string()),
+        )?;
+        run.map(|run| Some(run.id)).ok_or_else(|| {
+            AuthError::new(
+                appport_auth_mesh_runtime::AuthLifecycleStage::PolicyEvaluation,
+                "run credential was not found",
+                DenialReason::RunNotFound,
+            )
+        })
     }
 
     fn handle_delegations(&self, request: &BoundaryRequest) -> HttpResponse {

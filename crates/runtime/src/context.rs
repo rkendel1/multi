@@ -1,5 +1,5 @@
 use appport_auth_mesh_contract::{
-    Claims, Delegation, Principal, PrincipalId, PrincipalKind, SessionId, TenantContext,
+    AgentRun, Claims, Delegation, Principal, PrincipalId, PrincipalKind, SessionId, TenantContext,
 };
 
 use crate::capability_envelope::CapabilityEnvelope;
@@ -15,6 +15,7 @@ pub struct RuntimeContext {
     pub tenant: TenantContext,
     pub session_id: Option<SessionId>,
     pub delegation: Option<Delegation>,
+    pub run: Option<AgentRun>,
     pub claims: Claims,
     pub capabilities: CapabilityEnvelope,
 }
@@ -38,6 +39,11 @@ impl RuntimeContext {
 
     pub fn holds(&self, capability: &appport_auth_mesh_contract::Capability) -> bool {
         self.capabilities.allows(capability)
+    }
+
+    pub fn with_run(mut self, run: AgentRun) -> Self {
+        self.run = Some(run);
+        self
     }
 
     /// Why this context holds what it holds.

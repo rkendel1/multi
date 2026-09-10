@@ -16,6 +16,8 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         Some("reject") => reject(&args[1..]),
         Some("agents") => agents(&args[1..]),
         Some("agent") => agent(&args[1..]),
+        Some("runs") => runs(&args[1..]),
+        Some("run") => run_command(&args[1..]),
         Some("policies") => policies(&args[1..]),
         Some("policy") => policy(&args[1..]),
         Some("explain") => explain(&args[1..]),
@@ -255,6 +257,50 @@ fn agent(args: &[String]) -> Result<Output, CliError> {
         }
         _ => Err(error("agent command supports `create` and `show ID`")),
     }
+}
+
+fn runs(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let tenant =
+        option_value(args, "--tenant").ok_or_else(|| error("runs needs --tenant TENANT"))?;
+    let agent = option_value(args, "--agent").ok_or_else(|| error("runs needs --agent AGENT"))?;
+    let response = http_get(&server, &runs_path(&tenant, &agent))?;
+    Ok(Output {
+        text: format!("runs for {} from {}\n{}\n", agent, server, response),
+    })
+}
+
+fn run_command(args: &[String]) -> Result<Output, CliError> {
+    let (server, _output_token, _) = common_options(args)?;
+    let filtered = strip_common_options(args);
+    if filtered.first().map(String::as_str) != Some("show") {
+        return Err(error("run command supports `show ID`"));
+    }
+    let id = filtered
+        .get(1)
+        .ok_or_else(|| error("run show needs an id"))?;
+    let tenant = option_value(&filtered, "--tenant")
+        .ok_or_else(|| error("run show needs --tenant TENANT"))?;
+    let response = http_get(&server, &run_show_path(id, &tenant))?;
+    Ok(Output {
+        text: format!("run {} from {}\n{}\n", id, server, response),
+    })
+}
+
+fn runs_path(tenant: &str, agent: &str) -> String {
+    format!(
+        "/_authport/agents/{}/runs?tenant={}",
+        escape_path(agent),
+        escape_path(tenant)
+    )
+}
+
+fn run_show_path(id: &str, tenant: &str) -> String {
+    format!(
+        "/_authport/runs/{}?tenant={}",
+        escape_path(id),
+        escape_path(tenant)
+    )
 }
 
 fn policies(args: &[String]) -> Result<Output, CliError> {
@@ -636,5 +682,25 @@ mod tests {
             .message
             .contains("--tenant"));
         assert_eq!(escape_path("invoice agent"), "invoice%20agent");
+    }
+
+    #[test]
+    fn run_commands_validate_required_arguments_before_network_io() {
+        assert!(runs(&strings(&["--tenant", "acme"]))
+            .unwrap_err()
+            .message
+            .contains("--agent"));
+        assert!(run_command(&strings(&["show", "run-1"]))
+            .unwrap_err()
+            .message
+            .contains("--tenant"));
+        assert_eq!(
+            runs_path("acme", "agent:invoice"),
+            "/_authport/agents/agent:invoice/runs?tenant=acme"
+        );
+        assert_eq!(
+            run_show_path("run-1", "acme"),
+            "/_authport/runs/run-1?tenant=acme"
+        );
     }
 }

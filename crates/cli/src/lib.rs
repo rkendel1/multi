@@ -40,6 +40,8 @@ USAGE:
     authport agents [--tenant TENANT] [--server URL]
     authport agent create --tenant TENANT --name NAME [--id ID] [--server URL]
     authport agent show ID --tenant TENANT [--server URL]
+    authport runs --tenant TENANT --agent AGENT [--server URL]
+    authport run show ID --tenant TENANT [--server URL]
     authport policies [--server URL]
     authport policy show ID [--server URL]
     authport explain [DECISION_ID] [--server URL]
@@ -103,6 +105,8 @@ where
                 | "reject"
                 | "agents"
                 | "agent"
+                | "runs"
+                | "run"
                 | "policies"
                 | "policy"
                 | "explain",
