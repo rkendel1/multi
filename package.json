@@ -1,0 +1,63 @@
+{
+  "name": "authboundry",
+  "version": "1.0.0",
+  "description": "The authority boundary for an application.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "authport": "bin/authport.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "native/",
+    "docs/architecture.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "sh scripts/build-npm-package.sh",
+    "test": "node --test clients/js/authport.test.js test/npm-package.test.js",
+    "prepack": "npm run build",
+    "verify:package": "sh scripts/verify-npm-package.sh",
+    "publish:packages": "sh scripts/publish-packages.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rkendel1/multi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rkendel1/multi/issues"
+  },
+  "homepage": "https://github.com/rkendel1/multi#readme",
+  "license": "UNLICENSED",
+  "keywords": [
+    "authentication",
+    "authorization",
+    "identity",
+    "multi-tenant",
+    "delegation",
+    "agents",
+    "access-control",
+    "security"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

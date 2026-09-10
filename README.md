@@ -7,6 +7,11 @@ when you don't. Either way the application gets the same identity, tenancy,
 authorization, agent, delegation and session model — and the developer
 integrates AuthPort once.
 
+```sh
+npm install authboundry
+npx authport --help
+```
+
 ```
 use auth {
   providers = [google, github, email]
@@ -173,6 +178,19 @@ The browser side is a projection of server authority, never the security
 mechanism:
 
 ```js
+import { createAuthPort } from "authboundry";
+
+const authport = createAuthPort();
+const auth = await authport.session();
+await authport.authorize("invoice.create"); // asks the authority boundary
+```
+
+The same client has an optional React adapter; React is supplied by the host
+application and is not installed as an AuthPort dependency:
+
+```js
+import { createAuthPortReact } from "authboundry/react";
+
 const { AuthPort, useAuth } = createAuthPortReact(React);
 
 // <AuthPort><App /></AuthPort>
@@ -184,8 +202,9 @@ await auth.authorize("invoice.create");   // asks the server
 auth.can("invoice.create");               // rendering hint only
 ```
 
-`clients/js/authport.js` is dependency-free and build-step-free; the generated
-sign-in page serves the same file.
+The `authboundry/client` entry point is dependency-free and build-step-free. The
+generated sign-in page and npm client speak the same server-derived HTTP
+contract; neither can establish authority independently.
 
 ## Inspecting a contract
 
@@ -260,7 +279,7 @@ anonymous escalation, and no capability inferred from provider identity alone.
 The full invariant list, with the tests that hold each one, is in
 [docs/architecture.md](docs/architecture.md).
 
-## Not implemented yet
+## Production status
 
 Production OAuth (Google, GitHub, Microsoft, Apple), SAML, SCIM, MFA, passkeys,
 password reset, production email delivery, production key infrastructure,
@@ -268,6 +287,12 @@ Postgres, Redis, distributed sessions, a polished component library, TLS
 termination and production proxy features. The local connector's credential
 digest, the session id source and the proxy's context signature are development
 mechanisms, documented as such in `docs/architecture.md`.
+
+Version 1.0.0 stabilizes the JavaScript projection and packaged CLI surface; it
+does not mean those integrations are production-ready. The packaged native CLI
+runtime currently supports macOS on Apple silicon. Other platforms can use the
+JavaScript client, but `npx authport` will report that no native runtime is
+packaged.
 
 ## Running
 
