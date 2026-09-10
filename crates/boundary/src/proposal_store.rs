@@ -10,6 +10,10 @@ pub enum ProposalStatus {
     Approved,
     Applied,
     Rejected,
+    Active,
+    Orphaned,
+    Stale,
+    Superseded,
 }
 
 impl ProposalStatus {
@@ -19,6 +23,10 @@ impl ProposalStatus {
             Self::Approved => "approved",
             Self::Applied => "applied",
             Self::Rejected => "rejected",
+            Self::Active => "active",
+            Self::Orphaned => "orphaned",
+            Self::Stale => "stale",
+            Self::Superseded => "superseded",
         }
     }
 }

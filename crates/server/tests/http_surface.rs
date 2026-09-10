@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use appport_auth_mesh_authz::DenialReason;
 use appport_auth_mesh_boundary::{
-    AuthPortRuntime, BindingMode, BoundaryRequest, Method, Requirement, RESERVED_HEADER_PREFIX,
+    AuthPortRuntime, AuthorityChange, BindingMode, BoundaryRequest, Method, Requirement,
+    RESERVED_HEADER_PREFIX,
 };
 use appport_auth_mesh_dsl::parse_auth_block;
 use appport_auth_mesh_providers::ConnectorRegistry;
@@ -525,6 +526,103 @@ fn bulk_apply_adopts_compatible_approved_proposals_together() {
     assert_eq!(
         runtime.get_route_protection(&Method::Post, "/invoices"),
         Some("invoice.create".to_string())
+    );
+}
+
+#[test]
+fn control_plane_reconciliation_reports_drift_without_applying_authority() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let app = RouterApp::new().public(
+        Method::Post,
+        "/refunds",
+        Box::new(|_| HttpResponse::text(200, "refunded")),
+    );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    let reconciled = server.handle(&request(
+        Method::Post,
+        "/_authport/authority-reconciliation/run",
+        &[],
+        "",
+    ));
+    assert_eq!(reconciled.status, 200);
+    let body = reconciled.body_string();
+    assert!(body.contains("\"new_routes\": 1"));
+    assert!(body.contains("\"unsafe_automatic_changes\": 0"));
+    assert!(body.contains("\"type\": \"new_route\""));
+    assert!(body.contains("\"capability\": \"refund.create\""));
+    assert!(body.contains("\"id\": \"proposal-1\""));
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/refunds"),
+        None,
+        "reconciliation must not silently grant authority"
+    );
+
+    let repeated = server.handle(&request(
+        Method::Get,
+        "/_authport/authority-reconciliation",
+        &[],
+        "",
+    ));
+    assert_eq!(repeated.status, 200);
+    let repeated_body = repeated.body_string();
+    assert!(repeated_body.contains("\"id\": \"proposal-1\""));
+    assert!(!repeated_body.contains("\"id\": \"proposal-2\""));
+
+    let drift = server.handle(&request(Method::Get, "/_authport/authority-drift", &[], ""));
+    assert_eq!(drift.status, 200);
+    assert!(drift.body_string().contains("\"type\": \"new_route\""));
+}
+
+#[test]
+fn control_plane_reconciliation_reports_orphaned_authority() {
+    let config = parse_auth_block("use auth { providers = [local] tenant = true }").unwrap();
+    let registry = ConnectorRegistry::from_config(&config).unwrap();
+    let runtime = Arc::new(
+        AuthPortRuntime::new(
+            config,
+            registry,
+            MemoryStores::new().mesh_stores(),
+            BindingMode::Embedded,
+        )
+        .unwrap(),
+    );
+    let proposal = runtime
+        .propose_change(AuthorityChange::ProtectRoute {
+            method: Method::Post,
+            path: "/billing/charge".to_string(),
+            capability: "billing.charge".to_string(),
+        })
+        .expect("proposal");
+    let approval = appport_auth_mesh_boundary::Approval::for_proposal(&proposal);
+    runtime.apply_change(proposal, approval).expect("apply");
+    let app = RouterApp::new().public(
+        Method::Post,
+        "/refunds",
+        Box::new(|_| HttpResponse::text(200, "refunded")),
+    );
+    let server = AuthPortServer::new(runtime.clone(), Arc::new(app));
+
+    let drift = server.handle(&request(Method::Get, "/_authport/authority-drift", &[], ""));
+    assert_eq!(drift.status, 200);
+    let body = drift.body_string();
+    assert!(body.contains("\"type\": \"orphaned_authority\""));
+    assert!(body.contains("POST /billing/charge"));
+    assert!(body.contains("retained:billing.charge"));
+    assert_eq!(
+        runtime.get_route_protection(&Method::Post, "/billing/charge"),
+        Some("billing.charge".to_string()),
+        "historical authority must be retained"
     );
 }
 

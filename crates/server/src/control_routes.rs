@@ -9,8 +9,10 @@ use appport_auth_mesh_boundary::{
 };
 use appport_auth_mesh_contract::PolicyId;
 use appport_auth_mesh_discovery::{
-    propose_authority, render_proposal_json, ApplicationCandidate, AuthorityProposal,
-    DiscoveryConfidence, ExistingAuthPort, ProposalReviewStatus, RecommendationAction,
+    propose_authority, render_drift_json, render_proposal_json, render_reconciliation_json,
+    ApplicationCandidate, AuthorityProposal, AuthorityReconciler, DiscoveryConfidence,
+    ExistingAuthPort, ProposalHistoryItem, ProposalReviewStatus, RecommendationAction,
+    ReconciliationResult,
 };
 use appport_auth_mesh_surface::AuthSurface;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +30,13 @@ pub fn handle_control_route(
         ("GET", "/_authport/overview") => Some(overview(runtime)),
         ("GET", "/_authport/routes") => Some(routes(runtime)),
         ("GET", "/_authport/authority-proposal") => Some(authority_proposal(runtime, app)),
+        ("GET", "/_authport/authority-reconciliation") => {
+            Some(authority_reconciliation(runtime, app))
+        }
+        ("POST", "/_authport/authority-reconciliation/run") => {
+            Some(authority_reconciliation(runtime, app))
+        }
+        ("GET", "/_authport/authority-drift") => Some(authority_drift(runtime, app)),
         _ if method == "POST"
             && path.starts_with("/_authport/authority-proposal/")
             && path.ends_with("/approve") =>
@@ -98,6 +107,105 @@ fn authority_proposal(
     HttpResponse::json(200, render_proposal_json(&proposal))
 }
 
+fn authority_reconciliation(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    app: &dyn ApplicationBinding,
+) -> HttpResponse {
+    match reconciliation_result(runtime, app) {
+        Ok(result) => HttpResponse::json(200, render_reconciliation_json(&result)),
+        Err(msg) => HttpResponse::bad_request(&msg),
+    }
+}
+
+fn authority_drift(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    app: &dyn ApplicationBinding,
+) -> HttpResponse {
+    match reconciliation_result(runtime, app) {
+        Ok(result) => HttpResponse::json(200, render_drift_json(&result)),
+        Err(msg) => HttpResponse::bad_request(&msg),
+    }
+}
+
+fn reconciliation_result(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    app: &dyn ApplicationBinding,
+) -> Result<ReconciliationResult, String> {
+    let application = live_application(app);
+    let authority = runtime.live_authority();
+    let existing = authority_mappings(&authority);
+    let history = proposal_history(runtime)?;
+    let mut result = AuthorityReconciler::reconcile(
+        None,
+        &application,
+        runtime.contract().fingerprint(),
+        authority.revision,
+        &existing,
+        &history,
+    );
+    attach_reconciliation_proposals(runtime, &mut result);
+    Ok(result)
+}
+
+fn live_application(app: &dyn ApplicationBinding) -> ApplicationCandidate {
+    ApplicationCandidate {
+        root: std::path::PathBuf::new(),
+        name: Some("AuthPort".to_string()),
+        language: None,
+        framework: None,
+        package_manager: None,
+        entrypoints: Vec::new(),
+        servers: Vec::new(),
+        routes: app.observed_routes(),
+        providers: Vec::new(),
+        existing_authport: ExistingAuthPort::default(),
+        confidence: DiscoveryConfidence::High,
+    }
+}
+
+fn authority_mappings(
+    authority: &appport_auth_mesh_boundary::LiveAuthorityState,
+) -> std::collections::BTreeMap<(String, String), String> {
+    authority
+        .route_protection
+        .iter()
+        .filter_map(|(route, protection)| {
+            protection.capability.clone().map(|capability| {
+                (
+                    (route.method.as_str().to_string(), route.path.clone()),
+                    capability,
+                )
+            })
+        })
+        .collect()
+}
+
+fn proposal_history(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+) -> Result<Vec<ProposalHistoryItem>, String> {
+    Ok(runtime
+        .list_proposals(1_000, 0)?
+        .into_iter()
+        .filter_map(|metadata| runtime.retrieve_proposal(&metadata.id).ok())
+        .filter_map(|proposal| match proposal.change {
+            AuthorityChange::ProtectRoute {
+                method,
+                path,
+                capability,
+            } => Some(ProposalHistoryItem {
+                id: proposal.id,
+                method: method.as_str().to_string(),
+                path,
+                capability,
+                status: proposal.status.as_str().to_string(),
+                discovery_revision: proposal.discovery_revision,
+                authority_revision: proposal.revision,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>())
+}
+
 fn attach_inferred_proposals(
     runtime: &std::sync::Arc<AuthPortRuntime>,
     proposal: &mut AuthorityProposal,
@@ -135,6 +243,51 @@ fn attach_inferred_proposals(
                     ProposalStatus::Approved => ProposalReviewStatus::Approved,
                     ProposalStatus::Applied => ProposalReviewStatus::AlreadyProtected,
                     ProposalStatus::Rejected => ProposalReviewStatus::Rejected,
+                    ProposalStatus::Active => ProposalReviewStatus::Recommended,
+                    ProposalStatus::Orphaned
+                    | ProposalStatus::Stale
+                    | ProposalStatus::Superseded => ProposalReviewStatus::Stale,
+                }
+            };
+        }
+    }
+}
+
+fn attach_reconciliation_proposals(
+    runtime: &std::sync::Arc<AuthPortRuntime>,
+    result: &mut ReconciliationResult,
+) {
+    let current_revision = runtime.live_authority().revision;
+    for recommendation in &mut result.new_authority_proposals {
+        let method = match Method::parse(&recommendation.method) {
+            Some(method) => method,
+            None => continue,
+        };
+        let capability = match recommendation.capability.clone() {
+            Some(capability) => capability,
+            None => continue,
+        };
+        let change = AuthorityChange::ProtectRoute {
+            method,
+            path: recommendation.path.clone(),
+            capability,
+        };
+        if let Ok(stored) =
+            runtime.ensure_proposal(change, ProposalSource::Inferred, result.discovery_revision)
+        {
+            recommendation.id = Some(stored.id);
+            recommendation.status = if stored.revision != current_revision {
+                ProposalReviewStatus::Stale
+            } else {
+                match stored.status {
+                    ProposalStatus::Pending => ProposalReviewStatus::Recommended,
+                    ProposalStatus::Approved => ProposalReviewStatus::Approved,
+                    ProposalStatus::Applied => ProposalReviewStatus::AlreadyProtected,
+                    ProposalStatus::Rejected => ProposalReviewStatus::Rejected,
+                    ProposalStatus::Active => ProposalReviewStatus::Recommended,
+                    ProposalStatus::Orphaned
+                    | ProposalStatus::Stale
+                    | ProposalStatus::Superseded => ProposalReviewStatus::Stale,
                 }
             };
         }
