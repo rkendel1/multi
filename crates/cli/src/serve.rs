@@ -33,6 +33,7 @@ pub struct ServeOptions {
     pub public_paths: Vec<String>,
     pub public_exact: Vec<String>,
     pub required: Vec<(String, String)>,
+    pub required_exact: Vec<(String, String)>,
     pub proxy_secret: String,
     pub studio_page: Option<String>,
     pub studio_controller: Option<Arc<dyn appport_auth_mesh_server::StudioController>>,
@@ -50,6 +51,7 @@ impl Default for ServeOptions {
             public_paths: Vec::new(),
             public_exact: Vec::new(),
             required: Vec::new(),
+            required_exact: Vec::new(),
             proxy_secret: "authboundry-development-secret".to_string(),
             studio_page: None,
             studio_controller: None,
@@ -271,6 +273,13 @@ pub(crate) fn application_policy(options: &ServeOptions) -> RoutePolicy {
         policy = policy.rule(
             &all,
             PathPattern::Prefix(path.clone()),
+            Requirement::capability(capability),
+        );
+    }
+    for (path, capability) in &options.required_exact {
+        policy = policy.rule(
+            &all,
+            PathPattern::Exact(path.clone()),
             Requirement::capability(capability),
         );
     }

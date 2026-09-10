@@ -636,6 +636,8 @@ fn the_generated_ui_offers_only_connectors_that_work() {
     // The page drives the same client library the JS package ships.
     assert!(html.contains("/authboundry/client.js"));
     assert!(html.contains("AuthBoundry.createAuthBoundry"));
+    assert!(html.contains("location.assign(returnTo)"));
+    assert!(html.contains("requestedReturn.startsWith(\"/\")"));
     for forbidden in ["authport", "AuthPort", "_authport", "authport_"] {
         assert!(!html.contains(forbidden), "public UI leaked {forbidden}");
     }

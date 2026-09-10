@@ -133,6 +133,8 @@ pub fn render_sign_in(
   <script>
     const auth = AuthBoundry.createAuthBoundry({{}});
     const status = document.getElementById("status");
+    const requestedReturn = new URLSearchParams(location.search).get("return_to") || "/";
+    const returnTo = requestedReturn.startsWith("/") && !requestedReturn.startsWith("//") ? requestedReturn : "/";
 
     auth.subscribe((state) => {{
       if (state.auth.authenticated) {{
@@ -170,7 +172,8 @@ pub fn render_sign_in(
       const form = new FormData(event.target);
       try {{
         await auth.signIn(Object.fromEntries(form.entries()));
-        status.textContent = JSON.stringify(auth.auth, null, 2);
+        status.textContent = "Signed in. Opening application…";
+        location.assign(returnTo);
       }} catch (error) {{
         status.textContent = "denied: " + (error.reason || error.message);
       }}

@@ -442,6 +442,18 @@ impl AuthPortServer {
 
         match self.runtime.enforce(request, &requirement) {
             Ok(context) => self.app.handle(request, context.as_ref()),
+            Err(_err)
+                if request.method == Method::Get
+                    && request
+                        .headers
+                        .get("accept")
+                        .map(|value| value.contains("text/html"))
+                        .unwrap_or(false) =>
+            {
+                let return_to = percent_encode_path(&request.path);
+                HttpResponse::html(302, String::new())
+                    .with_header("location", format!("/auth/login?return_to={}", return_to))
+            }
             Err(err) => denial(&err),
         }
     }
@@ -500,6 +512,18 @@ impl AuthPortServer {
             .join(", ");
         format!("{{\"providers\": [{}]}}", providers)
     }
+}
+
+fn percent_encode_path(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' => {
+                vec![byte as char]
+            }
+            other => format!("%{other:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 /// Failures map to a status, always as a refusal — never as access.

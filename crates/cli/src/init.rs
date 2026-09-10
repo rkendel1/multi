@@ -808,13 +808,13 @@ fn package_dependency_change(root: &Path) -> Result<Option<FileChange>, CliError
     let after = if before.contains("\"dependencies\": {") {
         before.replacen(
             "\"dependencies\": {",
-            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.5.0\",",
+            "\"dependencies\": {\n    \"@authboundry/core\": \"^1.6.0\",",
             1,
         )
     } else {
         before.replacen(
             '{',
-            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.5.0\"},",
+            "{\n  \"dependencies\": {\"@authboundry/core\": \"^1.6.0\"},",
             1,
         )
     };
@@ -1208,6 +1208,16 @@ pub fn rollback_integration(args: &[String]) -> Result<Output, CliError> {
     }
     fs::remove_file(directory.join("manifest.tsv"))
         .map_err(|err| error(format!("cannot consume rollback manifest: {}", err)))?;
+    let route_access = root.join(".authboundry/route-access.json");
+    if route_access.exists() {
+        fs::remove_file(&route_access).map_err(|err| {
+            error(format!(
+                "cannot remove generated route authority `{}`: {}",
+                route_access.display(),
+                err
+            ))
+        })?;
+    }
     let _ = fs::remove_dir(&directory);
     Ok(Output {
         text: format!(

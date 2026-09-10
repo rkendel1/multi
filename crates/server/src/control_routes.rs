@@ -1,7 +1,7 @@
 use crate::control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 use crate::http::{HttpRequest, HttpResponse, JsonValue};
 use crate::router::ApplicationBinding;
-use appport_auth_mesh_authz::{AuthorizationEvidence, ConditionEvidence, Policy};
+use appport_auth_mesh_authz::{AuthorizationEvidence, Condition, ConditionEvidence, Policy, Rule};
 use appport_auth_mesh_boundary::{
     Approval, AuthPortRuntime, AuthorityChange, ChangeRecord, Method, ProposalMetadata,
     ProposalSource, ProposalStatus, RouteId, RouteProtection as LiveRouteProtection,
@@ -37,6 +37,12 @@ pub fn handle_control_route(
     match (method.as_str(), path) {
         ("GET", "/_authboundry/overview") => Some(overview(runtime)),
         ("GET", "/_authboundry/routes") => Some(routes(runtime)),
+        ("GET", "/_authboundry/authority-state") => {
+            let state = runtime.live_authority();
+            Some(HttpResponse::ok_json(preview_state_to_json(
+                &appport_auth_mesh_boundary::control::PreviewState::from(&state),
+            )))
+        }
         ("GET", "/_authboundry/authority-proposal") => Some(authority_proposal(runtime, app)),
         ("GET", "/_authboundry/authority-reconciliation") => {
             Some(authority_reconciliation(runtime, app))
@@ -2215,12 +2221,33 @@ fn parse_authority_change(request: &HttpRequest) -> Result<AuthorityChange, Stri
         let capability =
             extract_quoted_field(&body_str, "capability").ok_or("missing capability")?;
         let policy_id = extract_quoted_field(&body_str, "policy").ok_or("missing policy")?;
+        let roles = extract_quoted_field(&body_str, "roles")
+            .or_else(|| extract_quoted_field(&body_str, "role"))
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| ClaimValue::Enum(value.to_string()))
+                    .collect::<Vec<_>>()
+            });
+        let rules = roles
+            .map(|roles| {
+                vec![Rule::allow(
+                    Capability(capability.clone()),
+                    Condition::ClaimIn {
+                        key: "role".to_string(),
+                        values: roles,
+                    },
+                )]
+            })
+            .unwrap_or_default();
 
         Ok(AuthorityChange::SetCapabilityPolicy {
             capability,
             policy: Policy {
                 id: PolicyId(policy_id),
-                rules: Vec::new(),
+                rules,
             },
         })
     } else if body_str.contains("set_provider_enabled")

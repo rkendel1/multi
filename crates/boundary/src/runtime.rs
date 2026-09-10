@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use appport_auth_mesh_authz::{
-    Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, DenialReason,
-    ResourceAttributes, ResourceRef, ResourceResolver,
+    evaluate_capability, Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest,
+    DenialReason, ResourceAttributes, ResourceRef, ResourceResolver,
 };
 use appport_auth_mesh_contract::{
     AgentRun, Capability, ExecutionCredentialId, PrincipalId, PrincipalKind, RunId, TenantContext,
@@ -936,6 +936,24 @@ impl AuthBoundary for AuthPortRuntime {
                 AuthLifecycleStage::PolicyEvaluation,
                 "no capability named",
                 DenialReason::UnknownCapability,
+            ));
+        }
+
+        if let Some(policy) = self
+            .authority
+            .read()
+            .unwrap()
+            .capability_policies
+            .get(capability)
+            .cloned()
+        {
+            return Ok(evaluate_capability(
+                Some(&policy),
+                Some(&context.principal),
+                Some(&context.tenant),
+                context.delegation.as_ref().map(|value| &value.delegation),
+                &Capability(capability.to_string()),
+                self.now(),
             ));
         }
 

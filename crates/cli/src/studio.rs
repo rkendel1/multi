@@ -15,6 +15,8 @@ use appport_auth_mesh_surface::AuthSurface;
 
 use crate::{error, init, serve, CliError, Output};
 
+const ROUTE_ACCESS_FILE: &str = ".authboundry/route-access.json";
+
 pub fn run(args: &[String]) -> Result<Output, CliError> {
     let mut root = None;
     let mut no_open = false;
@@ -57,6 +59,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         accounts: init::development_accounts(&root),
         tenants: vec!["development".to_string()],
         proxy_secret: init::development_proxy_secret(&root).unwrap_or_default(),
+        grants: development_route_grants(&root),
         studio_page: None,
         upstream: live_upstream,
         application_binding: Some(binding),
@@ -152,6 +155,14 @@ fn build_proxy(
                 .filter(|route| init::is_public_entry_path(&route.path))
                 .map(|route| route.path),
         );
+    }
+    for entry in route_access(root) {
+        if entry.access != "default" {
+            options.required_exact.push((
+                entry.path.clone(),
+                route_capability(&entry.method, &entry.path, &entry.access),
+            ));
+        }
     }
     Ok(UpstreamProxy::new(
         origin,
@@ -337,10 +348,154 @@ impl StudioController for RepositoryStudio {
                     Err(err) => Self::failure(409, err.message),
                 }
             }
+            (Method::Post, "/_authboundry/application/routes/access") => {
+                let Some(method) = Self::field(request, "method") else {
+                    return Some(Self::failure(400, "route method is required"));
+                };
+                let Some(path) = Self::field(request, "path") else {
+                    return Some(Self::failure(400, "route path is required"));
+                };
+                let Some(access) = Self::field(request, "access") else {
+                    return Some(Self::failure(400, "route access is required"));
+                };
+                match save_route_access(&self.root, &method, &path, &access) {
+                    Ok(()) => {
+                        self.binding
+                            .sync(init::adoption_upstream(&self.root).as_deref());
+                        HttpResponse::json(200, "{\"ok\":true,\"persisted\":true}")
+                    }
+                    Err(err) => Self::failure(422, err.message),
+                }
+            }
             _ => return None,
         };
         Some(response)
     }
+}
+
+#[derive(Clone)]
+struct RouteAccess {
+    method: String,
+    path: String,
+    access: String,
+}
+
+fn route_access(root: &std::path::Path) -> Vec<RouteAccess> {
+    let Ok(source) = std::fs::read_to_string(root.join(ROUTE_ACCESS_FILE)) else {
+        return Vec::new();
+    };
+    source
+        .lines()
+        .filter(|line| line.contains("\"method\""))
+        .filter_map(|line| {
+            Some(RouteAccess {
+                method: json_line_field(line, "method")?,
+                path: json_line_field(line, "path")?,
+                access: json_line_field(line, "access")?,
+            })
+        })
+        .collect()
+}
+
+fn json_line_field(line: &str, field: &str) -> Option<String> {
+    let marker = format!("\"{}\":\"", field);
+    Some(line.split_once(&marker)?.1.split_once('"')?.0.to_string())
+}
+
+fn save_route_access(
+    root: &std::path::Path,
+    method: &str,
+    path: &str,
+    access: &str,
+) -> Result<(), CliError> {
+    if !matches!(access, "default" | "authenticated" | "admin" | "user") {
+        return Err(error(
+            "route access must be default, authenticated, admin, or user",
+        ));
+    }
+    let discovered = init::discovered_routes(root).unwrap_or_default();
+    if !discovered
+        .iter()
+        .any(|route| route.method.eq_ignore_ascii_case(method) && route.path == path)
+    {
+        return Err(error("route is not part of the discovered application"));
+    }
+    let mut entries = route_access(root);
+    entries.retain(|entry| !(entry.method.eq_ignore_ascii_case(method) && entry.path == path));
+    if access != "default" {
+        entries.push(RouteAccess {
+            method: method.to_ascii_uppercase(),
+            path: path.to_string(),
+            access: access.to_string(),
+        });
+    }
+    entries.sort_by(|left, right| (&left.path, &left.method).cmp(&(&right.path, &right.method)));
+    let records = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "    {{\"method\":\"{}\",\"path\":\"{}\",\"access\":\"{}\"}}",
+                json_escape(&entry.method),
+                json_escape(&entry.path),
+                json_escape(&entry.access)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let target = root.join(ROUTE_ACCESS_FILE);
+    let temporary = target.with_extension("authboundry-tmp");
+    std::fs::write(
+        &temporary,
+        format!("{{\n  \"routes\": [\n{}\n  ]\n}}\n", records),
+    )
+    .map_err(|err| error(format!("cannot save route access: {}", err)))?;
+    std::fs::rename(&temporary, &target)
+        .map_err(|err| error(format!("cannot activate route access: {}", err)))
+}
+
+fn route_capability(method: &str, path: &str, access: &str) -> String {
+    let mut name = path
+        .trim_matches('/')
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    while name.contains("..") {
+        name = name.replace("..", ".");
+    }
+    let name = name.trim_matches('.');
+    format!(
+        "application.route.{}.{}.{}",
+        method.to_ascii_lowercase(),
+        if name.is_empty() { "root" } else { name },
+        access
+    )
+}
+
+fn development_route_grants(root: &std::path::Path) -> Vec<serve::Grant> {
+    init::discovered_routes(root)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|route| {
+            [
+                ("authenticated", "admin"),
+                ("authenticated", "user"),
+                ("admin", "admin"),
+                ("user", "user"),
+            ]
+            .into_iter()
+            .map(move |(access, role)| serve::Grant {
+                capability: route_capability(&route.method, &route.path, access),
+                claim: "role".to_string(),
+                value: role.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn proposal_id(plan: &init::AttachmentPlan) -> String {
@@ -390,6 +545,7 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
     let configured = upstream.is_some();
     let reachable = upstream.map(init::upstream_reachable).unwrap_or(false);
     let routes = app.as_ref().map(|app| app.routes.as_slice()).unwrap_or(&[]);
+    let configured_access = route_access(root);
     let route_rows = if routes.is_empty() {
         format!(
             "<p class=muted>No application routes discovered.<br>{}</p>",
@@ -403,10 +559,24 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
         routes
             .iter()
             .map(|r| {
+                let access = configured_access
+                    .iter()
+                    .find(|entry| {
+                        entry.method.eq_ignore_ascii_case(&r.method) && entry.path == r.path
+                    })
+                    .map(|entry| entry.access.as_str())
+                    .unwrap_or("default");
+                let selected = |value: &str| if access == value { " selected" } else { "" };
                 format!(
-                    "<tr><td>{} {}</td><td>Discovered</td></tr>",
+                    "<tr data-route data-method=\"{}\" data-path=\"{}\"><td>{} {}</td><td><select class=route-access><option value=default{}>Discovered default</option><option value=authenticated{}>Any signed-in user</option><option value=admin{}>Admin only</option><option value=user{}>User only</option></select></td><td><button class=save-route>Apply</button> <span class=route-status></span></td></tr>",
                     esc(&r.method),
-                    esc(&r.path)
+                    esc(&r.path),
+                    esc(&r.method),
+                    esc(&r.path),
+                    selected("default"),
+                    selected("authenticated"),
+                    selected("admin"),
+                    selected("user")
                 )
             })
             .collect()
@@ -458,18 +628,21 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
     );
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AuthBoundry Studio</title><style>
-:root{{color-scheme:dark;background:#0b0d10;color:#edf0f4;font:15px/1.5 system-ui,sans-serif}}body{{margin:0}}header{{padding:24px 32px;border-bottom:1px solid #292d35}}header b{{font-size:20px}}header span,.muted{{color:#99a1ad}}main{{max-width:920px;margin:auto;padding:36px 24px}}h1{{font-size:30px;margin:0 0 4px}}h2{{font-size:16px;margin:32px 0 12px}}.card{{background:#13171d;border:1px solid #292d35;border-radius:12px;padding:24px;margin:16px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}}dt{{color:#99a1ad}}dd{{margin:4px 0;font-weight:650}}.ok{{color:#55d187}}.warn{{color:#f4bd61}}.off{{color:#99a1ad}}button{{background:#edf0f4;color:#101318;border:0;border-radius:7px;padding:10px 16px;font-weight:700;margin-right:8px;cursor:pointer}}button.secondary{{background:#292d35;color:#edf0f4}}input{{padding:10px;border:1px solid #3b414c;border-radius:7px;background:#0b0d10;color:#edf0f4;width:min(420px,90%);margin:8px 0}}pre{{white-space:pre-wrap}}dialog{{background:#13171d;color:#edf0f4;border:1px solid #3b414c;border-radius:12px;width:min(620px,90vw)}}table{{width:100%;border-collapse:collapse}}td{{padding:9px;border-bottom:1px solid #292d35}}</style></head><body>
+:root{{color-scheme:dark;background:#0b0d10;color:#edf0f4;font:15px/1.5 system-ui,sans-serif}}body{{margin:0}}header{{padding:24px 32px;border-bottom:1px solid #292d35}}header b{{font-size:20px}}header span,.muted{{color:#99a1ad}}main{{max-width:920px;margin:auto;padding:36px 24px}}h1{{font-size:30px;margin:0 0 4px}}h2{{font-size:16px;margin:32px 0 12px}}.card{{background:#13171d;border:1px solid #292d35;border-radius:12px;padding:24px;margin:16px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}}dt{{color:#99a1ad}}dd{{margin:4px 0;font-weight:650}}.ok{{color:#55d187}}.warn{{color:#f4bd61}}.off{{color:#99a1ad}}button{{background:#edf0f4;color:#101318;border:0;border-radius:7px;padding:10px 16px;font-weight:700;margin-right:8px;cursor:pointer}}button.secondary{{background:#292d35;color:#edf0f4}}input,select{{padding:10px;border:1px solid #3b414c;border-radius:7px;background:#0b0d10;color:#edf0f4;margin:8px 0}}input{{width:min(420px,90%)}}pre{{white-space:pre-wrap}}dialog{{background:#13171d;color:#edf0f4;border:1px solid #3b414c;border-radius:12px;width:min(620px,90vw)}}table{{width:100%;border-collapse:collapse}}td{{padding:9px;border-bottom:1px solid #292d35}}.route-status{{font-size:13px}}</style></head><body>
 <header><b>AuthBoundry</b><br><span>Authority Boundary · Studio</span><nav>Overview · Application · Authority · Users · Routes · Providers · Sessions · Policies · Audit · Attachment</nav></header><main><h1>{name}</h1><p class="muted">What AuthBoundry currently knows and protects.</p><p><a href="/auth/login">Open generated login</a> · <a href="/" target="_blank">Open protected application</a></p>
 <section class="card grid"><dl><dt>Authority</dt><dd class="ok">✓ Configured</dd></dl><dl><dt>Application</dt><dd class="{attach_class}">{application}</dd></dl><dl><dt>Protection</dt><dd class="{protect_class}">{protection}</dd></dl><dl><dt>Mode</dt><dd>Standalone</dd></dl></section>
 {attach_callout}<h2>Topology</h2><section class="card grid"><dl><dt>Studio + runtime</dt><dd id="studio-origin"></dd></dl><dl><dt>Protected application upstream</dt><dd>{upstream}</dd></dl></section><h2>Application</h2><section class="card grid"><dl><dt>Language</dt><dd>{language}</dd></dl><dl><dt>Framework</dt><dd>{framework}</dd></dl><dl><dt>Package manager</dt><dd>{package_manager}</dd></dl><dl><dt>Entrypoint</dt><dd>{entrypoint}</dd></dl><dl><dt>Run command</dt><dd>{run_command}</dd></dl><dl><dt>Upstream</dt><dd>{upstream}</dd></dl></section>
 <h2>Authority</h2><section class="card grid"><dl><dt>Providers</dt><dd>{providers}</dd></dl><dl><dt>Principals</dt><dd>Human · Service</dd></dl><dl><dt>Agents / Delegation</dt><dd>Disabled</dd></dl><dl><dt>Sessions · Policies · Audit</dt><dd>Runtime authority</dd></dl></section>
 <h2>Development users</h2><section class="card"><p class="muted">Local-only accounts generated for this repository. Credentials are stored in <code>.authboundry/development.json</code> and excluded from git.</p><table><thead><tr><td>User</td><td>Role</td><td>Password</td></tr></thead><tbody>{account_rows}</tbody></table></section>
-<h2>Routes</h2><section class="card"><table>{route_rows}</table></section><h2>Contract</h2><p class="muted">{fingerprint}</p></main>
+<h2>Routes and access</h2><section class="card"><p class="muted">Choose who may cross the boundary for each route. Changes use AuthBoundry's reviewed proposal pipeline and take effect immediately.</p><table>{route_rows}</table></section><h2>Contract</h2><p class="muted">{fingerprint}</p></main>
 <dialog id="attach-dialog"><h2>Attach Application</h2><div id="attach-step"><p>Find a reachable application runtime. Reachability will not attach it.</p><label>Application upstream<br><input id="upstream" value="{upstream_input}" placeholder="http://127.0.0.1:3000"></label><p id="attach-status" class="muted"></p><button id="discover">Discover</button><button id="test-connection" class="secondary">Test Connection</button><button id="preview">Preview Attachment</button></div><div id="approval" hidden><h2>Attachment Preview</h2><pre id="preview-text"></pre><button id="cancel" class="secondary">Cancel</button><button id="approve">Approve Attachment</button></div></dialog>
 <script>
 const dialog=document.getElementById('attach-dialog'), status=document.getElementById('attach-status'), input=document.getElementById('upstream'); let proposal=null;
 document.getElementById('studio-origin').textContent=location.origin;
 const post=async(path,body={{}})=>{{const response=await fetch(path,{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(body)}});const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.reason||'Request failed');return data}};
+const applyChange=async(change)=>{{const proposal=await post('/_authboundry/propose',change);await post('/_authboundry/approve',{{proposal_id:proposal.proposal_id}});return post('/_authboundry/apply',{{proposal_id:proposal.proposal_id}})}};
+const routeCapability=(method,path,access)=>'application.route.'+method.toLowerCase()+'.'+(path==='/'?'root':path.replace(/[^a-zA-Z0-9]+/g,'.').replace(/^\.|\.$/g,'').toLowerCase())+'.'+access;
+document.querySelectorAll('[data-route]').forEach(row=>{{row.querySelector('.save-route').onclick=async()=>{{const status=row.querySelector('.route-status'), access=row.querySelector('.route-access').value, method=row.dataset.method, path=row.dataset.path, capability=routeCapability(method,path,access);status.textContent='Applying…';status.className='route-status muted';try{{if(access==='default'){{await applyChange({{type:'unprotect_route',method,path}})}}else{{const roles=access==='authenticated'?'admin,user':access;await applyChange({{type:'set_capability_policy',capability,policy:'development-policy',roles}});await applyChange({{type:'protect_route',method,path,capability}})}}await post('/_authboundry/application/routes/access',{{method,path,access}});status.textContent='✓ Active and saved';status.className='route-status ok'}}catch(error){{status.textContent=error.message;status.className='route-status warn'}}}}}});
 document.getElementById('open-attachment')?.addEventListener('click',()=>dialog.showModal());
 document.getElementById('discover').onclick=async()=>{{status.textContent='Discovering reachable runtimes…';try{{const data=await post('/_authboundry/application/discover');if(data.reachable){{input.value=data.upstream;status.textContent='✓ Application reachable';status.className='ok'}}else{{status.textContent='No running application was detected.';status.className='warn'}}}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
 document.getElementById('test-connection').onclick=async()=>{{status.textContent='Testing connection…';try{{const data=await post('/_authboundry/application/discover',{{upstream:input.value}});if(!data.reachable)throw new Error('Application not reachable. Start the application or change the upstream.');status.textContent='✓ Application reachable (not attached yet)';status.className='ok'}}catch(error){{status.textContent=error.message;status.className='warn'}}}};
@@ -556,6 +729,7 @@ mod tests {
         assert!(html.contains("admin-secret"));
         assert!(html.contains("user-secret"));
         assert!(html.contains("<strong>admin</strong>"));
+        assert!(html.contains("/_authboundry/application/routes/access"));
         assert!(!html.contains("authboundry attach --upstream"));
         let _ = std::fs::remove_dir_all(root);
     }
