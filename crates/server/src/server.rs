@@ -547,11 +547,27 @@ fn denial(err: &AuthError) -> HttpResponse {
 /// nothing else — no authentication, no session handling.
 pub trait HttpHandler: Send + Sync {
     fn handle(&self, request: &HttpRequest) -> HttpResponse;
+
+    fn upgrade(&self, _request: &HttpRequest, _stream: TcpStream) -> bool {
+        false
+    }
 }
 
 impl HttpHandler for AuthPortServer {
     fn handle(&self, request: &HttpRequest) -> HttpResponse {
         AuthPortServer::handle(self, request)
+    }
+
+    fn upgrade(&self, http: &HttpRequest, stream: TcpStream) -> bool {
+        let request = http.to_boundary();
+        let requirement = match self.app.resolve(request.method, &request.path) {
+            RouteOutcome::Matched(requirement) => requirement,
+            _ => return false,
+        };
+        match self.runtime.enforce(&request, &requirement) {
+            Ok(context) => self.app.upgrade(http, context.as_ref(), stream),
+            Err(_) => false,
+        }
     }
 }
 
@@ -631,6 +647,21 @@ fn handle_connection(server: Arc<dyn HttpHandler>, stream: TcpStream) {
     let mut writer = write_half;
 
     let response = match HttpRequest::read_from(&mut reader) {
+        Ok(request)
+            if request
+                .header("upgrade")
+                .map(|value| value.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false) =>
+        {
+            if server.upgrade(&request, reader.into_inner()) {
+                return;
+            }
+            HttpResponse::denied(
+                502,
+                "websocket_upgrade_failed",
+                "application WebSocket upgrade failed",
+            )
+        }
         Ok(request) => server.handle(&request),
         Err(err)
             if err.message.contains("temporarily unavailable")

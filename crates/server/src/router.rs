@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::net::TcpStream;
 
 use appport_auth_mesh_boundary::{AuthContext, BoundaryRequest, Method, Requirement};
 use appport_auth_mesh_discovery::{RouteCandidate, RouteSource};
 
-use crate::http::HttpResponse;
+use crate::http::{HttpRequest, HttpResponse};
 
 /// What the boundary should demand for a given request, and whether the
 /// application has a route there at all.
@@ -139,6 +140,15 @@ pub trait ApplicationBinding: Send + Sync {
     fn resolve(&self, method: Method, path: &str) -> RouteOutcome;
 
     fn handle(&self, request: &BoundaryRequest, context: Option<&AuthContext>) -> HttpResponse;
+
+    fn upgrade(
+        &self,
+        _request: &HttpRequest,
+        _context: Option<&AuthContext>,
+        _stream: TcpStream,
+    ) -> bool {
+        false
+    }
 
     fn observed_routes(&self) -> Vec<RouteCandidate> {
         Vec::new()

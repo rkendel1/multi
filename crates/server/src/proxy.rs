@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
 
 use appport_auth_mesh_boundary::{AuthContext, BoundaryRequest, Method, RESERVED_HEADER_PREFIX};
 use appport_auth_mesh_dsl::stable_hash;
 
 use crate::client::{send_upstream, ClientRequest};
-use crate::http::HttpResponse;
+use crate::http::{HttpRequest, HttpResponse};
 use crate::router::{ApplicationBinding, RouteOutcome, RoutePolicy};
 use crate::upstream::ApplicationUpstream;
 
@@ -124,6 +126,73 @@ impl UpstreamProxy {
 
         headers
     }
+
+    fn tunnel_websocket(
+        &self,
+        request: &HttpRequest,
+        context: Option<&AuthContext>,
+        mut client: TcpStream,
+    ) -> Result<(), String> {
+        if self.upstream.scheme != crate::upstream::UpstreamScheme::Http {
+            return Err("WebSocket tunneling currently requires a local HTTP upstream".to_string());
+        }
+        let mut upstream = self.upstream.connect(std::time::Duration::from_secs(3))?;
+        let mut head = format!(
+            "{} {} HTTP/1.1\r\nhost: {}\r\n",
+            request.method.as_str(),
+            request.target,
+            self.upstream.authority()
+        );
+        for (name, value) in &request.headers {
+            if name.starts_with(RESERVED_HEADER_PREFIX)
+                || matches!(name.as_str(), "host" | "content-length")
+            {
+                continue;
+            }
+            head.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        for (name, value) in self.injected_headers(context) {
+            head.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        head.push_str("\r\n");
+        upstream
+            .write_all(head.as_bytes())
+            .and_then(|_| upstream.flush())
+            .map_err(|err| format!("cannot open upstream WebSocket: {}", err))?;
+
+        let mut response_head = Vec::new();
+        let mut byte = [0u8; 1];
+        while response_head.len() < 65_536 && !response_head.ends_with(b"\r\n\r\n") {
+            upstream
+                .read_exact(&mut byte)
+                .map_err(|err| format!("cannot read upstream WebSocket response: {}", err))?;
+            response_head.push(byte[0]);
+        }
+        if !response_head.starts_with(b"HTTP/1.1 101 ")
+            && !response_head.starts_with(b"HTTP/1.0 101 ")
+        {
+            return Err("upstream refused the WebSocket upgrade".to_string());
+        }
+        client
+            .write_all(&response_head)
+            .and_then(|_| client.flush())
+            .map_err(|err| format!("cannot confirm WebSocket upgrade: {}", err))?;
+
+        let mut upstream_read = upstream
+            .try_clone()
+            .map_err(|err| format!("cannot clone upstream WebSocket: {}", err))?;
+        let mut client_write = client
+            .try_clone()
+            .map_err(|err| format!("cannot clone client WebSocket: {}", err))?;
+        let downstream = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut upstream_read, &mut client_write);
+            let _ = client_write.shutdown(Shutdown::Write);
+        });
+        let _ = std::io::copy(&mut client, &mut upstream);
+        let _ = upstream.shutdown(Shutdown::Write);
+        let _ = downstream.join();
+        Ok(())
+    }
 }
 
 impl ApplicationBinding for UpstreamProxy {
@@ -194,6 +263,15 @@ impl ApplicationBinding for UpstreamProxy {
             }
             Err(err) => HttpResponse::denied(502, "upstream_unavailable", &err.message),
         }
+    }
+
+    fn upgrade(
+        &self,
+        request: &HttpRequest,
+        context: Option<&AuthContext>,
+        stream: TcpStream,
+    ) -> bool {
+        self.tunnel_websocket(request, context, stream).is_ok()
     }
 }
 

@@ -1,5 +1,6 @@
 //! Local, read-only Studio projection of repository authority state.
 
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
@@ -195,6 +196,23 @@ impl ApplicationBinding for StudioApplication {
             }
         }
         response
+    }
+
+    fn upgrade(
+        &self,
+        request: &HttpRequest,
+        context: Option<&AuthContext>,
+        stream: TcpStream,
+    ) -> bool {
+        self.proxy
+            .read()
+            .ok()
+            .and_then(|proxy| {
+                proxy
+                    .as_ref()
+                    .map(|proxy| proxy.upgrade(request, context, stream))
+            })
+            .unwrap_or(false)
     }
 }
 
