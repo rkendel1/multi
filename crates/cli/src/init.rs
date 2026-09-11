@@ -734,6 +734,7 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
             });
         }
     }
+    changes.extend(mailport_environment_changes(root));
     if let Some(change) = gitignore_change(root) {
         changes.push(change);
     }
@@ -758,6 +759,48 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
         detected: true,
         integration_supported,
     })
+}
+
+fn mailport_environment_changes(root: &Path) -> Vec<FileChange> {
+    let existing = [".env.local", ".env.sample"]
+        .iter()
+        .map(|name| root.join(name))
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    let targets = if existing.is_empty() {
+        vec![root.join(".env.sample")]
+    } else {
+        existing
+    };
+    targets
+        .into_iter()
+        .filter_map(|path| {
+            let before = fs::read_to_string(&path).ok();
+            let mut after = before.clone().unwrap_or_default();
+            for (key, value) in [
+                ("MAILPORT_URL", "https://mailerport.fly.dev"),
+                ("MAILPORT_API_KEY", "your-strong-api-key"),
+            ] {
+                if !after.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix("export ")
+                        .unwrap_or(line.trim_start())
+                        .split_once('=')
+                        .is_some_and(|(name, _)| name.trim() == key)
+                }) {
+                    if !after.is_empty() && !after.ends_with('\n') {
+                        after.push('\n');
+                    }
+                    after.push_str(&format!("{key}={value}\n"));
+                }
+            }
+            (before.as_deref() != Some(after.as_str())).then_some(FileChange {
+                path,
+                before,
+                after,
+            })
+        })
+        .collect()
 }
 
 fn vite_guard_upgrade_change(root: &Path) -> Option<FileChange> {
@@ -1110,7 +1153,7 @@ fn gitignore_change(root: &Path) -> Option<FileChange> {
     let path = root.join(".gitignore");
     let before = fs::read_to_string(&path).ok();
     let mut after = before.clone().unwrap_or_default();
-    for ignored in [DEVELOPMENT_FILE, ".authboundry/mail/"] {
+    for ignored in [DEVELOPMENT_FILE, ".authboundry/mail/", ".env.local"] {
         if !after.lines().any(|line| line.trim() == ignored) {
             if !after.is_empty() && !after.ends_with('\n') {
                 after.push('\n');

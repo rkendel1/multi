@@ -43,6 +43,8 @@ pub struct ServeOptions {
     pub application_binding: Option<Arc<dyn appport_auth_mesh_server::ApplicationBinding>>,
     pub mail_port: Option<Arc<dyn MailPort>>,
     pub development_mail_dir: Option<PathBuf>,
+    pub mailport_url: Option<String>,
+    pub mailport_api_key: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -63,6 +65,8 @@ impl Default for ServeOptions {
             application_binding: None,
             mail_port: None,
             development_mail_dir: None,
+            mailport_url: None,
+            mailport_api_key: None,
         }
     }
 }
@@ -200,15 +204,23 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
     {
         runtime = runtime.with_registration(RegistrationPolicy::self_service(&[("role", "user")]));
     }
-    let mail_port = match (&options.mail_port, std::env::var("MAILPORT_URL")) {
+    let configured_mailport = std::env::var("MAILPORT_URL")
+        .ok()
+        .or_else(|| options.mailport_url.clone());
+    let mail_port = match (&options.mail_port, configured_mailport) {
         (Some(mail), _) => Some(mail.clone()),
-        (None, Ok(url)) => Some(Arc::new(
-            RemoteMailPort::new(&url, std::env::var("MAILPORT_API_KEY").ok())
-                .map_err(|err| error(format!("invalid MAILPORT_URL: {err}")))?,
+        (None, Some(url)) => Some(Arc::new(
+            RemoteMailPort::new(
+                &url,
+                std::env::var("MAILPORT_API_KEY")
+                    .ok()
+                    .or_else(|| options.mailport_api_key.clone()),
+            )
+            .map_err(|err| error(format!("invalid MAILPORT_URL: {err}")))?,
         ) as Arc<dyn MailPort>),
         // Development mail is always available without provider credentials.
         // Deployments replace this through ServeOptions or MAILPORT_URL.
-        (None, Err(_)) => Some(match &options.development_mail_dir {
+        (None, None) => Some(match &options.development_mail_dir {
             Some(directory) => Arc::new(DevelopmentMailPort::new(directory)) as Arc<dyn MailPort>,
             None => Arc::new(MemoryMailPort::default()) as Arc<dyn MailPort>,
         }),
@@ -284,6 +296,49 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
         upstream: options.upstream.clone(),
         tenants,
     })
+}
+
+pub fn mailport_environment(root: &std::path::Path) -> (Option<String>, Option<String>) {
+    let source = std::fs::read_to_string(root.join(".env.local")).ok();
+    let value = |key: &str| {
+        source.as_deref().and_then(|source| {
+            source.lines().find_map(|line| {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    return None;
+                }
+                let line = line.strip_prefix("export ").unwrap_or(line);
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key).then(|| value.trim().trim_matches(['\'', '"']).to_string())
+            })
+        })
+    };
+    (value("MAILPORT_URL"), value("MAILPORT_API_KEY"))
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::mailport_environment;
+
+    #[test]
+    fn reads_mailport_values_from_env_local() {
+        let root = std::env::temp_dir().join(format!("authboundry-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(".env.local"),
+            "MAILPORT_URL=https://mailerport.fly.dev\nMAILPORT_API_KEY='secret'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            mailport_environment(&root),
+            (
+                Some("https://mailerport.fly.dev".to_string()),
+                Some("secret".to_string())
+            )
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// The requirement table for a proxied application: explicit public paths,

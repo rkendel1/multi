@@ -328,7 +328,12 @@ impl AuthPortRuntime {
                 .get("email_verification_required")
                 .map(String::as_str)
                 == Some("true")
-            && authenticated.external.attributes.get("email_verified").map(String::as_str) != Some("true")
+            && authenticated
+                .external
+                .attributes
+                .get("email_verified")
+                .map(String::as_str)
+                != Some("true")
         {
             let _ = self.mesh.logout(&tenant_id, &authenticated.session.id, now);
             return Err(AuthError::new(
@@ -416,7 +421,9 @@ impl AuthPortRuntime {
         if self.surface.features.email_verification {
             self.request_email_verification(request)?;
             if request.field("email").is_some()
-                || request.field("username").is_some_and(|value| value.contains('@'))
+                || request
+                    .field("username")
+                    .is_some_and(|value| value.contains('@'))
             {
                 // Signup proves credentials but does not grant a live session
                 // until the address has been verified.

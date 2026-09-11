@@ -292,6 +292,8 @@ where
             .and_then(|path| path.parent())
             .unwrap_or_else(|| std::path::Path::new("."));
         serve_options.development_mail_dir = Some(root.join(".authboundry/mail"));
+        (serve_options.mailport_url, serve_options.mailport_api_key) =
+            serve::mailport_environment(root);
     }
 
     if command == "serve" && serve_options.upstream.is_none() {
@@ -1053,6 +1055,9 @@ use auth {
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
         assert!(!package_json.contains("@authboundry/core"));
         assert!(dir.join("authboundry.toml").exists());
+        let environment_sample = std::fs::read_to_string(dir.join(".env.sample")).unwrap();
+        assert!(environment_sample.contains("MAILPORT_URL=https://mailerport.fly.dev"));
+        assert!(environment_sample.contains("MAILPORT_API_KEY=your-strong-api-key"));
         let declaration = std::fs::read_to_string(dir.join("authboundry.toml")).unwrap();
         assert!(declaration.contains("email_verification = enabled"));
         for template in [

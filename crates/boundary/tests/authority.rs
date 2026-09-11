@@ -370,7 +370,10 @@ fn registration_is_closed_unless_the_deployment_opens_it() {
         .with_field("email", "new-account@example.com");
     open.sign_up(&new_account)
         .expect("a new local account can register");
-    assert!(open.sign_in(&new_account).is_err(), "a self-service account with email must verify before signing in");
+    assert!(
+        open.sign_in(&new_account).is_err(),
+        "a self-service account with email must verify before signing in"
+    );
 }
 
 /// The invariant behind the whole PR: where the boundary runs changes nothing
