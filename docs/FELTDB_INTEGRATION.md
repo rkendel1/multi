@@ -2,7 +2,7 @@
 
 ## Overview
 
-AuthPort now uses FeltDB 0.10.0 as its default and only authoritative state substrate for production.
+AuthBoundry now uses FeltDB 0.10.0 as its default and only authoritative state substrate for production.
 
 **Exact dependency:**
 ```json
@@ -16,7 +16,7 @@ No caret ranges. No tildes. Exactly 0.10.0.
 ## Architecture
 
 ```
-AuthPort (authentication & authorization semantics)
+AuthBoundry (authentication & authorization semantics)
     ↓
 AuthStateRepository (narrow semantic boundary)
     ↓
@@ -31,7 +31,7 @@ FeltDB deployment resolution
 
 ## Key Principles
 
-### 1. AuthPort owns authentication semantics
+### 1. AuthBoundry owns authentication semantics
 - Identity (canonical application identity)
 - Credentials (password hashes, credential status)
 - Sessions (durable session lifecycle)
@@ -51,7 +51,7 @@ FeltDB deployment resolution
 - Connection management
 - Version control and schema evolution
 
-### 3. AuthPort must NOT implement
+### 3. AuthBoundry must NOT implement
 - ~~AuthDatabase~~
 - ~~AuthStore~~
 - ~~AuthPersistenceEngine~~
@@ -65,7 +65,7 @@ FeltDB deployment resolution
 
 ### 4. Failure mode is fail-closed
 If FeltDB cannot initialize with the configured deployment:
-- AuthPort startup fails
+- AuthBoundry startup fails
 - Error message names the deployment mode and missing configuration
 - There is NO fallback to in-memory state
 - No production authentication state depends on process memory

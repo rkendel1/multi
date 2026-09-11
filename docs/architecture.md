@@ -14,11 +14,11 @@ that would fail if it stopped being true.
 ## One authority model
 
 Embedded and standalone are two placements of the same runtime. The mode is a
-tag on `AuthPortRuntime`; it selects no code path in authentication, session
+tag on `AuthBoundryRuntime`; it selects no code path in authentication, session
 resolution, policy evaluation or delegation.
 
 ```
-AuthConfig -> AuthMesh -> AuthPortRuntime -> AuthBoundary -> AuthContext
+AuthConfig -> AuthBoundry -> AuthBoundryRuntime -> AuthBoundary -> AuthContext
                                 |
                     +-----------+-----------+
                     |                       |

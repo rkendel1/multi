@@ -208,7 +208,7 @@ async function runTests() {
       path: TEST_STATE_DIR,
     });
 
-    // Verify credential persists (In real AuthPort, we'd authenticate with it)
+    // Verify credential persists (in real AuthBoundry, we'd authenticate with it)
     console.log("  → After restart, would authenticate with new password");
     console.log("  ✓ PASS: Credential survived restart\n");
     passCount++;

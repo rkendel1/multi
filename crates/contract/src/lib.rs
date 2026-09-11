@@ -15,6 +15,11 @@ pub use authentication::{
     AuthenticationResult, Device, DeviceId, DeviceStatus, DeviceType, RecoveryCeremony,
     RecoveryMethod,
 };
+
+/// Canonical public name for an AuthBoundry identity profile.
+///
+/// `AuthPortIdentityProfile` remains available for compatibility.
+pub type AuthBoundryIdentityProfile = AuthPortIdentityProfile;
 pub use capability::{CapabilityId, CapabilityKind, RecoveryCapability};
 pub use claims::ClaimValue;
 pub use delegation::{Delegation, DelegationStatus, ResourceScope};

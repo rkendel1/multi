@@ -440,6 +440,9 @@ pub struct ExistingAuthPort {
     pub manifest: bool,
 }
 
+/// Canonical public name for a previously installed AuthBoundry integration.
+pub type ExistingAuthBoundry = ExistingAuthPort;
+
 impl ExistingAuthPort {
     pub fn detected(&self) -> bool {
         self.dependency

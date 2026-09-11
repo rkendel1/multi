@@ -1,11 +1,11 @@
-//! The AuthPort HTTP surface.
+//! The AuthBoundry HTTP surface.
 //!
 //! ```text
-//! Embedded:   application server -> AuthPortRuntime -> handlers
-//! Standalone: browser -> AuthPort -> upstream application
+//! Embedded:   application server -> AuthBoundryRuntime -> handlers
+//! Standalone: browser -> AuthBoundry -> upstream application
 //! ```
 //!
-//! Both placements dispatch through the same [`AuthPortRuntime`], so an
+//! Both placements dispatch through the same authority runtime, so an
 //! authorization answer never depends on where the boundary is running.
 
 pub mod client;
@@ -32,5 +32,10 @@ pub use server::{
     serve, should_redirect_to_login, status_for, AuthPortServer, HttpHandler, ServerHandle,
     StudioController,
 };
+
+/// Canonical public name for the AuthBoundry HTTP server.
+///
+/// `AuthPortServer` remains available for compatibility.
+pub type AuthBoundryServer = AuthPortServer;
 pub use ui::{render_sign_in, CLIENT_JS};
 pub use upstream::{ApplicationUpstream, UpstreamScheme};

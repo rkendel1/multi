@@ -203,7 +203,7 @@ MemoryStores continues for tests, but tests should exercise restart persistence.
 
 ### 4. FeltDB Schema (Conceptual)
 
-When FeltDB is initialized with AuthPort config, it creates:
+When FeltDB is initialized with AuthBoundry config, it creates:
 ```
 collections:
   /identity          # canonical users

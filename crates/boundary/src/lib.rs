@@ -1,8 +1,8 @@
-//! The AuthPort backend boundary.
+//! The AuthBoundry backend boundary.
 //!
 //! ```text
 //! request
-//!   -> credential -> AuthPort -> principal -> tenant -> claims
+//!   -> credential -> AuthBoundry -> principal -> tenant -> claims
 //!   -> delegation -> capabilities -> authorization -> application handler
 //! ```
 //!
@@ -32,3 +32,8 @@ pub use proposal_store::{
 };
 pub use request::{BoundaryRequest, Method, SessionCredential, RESERVED_HEADER_PREFIX};
 pub use runtime::{AuthPortRuntime, BindingMode, RegistrationPolicy, SignInOutcome};
+
+/// Canonical public name for the AuthBoundry authority runtime.
+///
+/// `AuthPortRuntime` remains available as a compatibility alias.
+pub type AuthBoundryRuntime = AuthPortRuntime;

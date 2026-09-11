@@ -1,7 +1,7 @@
 /**
- * FeltDB persistence bridge for AuthPort
+ * FeltDB persistence bridge for AuthBoundry
  *
- * This module provides durable storage for AuthPort state using @feltdb/core@0.10.0.
+ * This module provides durable storage for AuthBoundry state using @feltdb/core@0.10.0.
  * It is NOT a persistence abstraction layer; it is a thin wrapper over the real FeltDB API.
  *
  * Responsibilities:
@@ -22,7 +22,7 @@ const crypto = require("crypto");
 
 class FeltDBPersistence {
   constructor(options = {}) {
-    const { namespace = "authport", mode = "local", path = "./state" } =
+    const { namespace = "authboundry", mode = "local", path = "./state" } =
       options;
 
     // Fail if FeltDB cannot initialize

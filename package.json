@@ -49,10 +49,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rkendel1/multi.git"
+    "url": "git+https://github.com/rkendel1/authboundry.git"
   },
   "bugs": {
-    "url": "https://github.com/rkendel1/multi/issues"
+    "url": "https://github.com/rkendel1/authboundry/issues"
   },
   "homepage": "https://authboundry.com",
   "license": "UNLICENSED",
