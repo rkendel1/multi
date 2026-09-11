@@ -245,7 +245,11 @@ fn launch_studio(root: &Path) -> String {
         Ok(value) => value,
         Err(_) => return studio_fallback(),
     };
-    let child = Command::new(executable)
+    let studio_url = "http://127.0.0.1:8787/_authboundry/studio";
+    if upstream_reachable("http://127.0.0.1:8787") {
+        return studio_port_occupied();
+    }
+    let mut child = Command::new(executable)
         .arg("studio")
         .arg(root)
         .arg("--no-open")
@@ -257,9 +261,12 @@ fn launch_studio(root: &Path) -> String {
     if child.is_err() {
         return studio_fallback();
     }
+    let child = child.as_mut().expect("Studio child was checked above");
     for _ in 0..20 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return studio_fallback();
+        }
         if upstream_reachable("http://127.0.0.1:8787") {
-            let studio_url = "http://127.0.0.1:8787/_authboundry/studio";
             return if crate::studio::open_browser(studio_url) {
                 "Starting Studio...\n✓ Studio listening on http://127.0.0.1:8787/_authboundry/studio\n✓ Protected application boundary at http://127.0.0.1:8787/\nOpening Studio...\n".to_string()
             } else {
@@ -269,6 +276,10 @@ fn launch_studio(root: &Path) -> String {
         std::thread::sleep(Duration::from_millis(100));
     }
     studio_fallback()
+}
+
+fn studio_port_occupied() -> String {
+    "Studio could not be started because http://127.0.0.1:8787 is already in use.\nStop the existing AuthBoundry Studio, then run:\n  authboundry studio\nOr use another address:\n  authboundry studio --addr 127.0.0.1:8788\n".to_string()
 }
 
 fn studio_fallback() -> String {
