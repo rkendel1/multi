@@ -94,12 +94,16 @@ impl ChallengeStore {
         Ok(token)
     }
 
-    pub(crate) fn consume(
+    pub(crate) fn consume_with<F>(
         &self,
         token: &str,
         kind: CeremonyKind,
         now: i64,
-    ) -> Result<(String, String), String> {
+        operation: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&str, &str) -> Result<(), String>,
+    {
         let mut entries = self
             .entries
             .lock()
@@ -110,8 +114,12 @@ impl ChallengeStore {
         if entry.kind != kind || entry.revoked || entry.consumed || now >= entry.expires_at {
             return Err("invalid or expired recovery challenge".to_string());
         }
+        // Keep the challenge locked and unconsumed until the security state
+        // transition succeeds. A failed password/identity update remains
+        // retryable; concurrent replays cannot cross this critical section.
+        operation(&entry.tenant, &entry.account)?;
         entry.consumed = true;
-        Ok((entry.tenant.clone(), entry.account.clone()))
+        Ok(())
     }
 
     pub(crate) fn revoke(&self, token: &str) -> bool {

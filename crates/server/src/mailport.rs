@@ -1,5 +1,103 @@
 use crate::{send_upstream, ApplicationUpstream, ClientRequest};
 use appport_auth_mesh_boundary::{MailMessage, MailPort};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const PASSWORD_RESET_HTML: &str = include_str!("../../../templates/password-reset.html");
+const PASSWORD_RESET_TEXT: &str = include_str!("../../../templates/password-reset.txt");
+const EMAIL_VERIFICATION_HTML: &str = include_str!("../../../templates/email-verification.html");
+const EMAIL_VERIFICATION_TEXT: &str = include_str!("../../../templates/email-verification.txt");
+
+/// Zero-configuration development transport. Messages are captured under the
+/// application's runtime-owned `.authboundry/mail` directory.
+pub struct DevelopmentMailPort {
+    directory: PathBuf,
+    sequence: AtomicU64,
+}
+
+impl DevelopmentMailPort {
+    pub fn new(directory: impl AsRef<Path>) -> Self {
+        Self {
+            directory: directory.as_ref().to_path_buf(),
+            sequence: AtomicU64::new(0),
+        }
+    }
+}
+
+impl MailPort for DevelopmentMailPort {
+    fn send(&self, message: MailMessage) -> Result<(), String> {
+        std::fs::create_dir_all(&self.directory).map_err(|error| error.to_string())?;
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or_default();
+        let variables = message
+            .variables
+            .iter()
+            .map(|(key, value)| format!("\"{}\":\"{}\"", escape(key), escape(value)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let contents = format!(
+            "{{\"template\":\"{}\",\"identity\":\"{}\",\"to\":\"{}\",\"tenant\":\"{}\",\"variables\":{{{}}},\"idempotency_key\":\"{}\"}}\n",
+            escape(&message.template), escape(&message.identity), escape(&message.to),
+            escape(&message.tenant), variables, escape(&message.idempotency_key)
+        );
+        let stem = format!("{timestamp}-{sequence}-{}", message.template);
+        std::fs::write(self.directory.join(format!("{stem}.json")), contents)
+            .map_err(|error| error.to_string())?;
+        let application_root = self.directory.parent().and_then(Path::parent);
+        let file_stem = message.template.replace('_', "-");
+        let bundled = match message.template.as_str() {
+            "password_reset" => (PASSWORD_RESET_HTML, PASSWORD_RESET_TEXT),
+            "email_verification" => (EMAIL_VERIFICATION_HTML, EMAIL_VERIFICATION_TEXT),
+            _ => return Ok(()),
+        };
+        let load = |extension: &str, fallback: &str| {
+            application_root
+                .and_then(|root| {
+                    std::fs::read_to_string(
+                        root.join("emails").join(format!("{file_stem}.{extension}")),
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        let html = render_template(&load("html", bundled.0), &message.variables);
+        let text = render_template(&load("txt", bundled.1), &message.variables);
+        std::fs::write(self.directory.join(format!("{stem}.html")), html)
+            .and_then(|_| std::fs::write(self.directory.join(format!("{stem}.txt")), text))
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn render_template(
+    template: &str,
+    variables: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut rendered = template.to_string();
+    while let Some(start) = rendered.find("{{#if support_url}}") {
+        let Some(relative_end) = rendered[start..].find("{{/if}}") else {
+            break;
+        };
+        let end = start + relative_end + "{{/if}}".len();
+        let inner_start = start + "{{#if support_url}}".len();
+        let replacement = if variables
+            .get("support_url")
+            .is_some_and(|value| !value.is_empty())
+        {
+            rendered[inner_start..start + relative_end].to_string()
+        } else {
+            String::new()
+        };
+        rendered.replace_range(start..end, &replacement);
+    }
+    for (key, value) in variables {
+        rendered = rendered.replace(&format!("{{{{ {key} }}}}"), value);
+        rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
+    }
+    rendered
+}
 
 /// Adapter for MailPort's documented remote capability protocol.
 pub struct RemoteMailPort {
@@ -97,6 +195,50 @@ mod tests {
         ] {
             assert!(body.contains(expected), "missing {expected} in {body}");
         }
+    }
+
+    #[test]
+    fn development_mail_renders_bundled_html_and_text() {
+        let root = std::env::temp_dir().join(format!("authboundry-mail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let port = DevelopmentMailPort::new(root.join(".authboundry/mail"));
+        port.send(MailMessage {
+            template: "email_verification".to_string(),
+            identity: "auth".to_string(),
+            to: "alice@example.com".to_string(),
+            tenant: "development".to_string(),
+            variables: HashMap::from([
+                ("user.name".to_string(), "Alice".to_string()),
+                (
+                    "verification_url".to_string(),
+                    "/verify?token=opaque".to_string(),
+                ),
+                ("expires_at".to_string(), "tomorrow".to_string()),
+                ("support_url".to_string(), String::new()),
+            ]),
+            idempotency_key: "verification:test".to_string(),
+        })
+        .unwrap();
+        let files = std::fs::read_dir(root.join(".authboundry/mail"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(files
+            .iter()
+            .any(|path| path.extension().is_some_and(|value| value == "html")));
+        assert!(files
+            .iter()
+            .any(|path| path.extension().is_some_and(|value| value == "txt")));
+        let html = files
+            .iter()
+            .find(|path| path.extension().is_some_and(|value| value == "html"))
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap();
+        assert!(html.contains("Hello Alice"));
+        assert!(html.contains("/verify?token=opaque"));
+        assert!(!html.contains("{{"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

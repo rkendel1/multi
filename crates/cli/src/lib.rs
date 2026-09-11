@@ -286,6 +286,14 @@ where
         error(format!("{}: {}", display, err.message))
     })?;
 
+    if command == "serve" {
+        let root = path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        serve_options.development_mail_dir = Some(root.join(".authboundry/mail"));
+    }
+
     if command == "serve" && serve_options.upstream.is_none() {
         let root = path
             .as_ref()
@@ -757,7 +765,7 @@ use auth {
         assert!(json.contains("\"boundary\": {\"contract\": \"authboundry.boundary/v1\""));
         assert!(json.contains("\"modes\": [\"embedded\", \"standalone\"]"));
         assert!(json.contains("\"session_credential\": \"cookie:authboundry_session\""));
-        assert!(json.contains("\"aliases\": [\"/auth/sign-in\"]"));
+        assert!(json.contains("\"aliases\": [\"/auth/sign-in\", \"/login\"]"));
 
         let standalone = run_with(&["inspect", file, "--json", "--mode", "standalone"])
             .unwrap()
@@ -1045,6 +1053,19 @@ use auth {
         let package_json = std::fs::read_to_string(dir.join("package.json")).unwrap();
         assert!(!package_json.contains("@authboundry/core"));
         assert!(dir.join("authboundry.toml").exists());
+        let declaration = std::fs::read_to_string(dir.join("authboundry.toml")).unwrap();
+        assert!(declaration.contains("email_verification = enabled"));
+        for template in [
+            "password-reset.html",
+            "password-reset.txt",
+            "email-verification.html",
+            "email-verification.txt",
+        ] {
+            assert!(
+                dir.join("emails").join(template).exists(),
+                "missing {template}"
+            );
+        }
         assert!(dir.join(".authboundry/adoption.json").exists());
         let development =
             std::fs::read_to_string(dir.join(".authboundry/development.json")).unwrap();
@@ -1061,6 +1082,9 @@ use auth {
         assert!(std::fs::read_to_string(dir.join(".gitignore"))
             .unwrap()
             .contains(".authboundry/development.json"));
+        assert!(std::fs::read_to_string(dir.join(".gitignore"))
+            .unwrap()
+            .contains(".authboundry/mail/"));
         assert_no_deprecated_public_name(
             &std::fs::read_to_string(dir.join("authboundry.toml")).unwrap(),
         );

@@ -183,17 +183,21 @@ impl AuthRoute {
                     false,
                     AuthFeature::Login,
                 )
-                .with_alias("/auth/sign-in"),
+                .with_alias("/auth/sign-in")
+                .with_alias("/login"),
             );
         }
         if config.experience.enabled(AuthExperienceCapability::SignUp) {
-            routes.push(Self::new(
-                "/auth/signup",
-                &[Get, Post],
-                AuthOperation::Signup,
-                false,
-                AuthFeature::Signup,
-            ));
+            routes.push(
+                Self::new(
+                    "/auth/signup",
+                    &[Get, Post],
+                    AuthOperation::Signup,
+                    false,
+                    AuthFeature::Signup,
+                )
+                .with_alias("/signup"),
+            );
         }
         if config
             .experience
@@ -211,20 +215,26 @@ impl AuthRoute {
             .experience
             .enabled(AuthExperienceCapability::PasswordReset)
         {
-            routes.push(Self::new(
-                "/auth/password/forgot",
-                &[Get, Post],
-                AuthOperation::PasswordForgot,
-                false,
-                AuthFeature::Signup,
-            ));
-            routes.push(Self::new(
-                "/auth/password/reset",
-                &[Get, Post],
-                AuthOperation::PasswordReset,
-                false,
-                AuthFeature::Signup,
-            ));
+            routes.push(
+                Self::new(
+                    "/auth/password/forgot",
+                    &[Get, Post],
+                    AuthOperation::PasswordForgot,
+                    false,
+                    AuthFeature::Signup,
+                )
+                .with_alias("/forgot-password"),
+            );
+            routes.push(
+                Self::new(
+                    "/auth/password/reset",
+                    &[Get, Post],
+                    AuthOperation::PasswordReset,
+                    false,
+                    AuthFeature::Signup,
+                )
+                .with_alias("/reset-password"),
+            );
         }
         routes.extend([Self::new(
             "/_authboundry/password-policy",
@@ -289,13 +299,16 @@ impl AuthRoute {
             .experience
             .enabled(AuthExperienceCapability::EmailVerification)
         {
-            routes.push(Self::new(
-                "/auth/email/verification",
-                &[Get, Post],
-                AuthOperation::EmailVerification,
-                false,
-                AuthFeature::EmailVerification,
-            ));
+            routes.push(
+                Self::new(
+                    "/auth/email/verification",
+                    &[Get, Post],
+                    AuthOperation::EmailVerification,
+                    false,
+                    AuthFeature::EmailVerification,
+                )
+                .with_alias("/verify-email"),
+            );
         }
         if config.experience.enabled(AuthExperienceCapability::Mfa) {
             routes.push(Self::new(

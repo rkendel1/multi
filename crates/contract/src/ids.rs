@@ -4,6 +4,10 @@ macro_rules! authority_id {
         pub struct $name(pub String);
 
         impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }

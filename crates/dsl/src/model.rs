@@ -281,7 +281,7 @@ impl Default for AuthExperience {
             password_change: ExperienceState::Enabled,
             external_identity: ExperienceState::Enabled,
             account_linking: ExperienceState::Enabled,
-            email_verification: ExperienceState::Disabled,
+            email_verification: ExperienceState::Enabled,
             mfa: ExperienceState::Disabled,
             passkeys: ExperienceState::Disabled,
             device_management: ExperienceState::Disabled,

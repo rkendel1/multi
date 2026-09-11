@@ -6,20 +6,21 @@
 //! embedded deployment uses.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use appport_auth_mesh_authz::{Condition, Policy, Rule};
 use appport_auth_mesh_boundary::{
-    AuthPortRuntime, BindingMode, MailPort, Method, RegistrationPolicy, Requirement,
+    AuthPortRuntime, BindingMode, MailPort, MemoryMailPort, Method, RegistrationPolicy, Requirement,
 };
 use appport_auth_mesh_contract::{Capability, ClaimValue, TenantContext};
 use appport_auth_mesh_dsl::{AuthConfig, AuthExperienceCapability};
 use appport_auth_mesh_providers::{ConnectorRegistry, LocalAccount, LocalConnector};
 use appport_auth_mesh_runtime::{MemoryStores, Registration};
 use appport_auth_mesh_server::{
-    serve, ApplicationUpstream, AuthPortServer, PathPattern, RemoteMailPort, RoutePolicy,
-    ServerHandle, UpstreamProxy,
+    serve, ApplicationUpstream, AuthPortServer, DevelopmentMailPort, PathPattern, RemoteMailPort,
+    RoutePolicy, ServerHandle, UpstreamProxy,
 };
 use appport_auth_mesh_storage::TenantRootStore;
 
@@ -41,6 +42,7 @@ pub struct ServeOptions {
     pub studio_controller: Option<Arc<dyn appport_auth_mesh_server::StudioController>>,
     pub application_binding: Option<Arc<dyn appport_auth_mesh_server::ApplicationBinding>>,
     pub mail_port: Option<Arc<dyn MailPort>>,
+    pub development_mail_dir: Option<PathBuf>,
 }
 
 impl Default for ServeOptions {
@@ -60,6 +62,7 @@ impl Default for ServeOptions {
             studio_controller: None,
             application_binding: None,
             mail_port: None,
+            development_mail_dir: None,
         }
     }
 }
@@ -159,6 +162,9 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
         if account.username.contains('@') && !account.claims.contains_key("email") {
             local = local.with_attribute("email", &account.username);
         }
+        // Explicitly provisioned development/deployment accounts are trusted
+        // bootstrap identities, unlike public self-service signups.
+        local = local.with_attribute("email_verified", "true");
         directory
             .register(local)
             .map_err(|err| error(err.to_string()))?;
@@ -200,7 +206,12 @@ pub fn start(config: AuthConfig, options: &ServeOptions) -> Result<RunningServer
             RemoteMailPort::new(&url, std::env::var("MAILPORT_API_KEY").ok())
                 .map_err(|err| error(format!("invalid MAILPORT_URL: {err}")))?,
         ) as Arc<dyn MailPort>),
-        (None, Err(_)) => None,
+        // Development mail is always available without provider credentials.
+        // Deployments replace this through ServeOptions or MAILPORT_URL.
+        (None, Err(_)) => Some(match &options.development_mail_dir {
+            Some(directory) => Arc::new(DevelopmentMailPort::new(directory)) as Arc<dyn MailPort>,
+            None => Arc::new(MemoryMailPort::default()) as Arc<dyn MailPort>,
+        }),
     };
     if let Some(mail_port) = mail_port {
         runtime = runtime.with_mail_port(mail_port);

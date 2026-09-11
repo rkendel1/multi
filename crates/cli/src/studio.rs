@@ -65,6 +65,7 @@ pub fn run(args: &[String]) -> Result<Output, CliError> {
         upstream: live_upstream,
         application_binding: Some(binding),
         studio_controller: Some(controller),
+        development_mail_dir: Some(root.join(".authboundry/mail")),
         ..Default::default()
     };
     let running = serve::start(config, &options)?;
@@ -508,6 +509,52 @@ fn json_line_field(line: &str, field: &str) -> Option<String> {
     Some(line.split_once(&marker)?.1.split_once('"')?.0.to_string())
 }
 
+fn development_mail_rows(root: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(root.join(".authboundry/mail")) else {
+        return "<tr><td colspan=3>No development messages yet.</td></tr>".to_string();
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.reverse();
+    let rows = paths
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|source| {
+            let template = json_value(&source, "template")?;
+            let to = json_value(&source, "to").unwrap_or_default();
+            let url = json_value(
+                &source,
+                if template == "password_reset" {
+                    "reset_url"
+                } else {
+                    "verification_url"
+                },
+            )
+            .unwrap_or_default();
+            Some(format!(
+                "<tr><td>{}</td><td>{}</td><td><a href=\"{}\">Open development link</a></td></tr>",
+                esc(&template),
+                esc(&to),
+                esc(&url)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if rows.is_empty() {
+        "<tr><td colspan=3>No development messages yet.</td></tr>".to_string()
+    } else {
+        rows
+    }
+}
+
+fn json_value(source: &str, field: &str) -> Option<String> {
+    let marker = format!("\"{}\":\"", field);
+    Some(source.split_once(&marker)?.1.split_once('"')?.0.to_string())
+}
+
 fn save_route_access(
     root: &std::path::Path,
     method: &str,
@@ -694,6 +741,7 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let development_accounts = init::development_accounts(root);
+    let mail_rows = development_mail_rows(root);
     let account_rows = if development_accounts.is_empty() {
         "<tr><td colspan=3>No local development users configured.</td></tr>".to_string()
     } else {
@@ -735,11 +783,12 @@ fn render(root: &std::path::Path, surface: &AuthSurface) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AuthBoundry Studio</title><style>
 :root{{color-scheme:dark;background:#0b0d10;color:#edf0f4;font:15px/1.5 system-ui,sans-serif}}body{{margin:0}}header{{padding:24px 32px;border-bottom:1px solid #292d35}}header b{{font-size:20px}}header span,.muted{{color:#99a1ad}}main{{max-width:920px;margin:auto;padding:36px 24px}}h1{{font-size:30px;margin:0 0 4px}}h2{{font-size:16px;margin:32px 0 12px}}.card{{background:#13171d;border:1px solid #292d35;border-radius:12px;padding:24px;margin:16px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}}dt{{color:#99a1ad}}dd{{margin:4px 0;font-weight:650}}.ok{{color:#55d187}}.warn{{color:#f4bd61}}.off{{color:#99a1ad}}button{{background:#edf0f4;color:#101318;border:0;border-radius:7px;padding:10px 16px;font-weight:700;margin-right:8px;cursor:pointer}}button.secondary{{background:#292d35;color:#edf0f4}}input,select{{padding:10px;border:1px solid #3b414c;border-radius:7px;background:#0b0d10;color:#edf0f4;margin:8px 0}}input{{width:min(420px,90%)}}pre{{white-space:pre-wrap}}dialog{{background:#13171d;color:#edf0f4;border:1px solid #3b414c;border-radius:12px;width:min(620px,90vw)}}table{{width:100%;border-collapse:collapse}}td{{padding:9px;border-bottom:1px solid #292d35}}.route-status{{font-size:13px}}</style></head><body>
-<header><b>AuthBoundry</b><br><span>Authority Boundary · Studio</span><nav>Overview · Application · Authority · Users · Routes · Providers · Sessions · Policies · Audit · Attachment</nav></header><main><h1>{name}</h1><p class="muted">What AuthBoundry currently knows and protects.</p><p><a href="/auth/login">Open generated login</a> · <a href="/" target="_blank">Open protected application</a></p>
+<header><b>AuthBoundry</b><br><span>Authority Boundary · Studio</span><nav>Overview · Application · Authority · Users · Mail · Routes · Providers · Sessions · Policies · Audit · Attachment</nav></header><main><h1>{name}</h1><p class="muted">What AuthBoundry currently knows and protects.</p><p><a href="/auth/login">Open generated login</a> · <a href="/" target="_blank">Open protected application</a></p>
 <section class="card grid"><dl><dt>Authority</dt><dd class="ok">✓ Configured</dd></dl><dl><dt>Application</dt><dd class="{attach_class}">{application}</dd></dl><dl><dt>Protection</dt><dd class="{protect_class}">{protection}</dd></dl><dl><dt>Mode</dt><dd>Standalone</dd></dl></section>
 {attach_callout}<h2>Topology</h2><section class="card grid"><dl><dt>Studio + runtime</dt><dd id="studio-origin"></dd></dl><dl><dt>Protected application upstream</dt><dd>{upstream}</dd></dl></section><h2>Application</h2><section class="card grid"><dl><dt>Language</dt><dd>{language}</dd></dl><dl><dt>Framework</dt><dd>{framework}</dd></dl><dl><dt>Package manager</dt><dd>{package_manager}</dd></dl><dl><dt>Entrypoint</dt><dd>{entrypoint}</dd></dl><dl><dt>Run command</dt><dd>{run_command}</dd></dl><dl><dt>Upstream</dt><dd>{upstream}</dd></dl></section>
 <h2>Authority</h2><section class="card grid"><dl><dt>Providers</dt><dd>{providers}</dd></dl><dl><dt>Principals</dt><dd>Human · Service</dd></dl><dl><dt>Agents / Delegation</dt><dd>Disabled</dd></dl><dl><dt>Sessions · Policies · Audit</dt><dd>Runtime authority</dd></dl></section>
 <h2>Development users</h2><section class="card"><p class="muted">Local-only accounts generated for this repository. Credentials are stored in <code>.authboundry/development.json</code> and excluded from git.</p><table><thead><tr><td>User</td><td>Role</td><td>Password</td></tr></thead><tbody>{account_rows}</tbody></table><h3>Create user</h3><form id="create-user"><label>Username<br><input name="username" required></label><label>Email<br><input name="email" type="email" placeholder="optional"></label><label>Password<br><input name="password" type="password" minlength="12" required></label><label>Role<br><select name="role"><option value="user">user</option><option value="admin">admin</option></select></label><br><button type="submit">Create user</button><span id="create-user-status" class="muted"></span></form></section>
+<h2>Development mail</h2><section class="card"><p class="muted">Zero-configuration messages captured locally in <code>.authboundry/mail</code>.</p><table><thead><tr><td>Message</td><td>To</td><td>Action</td></tr></thead><tbody>{mail_rows}</tbody></table></section>
 <h2>Routes and access</h2><section class="card"><p class="muted">Choose who may cross the boundary for each route. Changes use AuthBoundry's reviewed proposal pipeline and take effect immediately.</p><table>{route_rows}</table></section><h2>Contract</h2><p class="muted">{fingerprint}</p></main>
 <dialog id="attach-dialog"><h2>Attach Application</h2><div id="attach-step"><p>Find a reachable application runtime. Reachability will not attach it.</p><label>Application upstream<br><input id="upstream" value="{upstream_input}" placeholder="http://127.0.0.1:3000"></label><p id="attach-status" class="muted"></p><button id="discover">Discover</button><button id="test-connection" class="secondary">Test Connection</button><button id="preview">Preview Attachment</button></div><div id="approval" hidden><h2>Attachment Preview</h2><pre id="preview-text"></pre><button id="cancel" class="secondary">Cancel</button><button id="approve">Approve Attachment</button></div></dialog>
 <script>
@@ -787,6 +836,7 @@ document.getElementById('test-boundary')?.addEventListener('click',async()=>{{co
             providers
         },
         account_rows = account_rows,
+        mail_rows = mail_rows,
         route_rows = route_rows,
         fingerprint = esc(&surface.contract_fingerprint),
         language = language,

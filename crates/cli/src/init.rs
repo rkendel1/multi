@@ -32,13 +32,13 @@ const DEFAULT_DECLARATION: &str = r#"use auth {
     password_change = enabled
     external_identity = enabled
     account_linking = enabled
-    email_verification = disabled
+    email_verification = enabled
     mfa = disabled
     passkeys = disabled
     device_management = disabled
     session_management = enabled
     profile = disabled
-    tenant_switching = enabled
+    tenant_switching = false
     recovery = disabled
   }
 
@@ -100,7 +100,7 @@ const AUTH_OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("isolation", "  isolation = \"strict\"\n"),
     ("agents", "  agents = false\n"),
     ("policy", "  policy = {}\n"),
-    ("experience", "  experience = {\n    sign_in = enabled\n    sign_up = enabled\n    sign_out = enabled\n    password = enabled\n    password_reset = enabled\n    password_change = enabled\n    external_identity = enabled\n    account_linking = enabled\n    email_verification = disabled\n    mfa = disabled\n    passkeys = disabled\n    device_management = disabled\n    session_management = enabled\n    profile = disabled\n    tenant_switching = enabled\n    recovery = disabled\n  }\n"),
+    ("experience", "  experience = {\n    sign_in = enabled\n    sign_up = enabled\n    sign_out = enabled\n    password = enabled\n    password_reset = enabled\n    password_change = enabled\n    external_identity = enabled\n    account_linking = enabled\n    email_verification = enabled\n    mfa = disabled\n    passkeys = disabled\n    device_management = disabled\n    session_management = enabled\n    profile = disabled\n    tenant_switching = false\n    recovery = disabled\n  }\n"),
     ("password", "  password = {\n    min_length = 12\n    max_length = 128\n    require_uppercase = false\n    require_lowercase = false\n    require_number = false\n    require_special_character = false\n    expiration_days = null\n    history_count = 5\n    allow_password_change = true\n    allow_password_reset = true\n  }\n"),
     ("storage", "  storage = {\n    authority = \"feltdb\"\n    audit = \"feltdb\"\n    reporting = \"authboundry_projection\"\n  }\n"),
     ("ui", "  ui = {\n    mode = \"generated\"\n    theme = \"authboundry-default\"\n    login = \"default\"\n    signup = \"default\"\n    account = \"default\"\n    password_forgot = \"default\"\n    password_reset = \"default\"\n    password_change = \"default\"\n    email_verification = \"default\"\n    account_links = \"default\"\n    profile = \"default\"\n    devices = \"default\"\n    sessions = \"default\"\n    mfa = \"default\"\n    passkeys = \"default\"\n    recovery = \"default\"\n    tenant = \"default\"\n    agents = \"default\"\n  }\n"),
@@ -128,6 +128,10 @@ const MANIFEST_DIR: &str = ".authboundry";
 const MANIFEST_FILE: &str = ".authboundry/adoption.json";
 const DEVELOPMENT_FILE: &str = ".authboundry/development.json";
 const INTEGRATION_FILE: &str = ".authboundry/integration.json";
+const PASSWORD_RESET_HTML: &str = include_str!("../../../templates/password-reset.html");
+const PASSWORD_RESET_TEXT: &str = include_str!("../../../templates/password-reset.txt");
+const EMAIL_VERIFICATION_HTML: &str = include_str!("../../../templates/email-verification.html");
+const EMAIL_VERIFICATION_TEXT: &str = include_str!("../../../templates/email-verification.txt");
 const DEFAULT_FILES: &[&str] = &[
     "authboundry.toml",
     "authport.toml",
@@ -715,6 +719,21 @@ fn build_plan(root: &Path, mode: InitMode) -> Result<InitPlan, CliError> {
     if !root.join(INTEGRATION_FILE).exists() {
         changes.push(integration_change(&application));
     }
+    for (name, contents) in [
+        ("password-reset.html", PASSWORD_RESET_HTML),
+        ("password-reset.txt", PASSWORD_RESET_TEXT),
+        ("email-verification.html", EMAIL_VERIFICATION_HTML),
+        ("email-verification.txt", EMAIL_VERIFICATION_TEXT),
+    ] {
+        let path = root.join("emails").join(name);
+        if !path.exists() {
+            changes.push(FileChange {
+                path,
+                before: None,
+                after: contents.to_string(),
+            });
+        }
+    }
     if let Some(change) = gitignore_change(root) {
         changes.push(change);
     }
@@ -1090,20 +1109,19 @@ fn development_password() -> String {
 fn gitignore_change(root: &Path) -> Option<FileChange> {
     let path = root.join(".gitignore");
     let before = fs::read_to_string(&path).ok();
-    if before
-        .as_deref()
-        .unwrap_or("")
-        .lines()
-        .any(|line| line.trim() == DEVELOPMENT_FILE)
-    {
+    let mut after = before.clone().unwrap_or_default();
+    for ignored in [DEVELOPMENT_FILE, ".authboundry/mail/"] {
+        if !after.lines().any(|line| line.trim() == ignored) {
+            if !after.is_empty() && !after.ends_with('\n') {
+                after.push('\n');
+            }
+            after.push_str(ignored);
+            after.push('\n');
+        }
+    }
+    if before.as_deref() == Some(after.as_str()) {
         return None;
     }
-    let mut after = before.clone().unwrap_or_default();
-    if !after.is_empty() && !after.ends_with('\n') {
-        after.push('\n');
-    }
-    after.push_str(DEVELOPMENT_FILE);
-    after.push('\n');
     Some(FileChange {
         path,
         before,

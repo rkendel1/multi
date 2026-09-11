@@ -1,0 +1,10 @@
+Verify your email
+
+Hello {{ user.name }},
+
+Please verify your email address to finish setting up your account.
+
+Verify your email:
+{{ verification_url }}
+
+This link expires at {{ expires_at }}.

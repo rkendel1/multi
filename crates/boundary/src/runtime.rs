@@ -21,7 +21,7 @@ use appport_auth_mesh_storage::{AuditEvent, StorageTopology};
 use appport_auth_mesh_surface::{AuthSurface, ProviderSurface};
 
 use crate::boundary::{AuthBoundary, Requirement};
-use crate::ceremony::{CeremonyKind, ChallengeStore, MailMessage, MailPort};
+use crate::ceremony::{CeremonyKind, ChallengeStore, MailMessage, MailPort, MemoryMailPort};
 use crate::clock::{Clock, SystemClock};
 use crate::context::AuthContext;
 use crate::control::{
@@ -146,7 +146,7 @@ impl AuthPortRuntime {
             registration: RegistrationPolicy::default(),
             authority: Arc::new(RwLock::new(LiveAuthorityState::new())),
             proposals: Arc::new(MemoryProposalStore::new()),
-            mail: None,
+            mail: Some(Arc::new(MemoryMailPort::default())),
             challenges: ChallengeStore::default(),
         })
     }
@@ -321,6 +321,22 @@ impl AuthPortRuntime {
 
         let authenticated = self.mesh.sign_in(&tenant_id, &response, now)?;
         self.ensure_password_not_expired(&authenticated.external, now)?;
+        if self.surface.features.email_verification
+            && authenticated
+                .external
+                .attributes
+                .get("email_verification_required")
+                .map(String::as_str)
+                == Some("true")
+            && authenticated.external.attributes.get("email_verified").map(String::as_str) != Some("true")
+        {
+            let _ = self.mesh.logout(&tenant_id, &authenticated.session.id, now);
+            return Err(AuthError::new(
+                AuthLifecycleStage::ProviderAuthentication,
+                "Please verify your email address before signing in.",
+                DenialReason::PolicyDenied,
+            ));
+        }
         let context = AuthContext::new(authenticated.session, authenticated.context);
         let credential = context.credential();
         Ok(SignInOutcome::Authenticated {
@@ -379,6 +395,12 @@ impl AuthPortRuntime {
                 .or_else(|| username.contains('@').then_some(username.as_str()))
             {
                 attributes.insert("email".to_string(), email.to_string());
+                if self.surface.features.email_verification {
+                    attributes.insert(
+                        "email_verification_required".to_string(),
+                        "true".to_string(),
+                    );
+                }
             }
             connector_impl
                 .create_account(&username, &password, attributes)
@@ -393,6 +415,13 @@ impl AuthPortRuntime {
             .sign_up(&tenant_id, &response, registration, now)?;
         if self.surface.features.email_verification {
             self.request_email_verification(request)?;
+            if request.field("email").is_some()
+                || request.field("username").is_some_and(|value| value.contains('@'))
+            {
+                // Signup proves credentials but does not grant a live session
+                // until the address has been verified.
+                let _ = self.mesh.logout(&tenant_id, &authenticated.session.id, now);
+            }
         }
         let context = AuthContext::new(authenticated.session, authenticated.context);
         let credential = context.credential();
@@ -502,13 +531,14 @@ impl AuthPortRuntime {
                 DenialReason::PolicyDenied,
             ));
         };
+        let expires_at = self.now() + 900;
         let token = self
             .challenges
             .issue(
                 CeremonyKind::PasswordReset,
                 &tenant_id,
                 &format!("{connector_id}\0{username}"),
-                self.now() + 900,
+                expires_at,
             )
             .map_err(|message| {
                 AuthError::new(
@@ -519,6 +549,13 @@ impl AuthPortRuntime {
             })?;
         let variables = HashMap::from([
             ("token".to_string(), token.clone()),
+            ("user.name".to_string(), username.clone()),
+            (
+                "app.name".to_string(),
+                "AuthBoundry application".to_string(),
+            ),
+            ("expires_at".to_string(), expires_at.to_string()),
+            ("support_url".to_string(), String::new()),
             (
                 "reset_url".to_string(),
                 format!("/auth/password/reset?token={token}"),
@@ -548,31 +585,32 @@ impl AuthPortRuntime {
             .required_field(request, "new_password")
             .or_else(|_| self.required_field(request, "password"))?;
         self.validate_password_with(&new_password, &policy)?;
-        let (tenant_id, account) = self
-            .challenges
-            .consume(&token, CeremonyKind::PasswordReset, self.now())
+        self.challenges
+            .consume_with(
+                &token,
+                CeremonyKind::PasswordReset,
+                self.now(),
+                |tenant_id, account| {
+                    let (connector_id, username) = account
+                        .split_once('\0')
+                        .ok_or_else(|| "invalid recovery challenge".to_string())?;
+                    let connector = self
+                        .mesh
+                        .registry()
+                        .get(connector_id)
+                        .map_err(|error| error.to_string())?;
+                    connector
+                        .reset_password(tenant_id, username, &new_password, &policy, self.now())
+                        .map_err(|error| error.to_string())
+                },
+            )
             .map_err(|message| {
                 AuthError::new(
                     AuthLifecycleStage::ProviderAuthentication,
                     message,
                     DenialReason::MissingCredential,
                 )
-            })?;
-        let (connector_id, username) = account.split_once('\0').ok_or_else(|| {
-            AuthError::new(
-                AuthLifecycleStage::RuntimeContext,
-                "invalid recovery challenge",
-                DenialReason::MissingCredential,
-            )
-        })?;
-        let connector = self
-            .mesh
-            .registry()
-            .get(connector_id)
-            .map_err(to_auth_error)?;
-        connector
-            .reset_password(&tenant_id, &username, &new_password, &policy, self.now())
-            .map_err(to_auth_error)
+            })
     }
 
     pub fn request_email_verification(&self, request: &BoundaryRequest) -> Result<(), AuthError> {
@@ -595,13 +633,14 @@ impl AuthPortRuntime {
                 DenialReason::PolicyDenied,
             ));
         };
+        let expires_at = self.now() + 3600;
         let token = self
             .challenges
             .issue(
                 CeremonyKind::EmailVerification,
                 &tenant,
                 &format!("{connector_id}\0{username}"),
-                self.now() + 3600,
+                expires_at,
             )
             .map_err(|message| {
                 AuthError::new(
@@ -617,6 +656,13 @@ impl AuthPortRuntime {
             tenant,
             variables: HashMap::from([
                 ("token".to_string(), token.clone()),
+                ("user.name".to_string(), username.clone()),
+                (
+                    "app.name".to_string(),
+                    "AuthBoundry application".to_string(),
+                ),
+                ("expires_at".to_string(), expires_at.to_string()),
+                ("support_url".to_string(), String::new()),
                 (
                     "verification_url".to_string(),
                     format!("/auth/email/verification?token={token}"),
@@ -635,29 +681,30 @@ impl AuthPortRuntime {
 
     pub fn verify_email(&self, request: &BoundaryRequest) -> Result<(), AuthError> {
         let token = self.required_field(request, "token")?;
-        let (_tenant, account) = self
-            .challenges
-            .consume(&token, CeremonyKind::EmailVerification, self.now())
+        self.challenges
+            .consume_with(
+                &token,
+                CeremonyKind::EmailVerification,
+                self.now(),
+                |_tenant, account| {
+                    let (connector_id, username) = account
+                        .split_once('\0')
+                        .ok_or_else(|| "invalid verification challenge".to_string())?;
+                    self.mesh
+                        .registry()
+                        .get(connector_id)
+                        .map_err(|error| error.to_string())?
+                        .mark_email_verified(username)
+                        .map_err(|error| error.to_string())
+                },
+            )
             .map_err(|message| {
                 AuthError::new(
                     AuthLifecycleStage::ProviderAuthentication,
                     message,
                     DenialReason::MissingCredential,
                 )
-            })?;
-        let (connector_id, username) = account.split_once('\0').ok_or_else(|| {
-            AuthError::new(
-                AuthLifecycleStage::RuntimeContext,
-                "invalid verification challenge",
-                DenialReason::MissingCredential,
-            )
-        })?;
-        self.mesh
-            .registry()
-            .get(connector_id)
-            .map_err(to_auth_error)?
-            .mark_email_verified(username)
-            .map_err(to_auth_error)
+            })
     }
 
     /// Revoke an outstanding opaque ceremony token without revealing whether it existed.
@@ -687,13 +734,11 @@ impl AuthPortRuntime {
     }
 
     fn require_mail_contract(&self, template: &str) -> Result<(), AuthError> {
-        let mail = self.contract.mail.as_ref().ok_or_else(|| {
-            AuthError::new(
-                AuthLifecycleStage::Configuration,
-                "authentication email requires a `use mail` contract",
-                DenialReason::PolicyDenied,
-            )
-        })?;
+        let Some(mail) = self.contract.mail.as_ref() else {
+            // Mail is a built-in capability. A declaration customizes its
+            // identity/templates; it is not required to activate the wiring.
+            return Ok(());
+        };
         if !mail.identities.contains_key("auth") || !mail.templates.contains_key(template) {
             return Err(AuthError::new(
                 AuthLifecycleStage::Configuration,

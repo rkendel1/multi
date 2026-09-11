@@ -22,7 +22,7 @@ pub mod upstream;
 pub use client::{cookie_value, send, send_upstream, ClientRequest};
 pub use control_types::{ApplicationDescription, RouteDescription, RouteProtection};
 pub use http::{HttpError, HttpRequest, HttpResponse, JsonValue};
-pub use mailport::RemoteMailPort;
+pub use mailport::{DevelopmentMailPort, RemoteMailPort};
 pub use proxy::UpstreamProxy;
 pub use router::{
     AppHandler, AppRequest, ApplicationBinding, PathPattern, RouteOutcome, RoutePolicy, RouteRule,
