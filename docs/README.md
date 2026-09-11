@@ -1,5 +1,7 @@
 # AuthBoundry documentation
 
+- [Package and CLI guide](package-and-cli-guide.md)
+
 AuthBoundry is the authority boundary for an application.
 
 - [Authority boundary](concepts/authority-boundary.md)
