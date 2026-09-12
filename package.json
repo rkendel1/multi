@@ -33,6 +33,14 @@
   "bin": {
     "authboundry": "bin/authboundry.js"
   },
+  "authboundry": {
+    "nativePlatforms": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-x64"
+    ]
+  },
   "files": [
     "bin/",
     "dist/",
@@ -43,7 +51,7 @@
   ],
   "scripts": {
     "build": "sh scripts/build-npm-package.sh",
-    "test": "node test/verify-feltdb-version.js && node test/felt-db-integration.test.js && node --test clients/js/authboundry.test.js test/npm-package.test.js && sh scripts/check-public-naming.sh",
+    "test": "node test/verify-feltdb-version.js && node test/felt-db-integration.test.js && node --test clients/js/authboundry.test.js test/npm-package.test.js test/cli-launcher.test.js && sh scripts/check-public-naming.sh",
     "prepack": "npm run build",
     "verify:package": "sh scripts/verify-npm-package.sh",
     "publish:packages": "sh scripts/publish-packages.sh"
@@ -78,5 +86,11 @@
   "dependencies": {
     "@feltdb/core": "0.10.0",
     "@mailerport/sdk": "^0.1.0"
+  },
+  "optionalDependencies": {
+    "@authboundry/core-darwin-arm64": "1.15.0",
+    "@authboundry/core-darwin-x64": "1.15.0",
+    "@authboundry/core-linux-arm64": "1.15.0",
+    "@authboundry/core-linux-x64": "1.15.0"
   }
 }

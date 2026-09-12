@@ -23,6 +23,14 @@ publish_if_missing() {
   fi
 }
 
+platform=$(node -p '`${process.platform}-${process.arch}`')
+runtime_package="packages/core-$platform"
+if [ -x "$runtime_package/bin/authboundry" ]; then
+  publish_if_missing "$runtime_package" "$@"
+else
+  echo "publish:packages: no built runtime package for $platform; skipping"
+fi
+
 publish_if_missing . "$@"
 publish_if_missing packages/authboundry "$@"
 

@@ -14,6 +14,15 @@ test("legacy TypeScript resolvers can locate public subpath declarations", () =>
   assert.equal(packageMetadata.typesVersions["*"].client[0], "./dist/client.d.ts");
 });
 
+test("package metadata declares supported native CLI platforms", () => {
+  assert.deepEqual(packageMetadata.authboundry.nativePlatforms, [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+  ]);
+});
+
 test("public client remains a projection of server authority", async () => {
   const client = createAuthBoundry({ fetch: async () => ({
     ok: true, status: 200, text: async () => JSON.stringify({ allowed: false }),

@@ -6,3 +6,4 @@ state/
 state-test/
 state-test-*
 node_modules/
+packages/core-*/bin/authboundry
