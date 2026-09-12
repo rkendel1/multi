@@ -13,6 +13,21 @@ authentication experience and Studio, verifying a migration, and reversing it.
 The canonical package is `@authboundry/core`. The unscoped `authboundry`
 package is a compatibility shim and should not be used for new installations.
 
+## Supported platforms
+
+The `authboundry` command included with `@authboundry/core` ships native
+runtimes for these platforms:
+
+| Operating system | Architecture | Node platform key |
+| --- | --- | --- |
+| Linux | x64 | `linux-x64` |
+| Linux | arm64 | `linux-arm64` |
+| macOS | x64 | `darwin-x64` |
+| macOS | arm64 | `darwin-arm64` |
+
+For local development or CI, set `AUTHBOUNDRY_CLI_PATH` to an alternate
+`authboundry` binary if you need to test a runtime before it is packaged.
+
 ## Install
 
 Install the package in the application repository:

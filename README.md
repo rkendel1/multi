@@ -280,8 +280,18 @@ GitHub OAuth, Microsoft, Apple, SAML, SCIM, MFA, passkeys, production key
 infrastructure, PostgreSQL, Redis,
 distributed sessions, a polished component library, TLS termination or
 production-grade proxy features. Local identity, storage, session-id and proxy
-signature mechanisms are for development. The packaged native CLI currently
-supports macOS on Apple silicon.
+signature mechanisms are for development.
+
+### Supported CLI platforms
+
+The packaged native CLI supports:
+
+| Operating system | Architecture |
+| --- | --- |
+| Linux | x64, arm64 |
+| macOS | x64, arm64 |
+
+Windows native binaries are not included in this release.
 
 ## Development
 
