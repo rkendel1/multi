@@ -3,8 +3,10 @@
 //! Every scenario here goes through the real HTTP surface — in process for the
 //! embedded placement, over a socket for the standalone one.
 
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use appport_auth_mesh_boundary::{
     AuthBoundary, BindingMode, BoundaryRequest, Method as BoundaryMethod, SessionCredential,
@@ -12,12 +14,15 @@ use appport_auth_mesh_boundary::{
 };
 use appport_auth_mesh_contract::{DelegationId, TenantContext};
 use appport_auth_mesh_runtime::MemoryStores;
-use appport_auth_mesh_server::http::HttpResponse;
+use appport_auth_mesh_server::http::{HttpRequest, HttpResponse};
 use appport_auth_mesh_server::proxy::headers;
+use appport_auth_mesh_server::{serve, AuthPortServer, HttpHandler, ServerHandle, UpstreamProxy};
 use appport_auth_mesh_storage::memory::MemoryAuditLog;
 use appport_auth_mesh_storage::{AuditEvent, AuditLog, StorageError};
 use saas_basic::bootstrap::{bootstrap, bootstrap_with_stores, Deployment};
-use saas_basic::demo::{embedded, scenario, standalone, Standalone};
+use saas_basic::demo::{
+    application_policy, embedded, scenario, standalone, Standalone, PROXY_SECRET,
+};
 use saas_basic::support::{
     field, reason, session_credential, sign_in, Call, EmbeddedTransport, HttpTransport, Transport,
 };
@@ -30,6 +35,66 @@ fn embedded_fixture() -> (Deployment, Box<dyn Transport>) {
 fn alice(transport: &dyn Transport) -> String {
     session_credential(&sign_in(transport, "acme", "alice", "alice-secret"))
         .expect("Alice's sign-in issues a session")
+}
+
+#[derive(Default)]
+struct RecordingUpstream {
+    calls: AtomicUsize,
+    last: Mutex<Option<HttpRequest>>,
+}
+
+impl RecordingUpstream {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn last(&self) -> HttpRequest {
+        self.last
+            .lock()
+            .expect("recorded request lock")
+            .clone()
+            .expect("upstream received a request")
+    }
+}
+
+impl HttpHandler for RecordingUpstream {
+    fn handle(&self, request: &HttpRequest) -> HttpResponse {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock().expect("recorded request lock") = Some(request.clone());
+        HttpResponse::json(200, "{\"upstream\": true}")
+    }
+}
+
+struct RecordingStandalone {
+    deployment: Deployment,
+    address: SocketAddr,
+    upstream: Arc<RecordingUpstream>,
+    _authport: ServerHandle,
+    _upstream: ServerHandle,
+}
+
+fn recording_standalone() -> RecordingStandalone {
+    let deployment = bootstrap(BindingMode::Standalone).expect("deployment builds");
+    let upstream = Arc::new(RecordingUpstream::default());
+    let upstream_server = serve(upstream.clone(), "127.0.0.1:0").expect("upstream binds");
+    let proxy = UpstreamProxy::new(
+        upstream_server.address(),
+        application_policy(),
+        PROXY_SECRET,
+    );
+    let server = Arc::new(
+        AuthPortServer::new(deployment.runtime.clone(), Arc::new(proxy))
+            .with_tenants(&["acme", "globex"]),
+    );
+    let authport = serve(server, "127.0.0.1:0").expect("AuthBoundry binds");
+
+    RecordingStandalone {
+        deployment,
+        address: authport.address(),
+        upstream,
+        _authport: authport,
+        _upstream: upstream_server,
+    }
 }
 
 fn agent(transport: &dyn Transport) -> String {
@@ -64,6 +129,117 @@ fn unauthenticated_requests_are_rejected() {
     // A path with no route policy is refused rather than passed through.
     let unlisted = transport.call(&Call::get("/admin/secrets"));
     assert!(matches!(unlisted.status, 403 | 404));
+}
+
+#[test]
+fn standalone_rejects_unauthorized_requests_before_upstream() {
+    let standalone = recording_standalone();
+    let transport = HttpTransport(standalone.address);
+
+    let missing = transport.call(&Call::get("/invoices"));
+    assert_eq!(missing.status, 401);
+    assert_eq!(reason(&missing), "missing_credential");
+
+    let invalid = transport.call(&Call::get("/invoices").with_session("apt_acme.not-a-session"));
+    assert_eq!(invalid.status, 401);
+    assert_eq!(reason(&invalid), "invalid_session");
+
+    assert_eq!(standalone.upstream.calls(), 0);
+}
+
+#[test]
+fn standalone_strips_every_client_authority_header_and_injects_verified_context() {
+    let standalone = recording_standalone();
+    let transport = HttpTransport(standalone.address);
+    let credential = alice(&transport);
+
+    let response = transport.call(
+        &Call::post("/invoices?source=test", "{\"reference\": \"INV-FORGED\"}")
+            .with_session(&credential)
+            .with_header(headers::PRINCIPAL, "attacker")
+            .with_header(headers::PRINCIPAL_KIND, "service")
+            .with_header(headers::TENANT, "attacker-tenant")
+            .with_header(headers::CLAIMS, "role=admin")
+            .with_header(headers::CAPABILITIES, "billing.charge")
+            .with_header(headers::DELEGATION, "attacker-delegation")
+            .with_header(headers::DELEGATED_BY, "attacker-delegator")
+            .with_header(headers::CONTEXT, "{\"principal\":\"attacker\"}")
+            .with_header(headers::SIGNATURE, "attacker-signature")
+            .with_header(headers::PROXY_SIGNATURE, "attacker-proxy-signature"),
+    );
+
+    assert_eq!(response.status, 200);
+    assert_eq!(standalone.upstream.calls(), 1);
+    let upstream = standalone.upstream.last();
+
+    assert_eq!(upstream.method, BoundaryMethod::Post);
+    assert_eq!(upstream.path, "/invoices");
+    assert_eq!(
+        upstream.query.get("source").map(String::as_str),
+        Some("test")
+    );
+    assert!(upstream.body.ends_with(b"INV-FORGED\"}"));
+
+    assert_eq!(
+        upstream.headers.get(headers::PRINCIPAL).map(String::as_str),
+        Some(standalone.deployment.alice.as_str())
+    );
+    assert_eq!(
+        upstream
+            .headers
+            .get(headers::PRINCIPAL_KIND)
+            .map(String::as_str),
+        Some("human")
+    );
+    assert_eq!(
+        upstream.headers.get(headers::TENANT).map(String::as_str),
+        Some("acme")
+    );
+    assert!(upstream
+        .headers
+        .get(headers::CLAIMS)
+        .expect("verified claims")
+        .contains("role=owner"));
+    assert!(upstream
+        .headers
+        .get(headers::CAPABILITIES)
+        .expect("verified capabilities")
+        .contains("invoice.create"));
+    assert!(!upstream.headers.contains_key(headers::DELEGATION));
+    assert!(!upstream.headers.contains_key(headers::DELEGATED_BY));
+    assert_ne!(
+        upstream.headers.get(headers::CONTEXT).map(String::as_str),
+        Some("{\"principal\":\"attacker\"}")
+    );
+    assert!(UpstreamProxy::verify(
+        PROXY_SECRET,
+        upstream.headers.get(headers::CONTEXT).expect("context"),
+        upstream.headers.get(headers::SIGNATURE).expect("signature")
+    ));
+    assert_eq!(
+        upstream.headers.get(headers::PROXY_SIGNATURE),
+        Some(&UpstreamProxy::sign(PROXY_SECRET, "proxy"))
+    );
+
+    for forbidden in [
+        "attacker",
+        "service",
+        "attacker-tenant",
+        "role=admin",
+        "billing.charge",
+        "attacker-delegation",
+        "attacker-delegator",
+        "attacker-signature",
+        "attacker-proxy-signature",
+    ] {
+        assert!(
+            !upstream
+                .headers
+                .values()
+                .any(|value| value.contains(forbidden)),
+            "forged value `{forbidden}` reached upstream"
+        );
+    }
 }
 
 // 2, 3, 4. Sign-in works, the session yields authority, and the application is

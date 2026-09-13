@@ -163,7 +163,8 @@ Called out so they are not mistaken for production posture:
 
 - The local connector stores a stable non-secret digest, not a password hash.
 - Session ids come from a per-process random seed rather than a CSPRNG.
-- The standalone proxy signs the injected context with a keyed FNV digest, which
-  is enough to keep an upstream on a trusted network from accepting forged
-  context, and is not a MAC.
+- The standalone example uses a keyed FNV digest to help its upstream reject
+  accidental direct calls, but that digest is not a MAC and the
+  `x-authboundry-*` headers are not self-authenticating credentials. Production
+  authority derives from the trusted AuthBoundry-to-upstream deployment boundary.
 - All state is in memory.
