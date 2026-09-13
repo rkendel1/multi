@@ -4,8 +4,8 @@
 //! embedded placement, over a socket for the standalone one.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use appport_auth_mesh_boundary::{
@@ -16,13 +16,13 @@ use appport_auth_mesh_contract::{DelegationId, TenantContext};
 use appport_auth_mesh_runtime::MemoryStores;
 use appport_auth_mesh_server::http::{HttpRequest, HttpResponse};
 use appport_auth_mesh_server::proxy::headers;
-use appport_auth_mesh_server::{
-    serve, AuthPortServer, HttpHandler, ServerHandle, UpstreamProxy,
-};
+use appport_auth_mesh_server::{serve, AuthPortServer, HttpHandler, ServerHandle, UpstreamProxy};
 use appport_auth_mesh_storage::memory::MemoryAuditLog;
 use appport_auth_mesh_storage::{AuditEvent, AuditLog, StorageError};
 use saas_basic::bootstrap::{bootstrap, bootstrap_with_stores, Deployment};
-use saas_basic::demo::{application_policy, embedded, scenario, standalone, Standalone, PROXY_SECRET};
+use saas_basic::demo::{
+    application_policy, embedded, scenario, standalone, Standalone, PROXY_SECRET,
+};
 use saas_basic::support::{
     field, reason, session_credential, sign_in, Call, EmbeddedTransport, HttpTransport, Transport,
 };
@@ -77,7 +77,11 @@ fn recording_standalone() -> RecordingStandalone {
     let deployment = bootstrap(BindingMode::Standalone).expect("deployment builds");
     let upstream = Arc::new(RecordingUpstream::default());
     let upstream_server = serve(upstream.clone(), "127.0.0.1:0").expect("upstream binds");
-    let proxy = UpstreamProxy::new(upstream_server.address(), application_policy(), PROXY_SECRET);
+    let proxy = UpstreamProxy::new(
+        upstream_server.address(),
+        application_policy(),
+        PROXY_SECRET,
+    );
     let server = Arc::new(
         AuthPortServer::new(deployment.runtime.clone(), Arc::new(proxy))
             .with_tenants(&["acme", "globex"]),
@@ -170,7 +174,10 @@ fn standalone_strips_every_client_authority_header_and_injects_verified_context(
 
     assert_eq!(upstream.method, BoundaryMethod::Post);
     assert_eq!(upstream.path, "/invoices");
-    assert_eq!(upstream.query.get("source").map(String::as_str), Some("test"));
+    assert_eq!(
+        upstream.query.get("source").map(String::as_str),
+        Some("test")
+    );
     assert!(upstream.body.ends_with(b"INV-FORGED\"}"));
 
     assert_eq!(
@@ -210,9 +217,7 @@ fn standalone_strips_every_client_authority_header_and_injects_verified_context(
         upstream.headers.get(headers::SIGNATURE).expect("signature")
     ));
     assert_eq!(
-        upstream
-            .headers
-            .get(headers::PROXY_SIGNATURE),
+        upstream.headers.get(headers::PROXY_SIGNATURE),
         Some(&UpstreamProxy::sign(PROXY_SECRET, "proxy"))
     );
 

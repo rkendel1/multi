@@ -70,6 +70,73 @@ If FeltDB cannot initialize with the configured deployment:
 - There is NO fallback to in-memory state
 - No production authentication state depends on process memory
 
+## Application migration contract
+
+AuthBoundry and FeltDB can be adopted independently. AuthBoundry is the authority
+boundary in front of the application; FeltDB is the durable state substrate the
+application may adopt when it is ready.
+
+Existing application:
+
+```text
+Application
+   ↓
+existing authentication
+   ↓
+existing database
+```
+
+Introduce AuthBoundry first:
+
+```text
+Users
+   ↓
+AuthBoundry
+   ↓
+Application
+   ↓
+Existing State
+```
+
+At this stage AuthBoundry owns identity, authentication, authority, tenancy,
+authorization and delegation. The application still owns application semantics
+and can keep using its existing state store.
+
+Introduce FeltDB later:
+
+```text
+Users
+   ↓
+AuthBoundry
+   ↓
+Application
+   ↓
+FeltDB
+```
+
+Move to managed FeltDB when operationally appropriate:
+
+```text
+Users
+   ↓
+AuthBoundry
+   ↓
+Application
+   ↓
+Managed FeltDB
+```
+
+The migration preserves the application-facing semantic and authority contracts:
+
+- AuthBoundry owns identity, authentication, authority, tenancy, authorization
+  and delegation.
+- FeltDB owns durable application state, tenant-scoped persistence and
+  history/provenance where applicable.
+- The application owns application semantics.
+
+Applications are not required to adopt FeltDB at the same time they adopt
+AuthBoundry, and AuthBoundry remains application-agnostic.
+
 ## Current State (Phase 1)
 
 ✅ Dependency pinned exactly  
